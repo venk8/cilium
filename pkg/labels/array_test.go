@@ -381,3 +381,16 @@ func TestLabelArray_Intersects(t *testing.T) {
 	assert.True(t, la.Intersects(lb))
 
 }
+
+func BenchmarkLabelArray_Sort(b *testing.B) {
+	b.ReportAllocs()
+	raw := []string{"k8s:z=1", "k8s:a=2", "k8s:m=3", "k8s:b=4", "k8s:y=5", "k8s:c=6", "k8s:x=7", "k8s:d=8"}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		la := make(LabelArray, len(raw))
+		for j, s := range raw {
+			la[j] = ParseLabel(s)
+		}
+		la.Sort()
+	}
+}
