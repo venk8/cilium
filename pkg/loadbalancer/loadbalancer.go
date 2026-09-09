@@ -5,6 +5,7 @@ package loadbalancer
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -656,6 +657,7 @@ func NewServiceNameInCluster(cluster, namespace, name string) ServiceName {
 		func() ServiceName {
 			// ServiceName not found from cache, create it.
 			var b strings.Builder
+			b.Grow(len(cluster) + len(namespace) + len(name) + 2)
 			pos := 0
 			if cluster != "" {
 				n, _ := b.WriteString(cluster)
@@ -731,22 +733,11 @@ func (n *ServiceName) Equal(other ServiceName) bool {
 }
 
 func (n ServiceName) Compare(other ServiceName) int {
-	switch {
-	case n.Namespace() < other.Namespace():
-		return -1
-	case n.Namespace() > other.Namespace():
-		return 1
-	case n.Name() < other.Name():
-		return -1
-	case n.Name() > other.Name():
-		return 1
-	case n.Cluster() < other.Cluster():
-		return -1
-	case n.Cluster() > other.Cluster():
-		return 1
-	default:
-		return 0
-	}
+	return cmp.Or(
+		cmp.Compare(n.Namespace(), other.Namespace()),
+		cmp.Compare(n.Name(), other.Name()),
+		cmp.Compare(n.Cluster(), other.Cluster()),
+	)
 }
 
 func (n ServiceName) String() string {
