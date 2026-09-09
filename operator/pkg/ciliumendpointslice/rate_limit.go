@@ -4,10 +4,11 @@
 package ciliumendpointslice
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -59,8 +60,8 @@ func parseDynamicRateLimit(cfg string) (dynamicRateLimit, error) {
 		return nil, err
 	}
 
-	sort.Slice(dynamicRateLimit, func(i, j int) bool {
-		return dynamicRateLimit[i].Nodes < dynamicRateLimit[j].Nodes
+	slices.SortFunc(dynamicRateLimit, func(a, b rateLimit) int {
+		return cmp.Compare(a.Nodes, b.Nodes)
 	})
 	return dynamicRateLimit, nil
 }

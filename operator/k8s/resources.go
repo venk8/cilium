@@ -103,7 +103,7 @@ func CiliumNodeIPIndexFunc(obj any) ([]string, error) {
 	if !ok {
 		return nil, fmt.Errorf("expected *cilium_v2.CiliumNode, got %T", obj)
 	}
-	indices := make([]string, 0)
+	indices := make([]string, 0, len(node.Spec.Addresses))
 	for _, addr := range node.Spec.Addresses {
 		if addr.AddrType() == addressing.NodeInternalIP ||
 			addr.AddrType() == addressing.NodeExternalIP {
