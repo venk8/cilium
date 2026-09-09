@@ -735,3 +735,19 @@ func BenchmarkSelectorCacheIdentityUpdates(b *testing.B) {
 
 	}
 }
+
+func BenchmarkIdentitySelectorSelects(b *testing.B) {
+	sc := testNewSelectorCache(b, hivetest.Logger(b), nil)
+	sel := newIdentitySelector(sc, "test", nil)
+	sel.cachedSelections = make(map[identity.NumericIdentity]struct{}, 1000)
+	for i := 1; i <= 1000; i++ {
+		sel.cachedSelections[identity.NumericIdentity(i*2)] = struct{}{}
+	}
+	sel.updateSelections()
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		sel.Selects(identity.NumericIdentity((i % 2000) + 1))
+	}
+}
