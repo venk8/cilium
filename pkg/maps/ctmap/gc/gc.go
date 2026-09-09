@@ -253,13 +253,11 @@ func (gc *GC) enableWithConfig(
 		var gcPrev time.Time
 		var forceFullGCTTL time.Time
 		var cachedGCInterval time.Duration
+		epsMap := make(map[netip.Addr]*endpoint.Endpoint)
 		for {
+			clear(epsMap)
 			var (
 				maxDeleteRatio float64
-
-				// epsMap contains an IP -> EP mapping. It is used by EmitCTEntryCB to
-				// avoid doing gc.endpointsManager.LookupIP, which is more expensive.
-				epsMap = make(map[netip.Addr]*endpoint.Endpoint)
 
 				// gcStart and emitEntryCB are used to populate DNSZombieMapping fields
 				// on endpoints. These hold IPs that are deletable in the DNS caches,
