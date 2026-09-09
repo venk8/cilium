@@ -6,10 +6,11 @@
 package route
 
 import (
+	"cmp"
 	"fmt"
 	"log/slog"
 	"net"
-	"sort"
+	"slices"
 
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
@@ -522,8 +523,8 @@ func lookupDefaultRoute(logger *slog.Logger, family int) (netlink.Route, error) 
 		return netlink.Route{}, fmt.Errorf("Unable to list direct routes: %w", err)
 	}
 
-	sort.Slice(routes, func(i, j int) bool {
-		return routes[i].Priority < routes[j].Priority
+	slices.SortFunc(routes, func(a, b netlink.Route) int {
+		return cmp.Compare(a.Priority, b.Priority)
 	})
 
 	switch {

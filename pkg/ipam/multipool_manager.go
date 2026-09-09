@@ -9,8 +9,8 @@ import (
 	"log/slog"
 	"maps"
 	"net/netip"
+	"cmp"
 	"slices"
-	"sort"
 	"strconv"
 	"sync"
 
@@ -683,11 +683,11 @@ func (m *multiPoolManager) updateLocalNode(ctx context.Context) error {
 		})
 	}
 
-	sort.Slice(requested, func(i, j int) bool {
-		return requested[i].Pool < requested[j].Pool
+	slices.SortFunc(requested, func(a, b types.IPAMPoolRequest) int {
+		return cmp.Compare(a.Pool, b.Pool)
 	})
-	sort.Slice(allocated, func(i, j int) bool {
-		return allocated[i].Pool < allocated[j].Pool
+	slices.SortFunc(allocated, func(a, b types.IPAMPoolAllocation) int {
+		return cmp.Compare(a.Pool, b.Pool)
 	})
 
 	var newPoolsSpec types.IPAMPoolSpec
