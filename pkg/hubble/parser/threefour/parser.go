@@ -540,8 +540,16 @@ func decodeEthernet(ethernet *layers.Ethernet) *pb.Ethernet {
 func decodeIPv4(ipv4 *layers.IPv4) (ip *pb.IP, src, dst netip.Addr) {
 	// Ignore invalid IPs - getters will handle invalid values.
 	// IPs can be empty for Ethernet-only packets.
-	src, _ = netipx.FromStdIP(ipv4.SrcIP)
-	dst, _ = netipx.FromStdIP(ipv4.DstIP)
+	if len(ipv4.SrcIP) == 4 {
+		src = netip.AddrFrom4([4]byte(ipv4.SrcIP))
+	} else {
+		src, _ = netipx.FromStdIP(ipv4.SrcIP)
+	}
+	if len(ipv4.DstIP) == 4 {
+		dst = netip.AddrFrom4([4]byte(ipv4.DstIP))
+	} else {
+		dst, _ = netipx.FromStdIP(ipv4.DstIP)
+	}
 	return &pb.IP{
 		Source:      ipv4.SrcIP.String(),
 		Destination: ipv4.DstIP.String(),
@@ -552,8 +560,16 @@ func decodeIPv4(ipv4 *layers.IPv4) (ip *pb.IP, src, dst netip.Addr) {
 func decodeIPv6(ipv6 *layers.IPv6) (ip *pb.IP, src, dst netip.Addr) {
 	// Ignore invalid IPs - getters will handle invalid values.
 	// IPs can be empty for Ethernet-only packets.
-	src, _ = netipx.FromStdIP(ipv6.SrcIP)
-	dst, _ = netipx.FromStdIP(ipv6.DstIP)
+	if len(ipv6.SrcIP) == 16 {
+		src = netip.AddrFrom16([16]byte(ipv6.SrcIP))
+	} else {
+		src, _ = netipx.FromStdIP(ipv6.SrcIP)
+	}
+	if len(ipv6.DstIP) == 16 {
+		dst = netip.AddrFrom16([16]byte(ipv6.DstIP))
+	} else {
+		dst, _ = netipx.FromStdIP(ipv6.DstIP)
+	}
 	return &pb.IP{
 		Source:      ipv6.SrcIP.String(),
 		Destination: ipv6.DstIP.String(),
