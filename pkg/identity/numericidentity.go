@@ -4,11 +4,12 @@
 package identity
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"math"
 	"net/netip"
-	"sort"
+	"slices"
 	"strconv"
 	"unsafe"
 
@@ -501,8 +502,8 @@ func GetAllReservedIdentities() []NumericIdentity {
 	}
 	// Because our reservedIdentities source is a go map, and go map order is
 	// randomized, we need to sort the resulting slice before returning it.
-	sort.Slice(identities, func(i, j int) bool {
-		return identities[i].Uint32() < identities[j].Uint32()
+	slices.SortFunc(identities, func(a, b NumericIdentity) int {
+		return cmp.Compare(a.Uint32(), b.Uint32())
 	})
 	return identities
 }
