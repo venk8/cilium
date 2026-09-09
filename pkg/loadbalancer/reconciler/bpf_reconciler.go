@@ -4,6 +4,7 @@
 package reconciler
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -11,7 +12,6 @@ import (
 	"log/slog"
 	"net/netip"
 	"slices"
-	"sort"
 	"strings"
 	"sync/atomic"
 
@@ -1624,27 +1624,20 @@ func (ops *BPFOps) sortedBackends(fe *loadbalancer.Frontend) []backendWithRevisi
 		}
 		bes = append(bes, backendWithRevision{be, rev})
 	}
-	sort.Slice(bes, func(i, j int) bool {
-		a, b := bes[i], bes[j]
-		switch {
-		case !a.Unhealthy && b.Unhealthy:
-			return true
-		case a.Unhealthy && !b.Unhealthy:
-			return false
-		case a.State < b.State:
-			return true
-		case a.State > b.State:
-			return false
-		default:
-			switch a.Address.AddrCluster().Compare(b.Address.AddrCluster()) {
-			case -1:
-				return true
-			case 0:
-				return a.Address.Port() < b.Address.Port()
-			default:
-				return false
+	slices.SortFunc(bes, func(a, b backendWithRevision) int {
+		if a.Unhealthy != b.Unhealthy {
+			if !a.Unhealthy {
+				return -1
 			}
+			return 1
 		}
+		if c := cmp.Compare(a.State, b.State); c != 0 {
+			return c
+		}
+		if c := a.Address.AddrCluster().Compare(b.Address.AddrCluster()); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.Address.Port(), b.Address.Port())
 	})
 	return bes
 }
