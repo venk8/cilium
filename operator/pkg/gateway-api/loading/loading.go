@@ -4,10 +4,11 @@
 package loading
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"log/slog"
-	"sort"
+	"slices"
 
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -478,8 +479,11 @@ func sortedBackendRefKeys(keys map[types.NamespacedName]struct{}) []types.Namesp
 	for key := range keys {
 		names = append(names, key)
 	}
-	sort.Slice(names, func(i, j int) bool {
-		return names[i].String() < names[j].String()
+	slices.SortFunc(names, func(a, b types.NamespacedName) int {
+		if c := cmp.Compare(a.Namespace, b.Namespace); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.Name, b.Name)
 	})
 	return names
 }
@@ -758,15 +762,19 @@ func listenerSetFQR(ls *gatewayv1.ListenerSet) model.FullyQualifiedResource {
 }
 
 func sortListenerSets(sets []gatewayv1.ListenerSet) {
-	sort.Slice(sets, func(i, j int) bool {
-		ti := sets[i].CreationTimestamp.Time
-		tj := sets[j].CreationTimestamp.Time
+	slices.SortFunc(sets, func(a, b gatewayv1.ListenerSet) int {
+		ti := a.CreationTimestamp.Time
+		tj := b.CreationTimestamp.Time
 		if !ti.Equal(tj) {
-			return ti.Before(tj)
+			if ti.Before(tj) {
+				return -1
+			}
+			return 1
 		}
-		ni := sets[i].GetNamespace() + "/" + sets[i].GetName()
-		nj := sets[j].GetNamespace() + "/" + sets[j].GetName()
-		return ni < nj
+		if c := cmp.Compare(a.GetNamespace(), b.GetNamespace()); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.GetName(), b.GetName())
 	})
 }
 
