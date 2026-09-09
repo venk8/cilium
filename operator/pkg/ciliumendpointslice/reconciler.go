@@ -192,7 +192,6 @@ func (r *reconciler) reconcileCESCreate(ctx context.Context, cesName CESName) (e
 // Update an existing CES
 func (r *reconciler) reconcileCESUpdate(ctx context.Context, cesName CESName, cesObj *cilium_v2a1.CiliumEndpointSlice) (err error) {
 	r.logger.DebugContext(ctx, "Reconciling CES Update", logfields.CESName, cesName.string())
-	updatedCES := cesObj.DeepCopy()
 	cepInserted := 0
 	cepRemoved := 0
 	cepUpdated := 0
@@ -201,7 +200,7 @@ func (r *reconciler) reconcileCESUpdate(ctx context.Context, cesName CESName, ce
 	cepsAssignedToCES := r.cesManager.getCEPinCES(cesName)
 	// Final endpoints list. CES endpoints will be set to this list.
 	updatedEndpoints := make([]cilium_v2a1.CoreCiliumEndpoint, 0, len(cepsAssignedToCES))
-	cepNameToCEP := make(map[CEPName]*cilium_v2a1.CoreCiliumEndpoint)
+	cepNameToCEP := make(map[CEPName]*cilium_v2a1.CoreCiliumEndpoint, len(cepsAssignedToCES))
 	// Get the CEPs objects from the CEP Store and map the names to them
 	for _, cepName := range cepsAssignedToCES {
 		ccep := r.endpointGetter.getCoreEndpointFromStore(cepName)
@@ -217,8 +216,8 @@ func (r *reconciler) reconcileCESUpdate(ctx context.Context, cesName CESName, ce
 	}
 	// Grab metrics about number of inserted, updated and deleted CEPs and
 	// determine whether CES needs to be updated at all.
-	for _, ep := range updatedCES.Endpoints {
-		epName := GetCEPNameFromCCEP(&ep, updatedCES.Namespace)
+	for _, ep := range cesObj.Endpoints {
+		epName := GetCEPNameFromCCEP(&ep, cesObj.Namespace)
 		if r.cesManager.isCEPinCES(epName, cesName) {
 			cepInserted = cepInserted - 1
 			if !ep.DeepEqual(cepNameToCEP[epName]) {
@@ -228,7 +227,6 @@ func (r *reconciler) reconcileCESUpdate(ctx context.Context, cesName CESName, ce
 			cepRemoved = cepRemoved + 1
 		}
 	}
-	updatedCES.Endpoints = updatedEndpoints
 	r.logger.DebugContext(ctx,
 		fmt.Sprintf("Inserted %d endpoints, updated %d endpoints, removed %d endpoints",
 			cepInserted,
@@ -239,8 +237,7 @@ func (r *reconciler) reconcileCESUpdate(ctx context.Context, cesName CESName, ce
 
 	cesEqual := cepInserted == 0 && cepUpdated == 0 && cepRemoved == 0
 	ns := r.cesManager.getCESNamespace(cesName)
-	if updatedCES.Namespace != ns {
-		updatedCES.Namespace = ns
+	if cesObj.Namespace != ns {
 		cesEqual = false
 	}
 
@@ -248,6 +245,10 @@ func (r *reconciler) reconcileCESUpdate(ctx context.Context, cesName CESName, ce
 	r.metrics.CiliumEndpointsChangeCount.WithLabelValues(LabelValueCEPRemove).Observe(float64(cepRemoved))
 
 	if !cesEqual {
+		updatedCES := cesObj.DeepCopy()
+		updatedCES.Endpoints = updatedEndpoints
+		updatedCES.Namespace = ns
+
 		r.logger.DebugContext(ctx, "CES changed, updating", logfields.CESName, cesName.string())
 		// Call the client API, to Create CESs
 		if _, err = r.client.CiliumEndpointSlices().Update(
@@ -416,7 +417,11 @@ func (r *slimReconciler) getEndpointEncryptionKey(pod *slim_corev1.Pod) (int, er
 }
 
 func (r *reconciler) getNamedPorts(pod *slim_corev1.Pod) models.NamedPorts {
-	namedPorts := make(models.NamedPorts, 0)
+	portCount := 0
+	for _, container := range pod.Spec.Containers {
+		portCount += len(container.Ports)
+	}
+	namedPorts := make(models.NamedPorts, 0, portCount)
 	for _, container := range pod.Spec.Containers {
 		for _, port := range container.Ports {
 			if port.Name == "" {
