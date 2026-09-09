@@ -4,8 +4,9 @@
 package v2
 
 import (
+	"cmp"
 	"net"
-	"sort"
+	"slices"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -115,7 +116,7 @@ type ControllerList []ControllerStatus
 
 // Sort sorts the ControllerList by controller name
 func (c ControllerList) Sort() {
-	sort.Slice(c, func(i, j int) bool { return c[i].Name < c[j].Name })
+	slices.SortFunc(c, func(a, b ControllerStatus) int { return cmp.Compare(a.Name, b.Name) })
 }
 
 // ControllerStatus is the status of a failing controller.
@@ -205,17 +206,12 @@ type IdentityList []IdentityTuple
 
 // Sort sorts a list IdentityList by numeric identity, port and protocol.
 func (a IdentityList) Sort() {
-	sort.Slice(a, func(i, j int) bool {
-		if a[i].Identity < a[j].Identity {
-			return true
-		} else if a[i].Identity == a[j].Identity {
-			if a[i].DestPort < a[j].DestPort {
-				return true
-			} else if a[i].DestPort == a[j].DestPort {
-				return a[i].Protocol < a[j].Protocol
-			}
-		}
-		return false
+	slices.SortFunc(a, func(x, y IdentityTuple) int {
+		return cmp.Or(
+			cmp.Compare(x.Identity, y.Identity),
+			cmp.Compare(x.DestPort, y.DestPort),
+			cmp.Compare(x.Protocol, y.Protocol),
+		)
 	})
 }
 
@@ -321,13 +317,11 @@ type AddressPairList []*AddressPair
 
 // Sort sorts an AddressPairList by IPv4 and IPv6 address.
 func (a AddressPairList) Sort() {
-	sort.Slice(a, func(i, j int) bool {
-		if a[i].IPV4 < a[j].IPV4 {
-			return true
-		} else if a[i].IPV4 == a[j].IPV4 {
-			return a[i].IPV6 < a[j].IPV6
-		}
-		return false
+	slices.SortFunc(a, func(x, y *AddressPair) int {
+		return cmp.Or(
+			cmp.Compare(x.IPV4, y.IPV4),
+			cmp.Compare(x.IPV6, y.IPV6),
+		)
 	})
 }
 
