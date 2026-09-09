@@ -10,8 +10,9 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"cmp"
 	"os"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -410,8 +411,8 @@ func FormatHealthStatusResponse(w io.Writer, sr *models.HealthStatusResponse, al
 	}
 
 	nodes := sr.Nodes
-	sort.Slice(nodes, func(i, j int) bool {
-		return strings.Compare(nodes[i].Name, nodes[j].Name) < 0
+	slices.SortFunc(nodes, func(a, b *models.NodeStatus) int {
+		return cmp.Compare(a.Name, b.Name)
 	})
 	for _, node := range nodes {
 		if printedLines == maxLines {

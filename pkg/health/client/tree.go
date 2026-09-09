@@ -5,10 +5,10 @@ package client
 
 import (
 	"bytes"
+	"cmp"
 	"fmt"
 	"io"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -139,8 +139,8 @@ func computeMaxLevel(level int, n *node) int {
 }
 
 func dumpNodes(w io.Writer, level, maxLevel int, levelsEnded []int, nodes []*node) {
-	sort.Slice(nodes, func(i, j int) bool {
-		return nodes[i].val < nodes[j].val
+	slices.SortFunc(nodes, func(a, b *node) int {
+		return cmp.Compare(a.val, b.val)
 	})
 
 	for i, node := range nodes {

@@ -4,10 +4,11 @@
 package client
 
 import (
+	"cmp"
 	"fmt"
 	"io"
 	"os"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -25,8 +26,8 @@ func GetAndFormatModulesHealth(w io.Writer, ss []types.Status, verbose bool, pre
 	// Although status' is received from the statedb remote table according to
 	// the order in which it's queried (in our case, by primary index identifier).
 	// We sort this to ensure order stability regardless.
-	sort.Slice(ss, func(i, j int) bool {
-		return ss[i].ID.String() < ss[j].ID.String()
+	slices.SortFunc(ss, func(a, b types.Status) int {
+		return cmp.Compare(a.ID.String(), b.ID.String())
 	})
 	tally := make(map[types.Level]int, 4)
 	for _, s := range ss {
