@@ -4,9 +4,10 @@
 package reconciler
 
 import (
+	"cmp"
 	"errors"
 	"log/slog"
-	"sort"
+	"slices"
 
 	"github.com/cilium/hive/cell"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -195,12 +196,12 @@ func FamilyAdvertisementsEqual(first, second PeerFamilyAdvertisements) bool {
 			return false
 		}
 
-		sort.Slice(familyAdverts, func(i, j int) bool {
-			return familyAdverts[i].AdvertisementType < familyAdverts[j].AdvertisementType
+		slices.SortFunc(familyAdverts, func(a, b v2.BGPAdvertisement) int {
+			return cmp.Compare(a.AdvertisementType, b.AdvertisementType)
 		})
 
-		sort.Slice(otherFamilyAdverts, func(i, j int) bool {
-			return otherFamilyAdverts[i].AdvertisementType < otherFamilyAdverts[j].AdvertisementType
+		slices.SortFunc(otherFamilyAdverts, func(a, b v2.BGPAdvertisement) int {
+			return cmp.Compare(a.AdvertisementType, b.AdvertisementType)
 		})
 
 		for i, advert := range familyAdverts {

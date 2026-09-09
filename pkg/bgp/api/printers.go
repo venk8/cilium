@@ -4,11 +4,12 @@
 package api
 
 import (
+	"cmp"
 	"encoding/base64"
 	"fmt"
 	"io"
 	"os"
-	"sort"
+	"slices"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -21,11 +22,11 @@ import (
 // PrintBGPPeersTable prints table of provided BGP peers in the provided tab writer.
 func PrintBGPPeersTable(w *tabwriter.Writer, peers []*models.BgpPeer, printUptime bool) {
 	// sort by local AS, if peers from same AS then sort by peer address.
-	sort.Slice(peers, func(i, j int) bool {
-		if peers[i].LocalAsn != peers[j].LocalAsn {
-			return peers[i].LocalAsn < peers[j].LocalAsn
+	slices.SortFunc(peers, func(a, b *models.BgpPeer) int {
+		if c := cmp.Compare(a.LocalAsn, b.LocalAsn); c != 0 {
+			return c
 		}
-		return peers[i].PeerAddress < peers[j].PeerAddress
+		return cmp.Compare(a.PeerAddress, b.PeerAddress)
 	})
 
 	if printUptime {
@@ -93,14 +94,14 @@ func PrintBGPPeersCaps(w io.Writer, peers []*models.BgpPeer) {
 // PrintBGPRoutesTable prints table of provided BGP routes in the provided tab writer.
 func PrintBGPRoutesTable(w *tabwriter.Writer, routes []*models.BgpRoute, printPeer, printAge bool) error {
 	// sort first by ASN, then by neighbor, then by prefix
-	sort.Slice(routes, func(i, j int) bool {
-		if routes[i].RouterAsn != routes[j].RouterAsn {
-			return routes[i].RouterAsn < routes[j].RouterAsn
+	slices.SortFunc(routes, func(a, b *models.BgpRoute) int {
+		if c := cmp.Compare(a.RouterAsn, b.RouterAsn); c != 0 {
+			return c
 		}
-		if routes[i].Neighbor != routes[j].Neighbor {
-			return routes[i].Neighbor < routes[j].Neighbor
+		if c := cmp.Compare(a.Neighbor, b.Neighbor); c != 0 {
+			return c
 		}
-		return routes[i].Prefix < routes[j].Prefix
+		return cmp.Compare(a.Prefix, b.Prefix)
 	})
 
 	fmt.Fprintf(w, "VRouter\t")
@@ -138,11 +139,11 @@ func PrintBGPRoutesTable(w *tabwriter.Writer, routes []*models.BgpRoute, printPe
 // PrintBGPRoutePoliciesTable prints table of provided BGP route policies in the provided tab writer.
 func PrintBGPRoutePoliciesTable(w *tabwriter.Writer, policies []*models.BgpRoutePolicy) {
 	// sort by router ASN, if policies from same ASN then sort by policy name.
-	sort.Slice(policies, func(i, j int) bool {
-		if policies[i].RouterAsn != policies[j].RouterAsn {
-			return policies[i].RouterAsn < policies[j].RouterAsn
+	slices.SortFunc(policies, func(a, b *models.BgpRoutePolicy) int {
+		if c := cmp.Compare(a.RouterAsn, b.RouterAsn); c != 0 {
+			return c
 		}
-		return policies[i].Name < policies[j].Name
+		return cmp.Compare(a.Name, b.Name)
 	})
 
 	fmt.Fprintln(w, "VRouter\tPolicy Name\tType\tMatch Peers\tMatch Families\tMatch Prefixes (Min..Max Len)\tRIB Action\tPath Actions")
@@ -263,8 +264,8 @@ func printLocalRemoteCaps(w io.Writer, localCaps, remoteCaps []bgppacket.Paramet
 			caps = append(caps, cap)
 		}
 	}
-	sort.Slice(caps, func(i, j int) bool {
-		return caps[i].Code() < caps[j].Code()
+	slices.SortFunc(caps, func(a, b bgppacket.ParameterCapabilityInterface) int {
+		return cmp.Compare(a.Code(), b.Code())
 	})
 
 	mCapHeader := false
