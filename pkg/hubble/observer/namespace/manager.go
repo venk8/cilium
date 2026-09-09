@@ -4,7 +4,8 @@
 package namespace
 
 import (
-	"sort"
+	"cmp"
+	"slices"
 
 	observerpb "github.com/cilium/cilium/api/v1/observer"
 	"github.com/cilium/cilium/pkg/lock"
@@ -55,13 +56,11 @@ func (m *namespaceManager) GetNamespaces() []*observerpb.Namespace {
 	}
 	m.mu.RUnlock()
 
-	sort.Slice(namespaces, func(i, j int) bool {
-		a := namespaces[i]
-		b := namespaces[j]
-		if a.Cluster != b.Cluster {
-			return a.Cluster < b.Cluster
-		}
-		return a.Namespace < b.Namespace
+	slices.SortFunc(namespaces, func(a, b *observerpb.Namespace) int {
+		return cmp.Or(
+			cmp.Compare(a.Cluster, b.Cluster),
+			cmp.Compare(a.Namespace, b.Namespace),
+		)
 	})
 	return namespaces
 }
