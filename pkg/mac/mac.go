@@ -27,6 +27,21 @@ type MAC [6]byte
 
 const hexDigit = "0123456789abcdef"
 
+// AppendTo appends the string representation of m to b and returns the resulting slice.
+func (m MAC) AppendTo(b []byte) []byte {
+	if !m.IsValid() {
+		return b
+	}
+	return append(b,
+		hexDigit[m[0]>>4], hexDigit[m[0]&0xf], ':',
+		hexDigit[m[1]>>4], hexDigit[m[1]&0xf], ':',
+		hexDigit[m[2]>>4], hexDigit[m[2]&0xf], ':',
+		hexDigit[m[3]>>4], hexDigit[m[3]&0xf], ':',
+		hexDigit[m[4]>>4], hexDigit[m[4]&0xf], ':',
+		hexDigit[m[5]>>4], hexDigit[m[5]&0xf],
+	)
+}
+
 // String returns the string representation of m, or the empty string if m is
 // unset.
 func (m MAC) String() string {
@@ -34,24 +49,8 @@ func (m MAC) String() string {
 		return ""
 	}
 	var buf [17]byte
-	buf[0] = hexDigit[m[0]>>4]
-	buf[1] = hexDigit[m[0]&0xf]
-	buf[2] = ':'
-	buf[3] = hexDigit[m[1]>>4]
-	buf[4] = hexDigit[m[1]&0xf]
-	buf[5] = ':'
-	buf[6] = hexDigit[m[2]>>4]
-	buf[7] = hexDigit[m[2]&0xf]
-	buf[8] = ':'
-	buf[9] = hexDigit[m[3]>>4]
-	buf[10] = hexDigit[m[3]&0xf]
-	buf[11] = ':'
-	buf[12] = hexDigit[m[4]>>4]
-	buf[13] = hexDigit[m[4]&0xf]
-	buf[14] = ':'
-	buf[15] = hexDigit[m[5]>>4]
-	buf[16] = hexDigit[m[5]&0xf]
-	return string(buf[:])
+	b := m.AppendTo(buf[:0])
+	return string(b)
 }
 
 // IsValid reports whether m is set. Devices without a layer 2 address, such as

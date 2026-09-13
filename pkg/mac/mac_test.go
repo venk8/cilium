@@ -222,3 +222,22 @@ func TestOmitZero(t *testing.T) {
 	require.NoError(t, err)
 	require.JSONEq(t, `{"mac":"11:12:23:34:45:56"}`, string(d))
 }
+
+func BenchmarkMAC_String(b *testing.B) {
+	m := MustParseMAC("11:12:23:34:45:56")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		_ = m.String()
+	}
+}
+
+func BenchmarkMAC_AppendTo(b *testing.B) {
+	m := MustParseMAC("11:12:23:34:45:56")
+	buf := make([]byte, 0, 32)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		_ = m.AppendTo(buf[:0])
+	}
+}
