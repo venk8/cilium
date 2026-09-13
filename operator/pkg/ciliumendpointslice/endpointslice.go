@@ -397,7 +397,7 @@ func (c *SlimController) runCiliumNodesUpdater(events <-chan resource.Event[*cil
 func runCiliumNodesUpdater(ctrlr *Controller,
 	events <-chan resource.Event[*cilium_api_v2.CiliumNode],
 	handleEvent func(event resource.Event[*cilium_api_v2.CiliumNode])) error {
-	knownNodes := make(map[resource.Key]struct{})
+	knownNodes := make(map[resource.Key]struct{}, len(events))
 	for event := range events {
 		if handleEvent != nil {
 			handleEvent(event)
@@ -526,7 +526,7 @@ func (c *SlimController) onPodDelete(pod *slim_corev1.Pod) {
 func (c *DefaultController) syncCESsInLocalCache(cepEvents <-chan resource.Event[*cilium_api_v2.CiliumEndpoint],
 	cesEvents <-chan resource.Event[*capi_v2a1.CiliumEndpointSlice]) error {
 	// Phase 1: snapshot live CEPs from the CEP replay.
-	livecep := map[resource.Key]*cilium_api_v2.CiliumEndpoint{}
+	livecep := make(map[resource.Key]*cilium_api_v2.CiliumEndpoint, len(cepEvents))
 cepLoop:
 	for event := range cepEvents {
 		switch event.Kind {
@@ -603,7 +603,7 @@ func (c *SlimController) syncCESsInLocalCache(
 	cesEvents <-chan resource.Event[*capi_v2a1.CiliumEndpointSlice],
 	podEvents <-chan resource.Event[*slim_corev1.Pod]) error {
 	// Phase 1. Drain CiliumNode events up to Sync to build an IP → node-name map.
-	nodeIPToName := make(map[string]string)
+	nodeIPToName := make(map[string]string, len(nodeEvents))
 nodeLoop:
 	for event := range nodeEvents {
 		switch event.Kind {
@@ -627,7 +627,7 @@ nodeLoop:
 	}
 
 	// Phase 2. Drain CiliumIdentity events up to Sync to build the CID → labels map.
-	cidToLabels := make(map[CID]Labels)
+	cidToLabels := make(map[CID]Labels, len(identityEvents))
 identityLoop:
 	for event := range identityEvents {
 		switch event.Kind {
@@ -652,7 +652,7 @@ identityLoop:
 	// map here — placement into CESes must wait until after the CES-drain
 	// has populated the CES cache; otherwise AddPodMapping would find no
 	// existing CES and create a phantom one.
-	livepods := make(map[CEPName]*slim_corev1.Pod)
+	livepods := make(map[CEPName]*slim_corev1.Pod, len(podEvents))
 podLoop:
 	for event := range podEvents {
 		switch event.Kind {
