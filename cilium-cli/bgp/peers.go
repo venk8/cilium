@@ -4,6 +4,7 @@
 package bgp
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,7 +13,6 @@ import (
 	"maps"
 	"os"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 	"text/tabwriter"
@@ -112,7 +112,7 @@ func (s *Status) fetchPeeringStateFromPod(ctx context.Context, pod *corev1.Pod) 
 		return nil, fmt.Errorf("failed to fetch bgp state from %s: %w", pod.Name, err)
 	}
 
-	bgpPeers := make([]*models.BgpPeer, 0)
+	var bgpPeers []*models.BgpPeer
 
 	err = json.Unmarshal(output.Bytes(), &bgpPeers)
 	if err != nil {
@@ -147,8 +147,11 @@ func printSummary(out io.Writer, peersPerNode map[string][]*models.BgpPeer) {
 	// sort peers per node
 	for _, peers := range peersPerNode {
 		// sort by local AS, if peers from same AS then sort by peer address.
-		sort.Slice(peers, func(i, j int) bool {
-			return peers[i].LocalAsn < peers[j].LocalAsn || peers[i].PeerAddress < peers[j].PeerAddress
+		slices.SortFunc(peers, func(a, b *models.BgpPeer) int {
+			return cmp.Or(
+				cmp.Compare(a.LocalAsn, b.LocalAsn),
+				cmp.Compare(a.PeerAddress, b.PeerAddress),
+			)
 		})
 	}
 
@@ -200,8 +203,11 @@ func printAllPeersCaps(out io.Writer, peersPerNode map[string][]*models.BgpPeer)
 	// sort peers per node
 	for _, peers := range peersPerNode {
 		// sort by local AS, if peers from same AS then sort by peer address.
-		sort.Slice(peers, func(i, j int) bool {
-			return peers[i].LocalAsn < peers[j].LocalAsn || peers[i].PeerAddress < peers[j].PeerAddress
+		slices.SortFunc(peers, func(a, b *models.BgpPeer) int {
+			return cmp.Or(
+				cmp.Compare(a.LocalAsn, b.LocalAsn),
+				cmp.Compare(a.PeerAddress, b.PeerAddress),
+			)
 		})
 	}
 	for _, node := range nodes {

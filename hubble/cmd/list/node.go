@@ -7,7 +7,7 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"sort"
+	"slices"
 	"strings"
 	"text/tabwriter"
 
@@ -74,8 +74,8 @@ func runListNodes(ctx context.Context, cmd *cobra.Command, conn *grpc.ClientConn
 	}
 
 	nodes := res.GetNodes()
-	sort.Slice(nodes, func(i, j int) bool {
-		return nodes[i].GetName() < nodes[j].GetName()
+	slices.SortFunc(nodes, func(a, b *observerpb.Node) int {
+		return strings.Compare(a.GetName(), b.GetName())
 	})
 	switch listOpts.output {
 	case "json":
