@@ -419,43 +419,75 @@ func (k *K8sPodWatcher) updateExistingK8sPodV1(ctx context.Context, oldK8sPod, n
 }
 
 func (k *K8sPodWatcher) reconcilePodEndpoints(oldK8sPod, newK8sPod *slim_corev1.Pod, forceLabels bool) error {
+	// Check annotation updates.
+	oldAnno := oldK8sPod.ObjectMeta.Annotations
+	newAnno := newK8sPod.ObjectMeta.Annotations
+	var (
+		annoChangedBandwidth  bool
+		annoChangedPriority   bool
+		annoChangedNoTrack    bool
+		annoChangedFIBTableID bool
+		annoChangedDisableSIP bool
+		annotationsChanged    bool
+	)
+	if !maps.Equal(oldAnno, newAnno) {
+		annoChangedBandwidth = oldAnno[bandwidth.EgressBandwidth] != newAnno[bandwidth.EgressBandwidth] ||
+			oldAnno[bandwidth.IngressBandwidth] != newAnno[bandwidth.IngressBandwidth]
+		annoChangedPriority = oldAnno[bandwidth.Priority] != newAnno[bandwidth.Priority]
+		annoChangedNoTrack = oldAnno[annotation.NoTrack] != newAnno[annotation.NoTrack] ||
+			oldAnno[annotation.NoTrackAlias] != newAnno[annotation.NoTrackAlias]
+		annoChangedFIBTableID = option.Config.EnableFibTableIDAnnotation &&
+			oldAnno[annotation.FIBTableID] != newAnno[annotation.FIBTableID]
+		annoChangedDisableSIP = oldAnno[annotation.DisableSourceIPVerification] != newAnno[annotation.DisableSourceIPVerification]
+		annotationsChanged = annoChangedBandwidth || annoChangedPriority || annoChangedNoTrack || annoChangedFIBTableID || annoChangedDisableSIP
+	}
+
+	var (
+		oldPodLabels  map[string]string
+		newPodLabels  map[string]string
+		labelsChanged bool
+	)
+	if !maps.Equal(oldK8sPod.ObjectMeta.Labels, newK8sPod.Labels) {
+		oldK8sPodLabels, _ := labelsfilter.Filter(labels.Map2Labels(oldK8sPod.ObjectMeta.Labels, labels.LabelSourceK8s))
+		// old labels are stripped to avoid grandfathering in special labels
+		oldPodLabels = k8sUtils.StripPodSpecialLabels(oldK8sPodLabels.K8sStringMap())
+
+		strippedNewLabels := k8sUtils.StripPodSpecialLabels(newK8sPod.Labels)
+
+		newK8sPodLabels, _ := labelsfilter.Filter(labels.Map2Labels(strippedNewLabels, labels.LabelSourceK8s))
+		newPodLabels = newK8sPodLabels.K8sStringMap()
+		labelsChanged = !maps.Equal(oldPodLabels, newPodLabels)
+	}
+
+	// Nothing changed.
+	if !annotationsChanged && !labelsChanged && !forceLabels {
+		if k.logger.Enabled(context.Background(), slog.LevelDebug) {
+			k.logger.Debug(
+				"Pod does not have any relevant changes",
+				logfields.K8sPodName, newK8sPod.ObjectMeta.Name,
+				logfields.K8sNamespace, newK8sPod.ObjectMeta.Namespace,
+				logfields.OldLabels, oldK8sPod.GetObjectMeta().GetLabels(),
+				logfields.OldAnnotations, oldK8sPod.GetObjectMeta().GetAnnotations(),
+				logfields.NewLabels, newK8sPod.GetObjectMeta().GetLabels(),
+				logfields.NewAnnotations, newK8sPod.GetObjectMeta().GetAnnotations(),
+			)
+		}
+		return nil
+	}
+
 	scopedLog := k.logger.With(
 		logfields.K8sPodName, newK8sPod.ObjectMeta.Name,
 		logfields.K8sNamespace, newK8sPod.ObjectMeta.Namespace,
 	)
 
-	// Check annotation updates.
-	oldAnno := oldK8sPod.ObjectMeta.Annotations
-	newAnno := newK8sPod.ObjectMeta.Annotations
-	annoChangedBandwidth := !k8s.AnnotationsEqual([]string{bandwidth.EgressBandwidth}, oldAnno, newAnno) || !k8s.AnnotationsEqual([]string{bandwidth.IngressBandwidth}, oldAnno, newAnno)
-	annoChangedPriority := !k8s.AnnotationsEqual([]string{bandwidth.Priority}, oldAnno, newAnno)
-	annoChangedNoTrack := !k8s.AnnotationsEqual([]string{annotation.NoTrack, annotation.NoTrackAlias}, oldAnno, newAnno)
-	annoChangedFIBTableID := option.Config.EnableFibTableIDAnnotation &&
-		!k8s.AnnotationsEqual([]string{annotation.FIBTableID}, oldAnno, newAnno)
-	annoChangedDisableSIP := !k8s.AnnotationsEqual([]string{annotation.DisableSourceIPVerification}, oldAnno, newAnno)
-	annotationsChanged := annoChangedBandwidth || annoChangedPriority || annoChangedNoTrack || annoChangedFIBTableID || annoChangedDisableSIP
+	if forceLabels && !labelsChanged {
+		oldK8sPodLabels, _ := labelsfilter.Filter(labels.Map2Labels(oldK8sPod.ObjectMeta.Labels, labels.LabelSourceK8s))
+		oldPodLabels = k8sUtils.StripPodSpecialLabels(oldK8sPodLabels.K8sStringMap())
 
-	// Check label updates too.
-	oldK8sPodLabels, _ := labelsfilter.Filter(labels.Map2Labels(oldK8sPod.ObjectMeta.Labels, labels.LabelSourceK8s))
-	// old labels are stripped to avoid grandfathering in special labels
-	oldPodLabels := k8sUtils.StripPodSpecialLabels(oldK8sPodLabels.K8sStringMap())
+		strippedNewLabels := k8sUtils.StripPodSpecialLabels(newK8sPod.Labels)
 
-	strippedNewLabels := k8sUtils.StripPodSpecialLabels(newK8sPod.Labels)
-
-	newK8sPodLabels, _ := labelsfilter.Filter(labels.Map2Labels(strippedNewLabels, labels.LabelSourceK8s))
-	newPodLabels := newK8sPodLabels.K8sStringMap()
-	labelsChanged := !maps.Equal(oldPodLabels, newPodLabels)
-
-	// Nothing changed.
-	if !annotationsChanged && !labelsChanged && !forceLabels {
-		scopedLog.Debug(
-			"Pod does not have any relevant changes",
-			logfields.OldLabels, oldK8sPod.GetObjectMeta().GetLabels(),
-			logfields.OldAnnotations, oldK8sPod.GetObjectMeta().GetAnnotations(),
-			logfields.NewLabels, newK8sPod.GetObjectMeta().GetLabels(),
-			logfields.NewAnnotations, newK8sPod.GetObjectMeta().GetAnnotations(),
-		)
-		return nil
+		newK8sPodLabels, _ := labelsfilter.Filter(labels.Map2Labels(strippedNewLabels, labels.LabelSourceK8s))
+		newPodLabels = newK8sPodLabels.K8sStringMap()
 	}
 
 	podNSName := k8sUtils.GetObjNamespaceName(&newK8sPod.ObjectMeta)

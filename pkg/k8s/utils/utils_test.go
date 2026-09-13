@@ -643,3 +643,32 @@ func Test_filterPodLabels(t *testing.T) {
 		})
 	}
 }
+
+func BenchmarkValidIPs_Single(b *testing.B) {
+	status := slim_corev1.PodStatus{
+		PodIP: "10.244.0.15",
+		PodIPs: []slim_corev1.PodIP{
+			{IP: "10.244.0.15"},
+		},
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = ValidIPs(status)
+	}
+}
+
+func BenchmarkValidIPs_DualStack(b *testing.B) {
+	status := slim_corev1.PodStatus{
+		PodIP: "10.244.0.15",
+		PodIPs: []slim_corev1.PodIP{
+			{IP: "10.244.0.15"},
+			{IP: "fd00::15"},
+		},
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = ValidIPs(status)
+	}
+}
