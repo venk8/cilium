@@ -883,11 +883,10 @@ func (ipc *IPCache) lookupByIPRLocked(IP string) (Identity, bool) {
 // identity in the provided IPCache, and returns the corresponding security
 // identity as well as whether the entry exists in the IPCache.
 func (ipc *IPCache) LookupByPrefixRLocked(prefix string) (identity Identity, exists bool) {
-	if _, cidr, err := net.ParseCIDR(prefix); err == nil {
-		// If it's a fully specfied prefix, attempt to find the host
-		ones, bits := cidr.Mask.Size()
-		if ones == bits {
-			identity, exists = ipc.ipToIdentityCache[cidr.IP.String()]
+	if p, err := netip.ParsePrefix(prefix); err == nil {
+		// If it's a fully specified prefix, attempt to find the host
+		if p.IsSingleIP() {
+			identity, exists = ipc.ipToIdentityCache[p.Addr().String()]
 			if exists {
 				return
 			}
@@ -932,7 +931,7 @@ func (ipc *IPCache) LookupSecIDByIP(ip netip.Addr) (id Identity, ok bool) {
 		// entries derived by a single address cidr-range will not have been
 		// found by the above lookup
 		cidr, _ := ip.Prefix(prefixLen)
-		if id, ok = ipc.LookupByPrefixRLocked(cidr.String()); ok {
+		if id, ok = ipc.ipToIdentityCache[cidr.String()]; ok {
 			return id, ok
 		}
 	}

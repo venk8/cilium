@@ -20,6 +20,9 @@ type PrefixLengthCounter struct {
 	v4 IntCounter
 	v6 IntCounter
 
+	s4 []int
+	s6 []int
+
 	maxUniquePrefixes4 int
 	maxUniquePrefixes6 int
 }
@@ -30,6 +33,8 @@ func NewPrefixLengthCounter(maxUniquePrefixes6, maxUniquePrefixes4 int) *PrefixL
 	return &PrefixLengthCounter{
 		v4:                 make(IntCounter),
 		v6:                 make(IntCounter),
+		s4:                 []int{},
+		s6:                 []int{},
 		maxUniquePrefixes4: maxUniquePrefixes4,
 		maxUniquePrefixes6: maxUniquePrefixes6,
 	}
@@ -132,6 +137,12 @@ func (p *PrefixLengthCounter) Add(prefixes []netip.Prefix) (bool, error) {
 	// Set and return whether anything changed
 	p.v4 = newV4Counter
 	p.v6 = newV6Counter
+	if newV4Prefixes {
+		p.s4 = p.v4.ToBPFData()
+	}
+	if newV6Prefixes {
+		p.s6 = p.v6.ToBPFData()
+	}
 	return newV4Prefixes || newV6Prefixes, nil
 }
 
@@ -143,22 +154,30 @@ func (p *PrefixLengthCounter) Delete(prefixes []netip.Prefix) (changed bool) {
 	p.Lock()
 	defer p.Unlock()
 
+	var v4Changed, v6Changed bool
 	for _, prefix := range prefixes {
 		ones := prefix.Bits()
 		bits := prefix.Addr().BitLen()
 		switch bits {
 		case net.IPv4len * 8:
 			if p.v4.Delete(ones) {
-				changed = true
+				v4Changed = true
 			}
 		case net.IPv6len * 8:
 			if p.v6.Delete(ones) {
-				changed = true
+				v6Changed = true
 			}
 		}
 	}
 
-	return changed
+	if v4Changed {
+		p.s4 = p.v4.ToBPFData()
+	}
+	if v6Changed {
+		p.s6 = p.v6.ToBPFData()
+	}
+
+	return v4Changed || v6Changed
 }
 
 // ToBPFData converts the counter into a set of prefix lengths that the BPF
@@ -167,5 +186,5 @@ func (p *PrefixLengthCounter) ToBPFData() (s6, s4 []int) {
 	p.RLock()
 	defer p.RUnlock()
 
-	return p.v6.ToBPFData(), p.v4.ToBPFData()
+	return p.s6, p.s4
 }

@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
+	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/source"
 )
@@ -47,4 +48,38 @@ func BenchmarkInjectLabels(b *testing.B) {
 
 	// sanity checks
 	require.Len(b, ipc.ipToIdentityCache, b.N)
+}
+
+func BenchmarkLookupSecIDByIP(b *testing.B) {
+	s := setupIPCacheTestSuite(b)
+	ipc := s.IPIdentityCache
+
+	_, _ = ipc.Upsert("10.0.0.0/8", nil, 0, nil, Identity{
+		ID:     identity.NumericIdentity(100),
+		Source: source.Kubernetes,
+	})
+
+	lookupIP := netip.MustParseAddr("10.1.2.3")
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = ipc.LookupSecIDByIP(lookupIP)
+	}
+}
+
+func BenchmarkLookupByPrefix(b *testing.B) {
+	s := setupIPCacheTestSuite(b)
+	ipc := s.IPIdentityCache
+
+	_, _ = ipc.Upsert("10.0.0.0/8", nil, 0, nil, Identity{
+		ID:     identity.NumericIdentity(100),
+		Source: source.Kubernetes,
+	})
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = ipc.LookupByPrefix("10.0.0.0/8")
+	}
 }
