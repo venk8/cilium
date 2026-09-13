@@ -4,6 +4,7 @@
 package policy
 
 import (
+	"cmp"
 	"iter"
 	"log/slog"
 	"slices"
@@ -1709,6 +1710,7 @@ func (mc *MapChanges) AccumulateMapDeletesByID(tier types.Tier, basePriority typ
 	tierMaxPrecedence := basePriority.ToDenyPrecedence()
 	mc.mutex.Lock()
 	defer mc.mutex.Unlock()
+	mc.changes = slices.Grow(mc.changes, len(deletes))
 	for _, id := range deletes {
 		mc.changes = append(mc.changes, mapChange{
 			Add:               false,
@@ -1738,6 +1740,7 @@ func (mc *MapChanges) AccumulateMapChanges(tier types.Tier, basePriority types.P
 	tierMaxPrecedence := basePriority.ToDenyPrecedence()
 	mc.mutex.Lock()
 	defer mc.mutex.Unlock()
+	mc.changes = slices.Grow(mc.changes, len(adds)+len(deletes))
 	for _, nid := range adds {
 		mc.changes = append(mc.changes, mapChange{
 			Add:               true,
@@ -1766,6 +1769,7 @@ func (mc *MapChanges) SyncMapChanges(selectors SelectorSnapshot) {
 		// Only apply changes after the initial version
 
 		if selectors.After(mc.firstRev) {
+			mc.synced = slices.Grow(mc.synced, len(mc.changes))
 			mc.synced = append(mc.synced, mc.changes...)
 			mc.selectors = selectors
 			mc.logger.Debug(
@@ -1790,11 +1794,27 @@ func (mc *MapChanges) detach() {
 	mc.mutex.Unlock()
 }
 
+var (
+	emptyKeys        = Keys{}
+	emptyMapStateMap = mapStateMap{}
+)
+
 // consumeMapChanges transfers the incremental changes from MapChanges to the caller,
 // while applying the changes to PolicyMapState.
 func (mc *MapChanges) consumeMapChanges(p *EndpointPolicy, features policyFeatures) (SelectorSnapshot, ChangeState) {
 	mc.mutex.Lock()
 	defer mc.mutex.Unlock()
+
+	if len(mc.synced) == 0 {
+		version := mc.selectors
+		mc.selectors.Invalidate()
+		return version, ChangeState{
+			Adds:    emptyKeys,
+			Deletes: emptyKeys,
+			old:     emptyMapStateMap,
+		}
+	}
+
 	changes := ChangeState{
 		Adds:    make(Keys, len(mc.synced)),
 		Deletes: make(Keys, len(mc.synced)),
@@ -1804,7 +1824,7 @@ func (mc *MapChanges) consumeMapChanges(p *EndpointPolicy, features policyFeatur
 	// sort changes in mc.synced so that we will insert higher tier rules first.
 	slices.SortFunc(mc.synced, func(a, b mapChange) int {
 		// lower tier values come first
-		return int(a.Tier - b.Tier)
+		return cmp.Compare(a.Tier, b.Tier)
 	})
 
 	for i := range mc.synced {
