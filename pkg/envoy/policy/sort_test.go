@@ -269,3 +269,18 @@ func TestSortPortNetworkPolicies(t *testing.T) {
 	SortPortNetworkPolicies(slice)
 	require.Equal(t, expected, slice)
 }
+
+func BenchmarkSortPortNetworkPolicies(b *testing.B) {
+	slice := make([]*cilium.PortNetworkPolicy, 6)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		slice[0] = PortNetworkPolicy6
+		slice[1] = PortNetworkPolicy5
+		slice[2] = PortNetworkPolicy4
+		slice[3] = PortNetworkPolicy3
+		slice[4] = PortNetworkPolicy2
+		slice[5] = PortNetworkPolicy1
+		SortPortNetworkPolicies(slice)
+	}
+}
