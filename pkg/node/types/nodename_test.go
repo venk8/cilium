@@ -11,6 +11,9 @@ import (
 )
 
 func TestHostname(t *testing.T) {
+	oldName := GetName()
+	t.Cleanup(func() { SetName(oldName) })
+
 	h, err := os.Hostname()
 
 	// Unmodified node-name value is either os.Hostname if available or

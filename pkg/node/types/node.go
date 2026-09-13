@@ -252,13 +252,9 @@ func (n *Node) SetNodeInternalIP(newAddr net.IP) {
 }
 
 func (n *Node) RemoveAddresses(typ addressing.AddressType) {
-	newAddresses := []Address{}
-	for _, addr := range n.IPAddresses {
-		if addr.Type != typ {
-			newAddresses = append(newAddresses, addr)
-		}
-	}
-	n.IPAddresses = newAddresses
+	n.IPAddresses = slices.DeleteFunc(n.IPAddresses, func(addr Address) bool {
+		return addr.Type == typ
+	})
 }
 
 func (n *Node) setAddress(typ addressing.AddressType, newIP net.IP) {
@@ -336,18 +332,23 @@ func (n *Node) getPrimaryAddress() *models.NodeAddressing {
 }
 
 func (n *Node) isPrimaryAddress(addr Address, ipv4 bool) bool {
-	return addr.IP.String() == n.GetNodeIP(!ipv4).String()
+	primary := n.GetNodeIP(!ipv4)
+	return primary != nil && primary.Equal(addr.IP)
 }
 
 func (n *Node) getSecondaryAddresses() []*models.NodeAddressingElement {
-	result := []*models.NodeAddressingElement{}
+	primaryV4 := n.GetNodeIP(false)
+	primaryV6 := n.GetNodeIP(true)
+
+	result := make([]*models.NodeAddressingElement, 0, len(n.IPAddresses))
 
 	for _, addr := range n.IPAddresses {
-		ipv4 := false
-		if addr.IP.To4() != nil {
-			ipv4 = true
+		isV4 := addr.IP.To4() != nil
+		primary := primaryV4
+		if !isV4 {
+			primary = primaryV6
 		}
-		if !n.isPrimaryAddress(addr, ipv4) {
+		if primary == nil || !primary.Equal(addr.IP) {
 			result = append(result, &models.NodeAddressingElement{
 				IP: addr.IP.String(),
 			})
@@ -437,7 +438,15 @@ func (n *Node) IsLocal() bool {
 	return n != nil && n.Name == GetName() && n.Cluster == getCluster()
 }
 
+var emptyPrefixes = []netip.Prefix{}
+
 func (n *Node) GetIPv4AllocCIDRs() []netip.Prefix {
+	if len(n.IPv4SecondaryAllocCIDRs) == 0 {
+		if n.IPv4AllocCIDR.IsValid() {
+			return []netip.Prefix{n.IPv4AllocCIDR.Prefix.Prefix}
+		}
+		return emptyPrefixes
+	}
 	result := make([]netip.Prefix, 0, len(n.IPv4SecondaryAllocCIDRs)+1)
 	if n.IPv4AllocCIDR.IsValid() {
 		result = append(result, n.IPv4AllocCIDR.Prefix.Prefix)
@@ -451,6 +460,12 @@ func (n *Node) GetIPv4AllocCIDRs() []netip.Prefix {
 }
 
 func (n *Node) GetIPv6AllocCIDRs() []netip.Prefix {
+	if len(n.IPv6SecondaryAllocCIDRs) == 0 {
+		if n.IPv6AllocCIDR.IsValid() {
+			return []netip.Prefix{n.IPv6AllocCIDR.Prefix.Prefix}
+		}
+		return emptyPrefixes
+	}
 	result := make([]netip.Prefix, 0, len(n.IPv6SecondaryAllocCIDRs)+1)
 	if n.IPv6AllocCIDR.IsValid() {
 		result = append(result, n.IPv6AllocCIDR.Prefix.Prefix)
