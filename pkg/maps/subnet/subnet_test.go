@@ -89,3 +89,22 @@ func TestKey(t *testing.T) {
 		})
 	}
 }
+
+func BenchmarkSubnetMapValue_String(b *testing.B) {
+	val := &SubnetMapValue{Identity: 12345}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = val.String()
+	}
+}
+
+func BenchmarkSubnetTableEntry_TableRow(b *testing.B) {
+	entry := NewSubnetEntry(netip.MustParsePrefix("192.168.1.0/24"), 12345)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = entry.TableRow()
+	}
+}
+

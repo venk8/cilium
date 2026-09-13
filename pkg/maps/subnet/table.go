@@ -5,9 +5,10 @@ package subnet
 
 import (
 	"encoding"
-	"fmt"
 	"iter"
 	"net/netip"
+	"strconv"
+
 
 	"github.com/cilium/statedb"
 	"github.com/cilium/statedb/index"
@@ -56,8 +57,9 @@ func (s SubnetTableEntry) TableHeader() []string {
 
 // TableRow returns the row representation of SubnetEntry.
 func (s SubnetTableEntry) TableRow() []string {
-	return []string{s.Key.String(), fmt.Sprintf("%d", s.Value)}
+	return []string{s.Key.String(), strconv.FormatUint(uint64(s.Value), 10)}
 }
+
 
 // clone returns a shallow copy of the SubnetTableEntry.
 func (s SubnetTableEntry) clone() SubnetTableEntry {

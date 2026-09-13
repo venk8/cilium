@@ -4,7 +4,7 @@
 package eventsmap
 
 import (
-	"fmt"
+	"strconv"
 
 	"github.com/cilium/ebpf"
 
@@ -28,12 +28,13 @@ type Value struct {
 }
 
 // String converts the key into a human readable string format.
-func (k *Key) String() string  { return fmt.Sprintf("%d", k.index) }
+func (k *Key) String() string  { return strconv.FormatUint(uint64(k.index), 10) }
 func (k *Key) New() bpf.MapKey { return &Key{} }
 
 // String converts the value into a human readable string format.
-func (v *Value) String() string    { return fmt.Sprintf("%d", v.progID) }
+func (v *Value) String() string    { return strconv.FormatUint(uint64(v.progID), 10) }
 func (v *Value) New() bpf.MapValue { return &Value{} }
+
 
 type eventsMap struct {
 	m *bpf.Map

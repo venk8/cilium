@@ -81,3 +81,29 @@ func TestPrivilegedNetDevMap(t *testing.T) {
 	_, err = dm.Lookup(2)
 	require.Error(t, err)
 }
+
+func TestDeviceStateString(t *testing.T) {
+	state := NewDeviceState(net.HardwareAddr{0x00, 0x11, 0x22, 0x33, 0x44, 0x55})
+	require.Equal(t, "00:11:22:33:44:55 0", state.String())
+	idx := Index(42)
+	require.Equal(t, "42", idx.String())
+}
+
+func BenchmarkIndex_String(b *testing.B) {
+	idx := Index(42)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = idx.String()
+	}
+}
+
+func BenchmarkDeviceState_String(b *testing.B) {
+	state := NewDeviceState(net.HardwareAddr{0x00, 0x11, 0x22, 0x33, 0x44, 0x55})
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = state.String()
+	}
+}
+
