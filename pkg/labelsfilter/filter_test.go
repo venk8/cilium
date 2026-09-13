@@ -251,3 +251,44 @@ func TestFilterLabelsByRegex(t *testing.T) {
 		})
 	}
 }
+
+func BenchmarkFilter(b *testing.B) {
+	err := ParseLabelPrefixCfg(hivetest.Logger(b), []string{}, []string{}, "")
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	allNormalLabels := map[string]string{
+		"io.kubernetes.container.hash":                   "cf58006d",
+		"io.kubernetes.container.name":                   "POD",
+		"io.kubernetes.container.restartCount":           "0",
+		"io.kubernetes.container.terminationMessagePath": "",
+		"io.kubernetes.pod.name":                         "my-nginx-0",
+		"io.kubernetes.pod.namespace":                    "default",
+		"app.kubernetes.io":                              "my-nginx",
+		"kubernetes.io.foo":                              "foo",
+		"beta.kubernetes.io.foo":                         "foo",
+		"annotation.kubectl.kubernetes.io":               "foo",
+		"annotation.hello":                               "world",
+		"io.kubernetes.pod.terminationGracePeriod":       "30",
+		"io.kubernetes.pod.uid":                          "c2e22414-dfc3-11e5-9792-080027755f5a",
+		"ioXkubernetes":                                  "foo",
+		"ignore":                                         "foo",
+		"ignorE":                                         "foo",
+		"controller-revision-hash":                       "123456",
+		"statefulset.kubernetes.io/pod-name":             "my-nginx-0",
+		"batch.kubernetes.io/job-completion-index":       "42",
+		"apps.kubernetes.io/pod-index":                   "0",
+		"io.cilium.k8s.policy.cluster":                   "default",
+		"io.cilium.k8s.policy.serviceaccount":            "luke",
+		"topology.kubernetes.io/zone":                    "us-east-1-a",
+		"topology.kubernetes.io/region":                  "us-east-1",
+	}
+	allLabels := labels.Map2Labels(allNormalLabels, labels.LabelSourceK8s)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		_, _ = Filter(allLabels)
+	}
+}

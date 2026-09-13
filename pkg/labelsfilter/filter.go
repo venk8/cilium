@@ -31,6 +31,16 @@ const (
 	reservedLabelsPattern = labels.LabelSourceReserved + ":.*"
 )
 
+type prefixKind uint8
+
+const (
+	prefixKindRegexp prefixKind = iota
+	prefixKindLiteralPrefix
+	prefixKindPrefixWildcard
+	prefixKindExact
+	prefixKindContains
+)
+
 // LabelPrefix is Cilium's representation of a label prefix.
 // +k8s:deepcopy-gen=false
 // +k8s:openapi-gen=false
@@ -41,6 +51,8 @@ type LabelPrefix struct {
 	Prefix string `json:"prefix"`
 	Source string `json:"source"`
 	expr   *regexp.Regexp
+	literal string
+	kind    prefixKind
 }
 
 // String returns a human readable representation of the LabelPrefix
@@ -55,25 +67,116 @@ func (p LabelPrefix) String() string {
 
 // matches returns true and the length of the matched section if the label is
 // matched by the LabelPrefix. The Ignore flag has no effect at this point.
-func (p LabelPrefix) matches(l labels.Label) (bool, int) {
+func (p *LabelPrefix) matches(l *labels.Label) (bool, int) {
 	if p.Source != "" && p.Source != l.Source {
 		return false, 0
 	}
 
-	// If no regular expression is available, fall back to prefix matching
-	if p.expr == nil {
-		return strings.HasPrefix(l.Key, p.Prefix), len(p.Prefix)
-	}
-
-	res := p.expr.FindStringIndex(l.Key)
-
-	// No match if regexp was not found
-	if res == nil {
+	switch p.kind {
+	case prefixKindLiteralPrefix:
+		if strings.HasPrefix(l.Key, p.literal) {
+			return true, len(p.literal)
+		}
 		return false, 0
-	}
 
-	// Otherwise match if match was found at start of key
-	return res[0] == 0, res[1]
+	case prefixKindPrefixWildcard:
+		if strings.HasPrefix(l.Key, p.literal) {
+			return true, len(l.Key)
+		}
+		return false, 0
+
+	case prefixKindExact:
+		if l.Key == p.literal {
+			return true, len(p.literal)
+		}
+		return false, 0
+
+	case prefixKindContains:
+		if idx := strings.Index(l.Key, p.literal); idx >= 0 {
+			return true, idx + len(p.literal)
+		}
+		return false, 0
+
+	default:
+		// If no regular expression is available, fall back to prefix matching
+		if p.expr == nil {
+			return strings.HasPrefix(l.Key, p.Prefix), len(p.Prefix)
+		}
+
+		res := p.expr.FindStringIndex(l.Key)
+
+		// No match if regexp was not found
+		if res == nil {
+			return false, 0
+		}
+
+		// Otherwise match if match was found at start of key
+		return res[0] == 0, res[1]
+	}
+}
+
+func unescapeLiteral(s string) (string, bool) {
+	if strings.IndexAny(s, `\.*+?()[]{}|^$`) == -1 {
+		return s, true
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '\\' {
+			i++
+			if i >= len(s) {
+				return "", false
+			}
+			b.WriteByte(s[i])
+			continue
+		}
+		switch c {
+		case '.', '*', '+', '?', '(', ')', '[', ']', '{', '}', '|', '^', '$':
+			return "", false
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String(), true
+}
+
+func parseOptimizedPrefix(pattern string) (kind prefixKind, literal string, ok bool) {
+	if strings.HasSuffix(pattern, ".*") {
+		prefix := pattern[:len(pattern)-2]
+		if lit, valid := unescapeLiteral(prefix); valid {
+			return prefixKindPrefixWildcard, lit, true
+		}
+	} else if strings.HasPrefix(pattern, ".*") {
+		suffix := pattern[2:]
+		if lit, valid := unescapeLiteral(suffix); valid {
+			return prefixKindContains, lit, true
+		}
+	} else if strings.HasSuffix(pattern, "$") {
+		prefix := pattern[:len(pattern)-1]
+		if lit, valid := unescapeLiteral(prefix); valid {
+			return prefixKindExact, lit, true
+		}
+	} else if lit, valid := unescapeLiteral(pattern); valid {
+		return prefixKindLiteralPrefix, lit, true
+	}
+	return prefixKindRegexp, "", false
+}
+
+func (p *LabelPrefix) init() error {
+	kind, literal, ok := parseOptimizedPrefix(p.Prefix)
+	if ok {
+		p.kind = kind
+		p.literal = literal
+		return nil
+	}
+	r, err := regexp.Compile(p.Prefix)
+	if err != nil {
+		return fmt.Errorf("unable to compile regexp: %w", err)
+	}
+	p.expr = r
+	p.kind = prefixKindRegexp
+	return nil
 }
 
 // parseLabelPrefix returns a LabelPrefix created from the string label parameter.
@@ -96,11 +199,9 @@ func parseLabelPrefix(label string) (*LabelPrefix, error) {
 		labelPrefix.Prefix = labelPrefix.Prefix[1:]
 	}
 
-	r, err := regexp.Compile(labelPrefix.Prefix)
-	if err != nil {
-		return nil, fmt.Errorf("unable to compile regexp: %w", err)
+	if err := labelPrefix.init(); err != nil {
+		return nil, err
 	}
-	labelPrefix.expr = r
 
 	return &labelPrefix, nil
 }
@@ -287,6 +388,9 @@ func readLabelPrefixCfgFrom(fileName string) (*labelPrefixCfg, error) {
 		if lp.Source == "" {
 			return nil, fmt.Errorf("invalid label prefix file: source was empty")
 		}
+		if err := lp.init(); err != nil {
+			return nil, fmt.Errorf("invalid label prefix %q: %w", lp.Prefix, err)
+		}
 		if !lp.Ignore {
 			lpc.whitelist = true
 		}
@@ -308,7 +412,7 @@ func (cfg *labelPrefixCfg) filterLabels(lbls labels.Labels) (identityLabels, inf
 		included, ignored := 0, 0
 
 		for _, p := range cfg.LabelPrefixes {
-			if m, len := p.matches(v); m {
+			if m, len := p.matches(&v); m {
 				if p.Ignore {
 					// save length of shortest matching ignore
 					if ignored == 0 || len < ignored {
@@ -359,7 +463,7 @@ func FilterLabelsByRegex(excludePatterns []*regexp.Regexp, labels map[string]str
 	if len(excludePatterns) == 0 && labels != nil {
 		return labels
 	}
-	newLabels := make(map[string]string)
+	newLabels := make(map[string]string, len(labels))
 	for k, v := range labels {
 		labelNeedsExclusion := false
 		for _, pattern := range excludePatterns {
