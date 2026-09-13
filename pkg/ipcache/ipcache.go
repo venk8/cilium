@@ -574,12 +574,13 @@ func (ipc *IPCache) UpsertMetadataBatch(updates ...MU) (revision uint64) {
 	prefixes := make([]cmtypes.PrefixCluster, 0, len(updates))
 	ipc.metadata.Lock()
 	for _, upd := range updates {
-		if !upd.IsCIDR || ipc.metadata.prefixRefCounter.Add(canonicalPrefix(upd.Prefix)) {
+		pfx := canonicalPrefix(upd.Prefix)
+		if !upd.IsCIDR || ipc.metadata.prefixRefCounter.Add(pfx) {
 			resource := upd.Resource
 			if upd.IsCIDR {
 				resource = cidrResourceID
 			}
-			prefixes = append(prefixes, ipc.metadata.upsertLocked(upd.Prefix, upd.Source, resource, upd.Metadata...)...)
+			prefixes = ipc.metadata.upsertLockedInto(prefixes, pfx, upd.Source, resource, upd.Metadata...)
 		}
 	}
 	ipc.metadata.Unlock()
@@ -609,12 +610,13 @@ func (ipc *IPCache) RemoveMetadataBatch(updates ...MU) (revision uint64) {
 	prefixes := make([]cmtypes.PrefixCluster, 0, len(updates))
 	ipc.metadata.Lock()
 	for _, upd := range updates {
-		if !upd.IsCIDR || ipc.metadata.prefixRefCounter.Delete(canonicalPrefix(upd.Prefix)) {
+		pfx := canonicalPrefix(upd.Prefix)
+		if !upd.IsCIDR || ipc.metadata.prefixRefCounter.Delete(pfx) {
 			resource := upd.Resource
 			if upd.IsCIDR {
 				resource = cidrResourceID
 			}
-			prefixes = append(prefixes, ipc.metadata.remove(upd.Prefix, resource, upd.Metadata...)...)
+			prefixes = ipc.metadata.removeInto(prefixes, pfx, resource, upd.Metadata...)
 		}
 	}
 	ipc.metadata.Unlock()
