@@ -4,9 +4,10 @@
 package cmd
 
 import (
+	"cmp"
 	"fmt"
 	"os"
-	"sort"
+	"slices"
 	"strings"
 	"text/tabwriter"
 
@@ -35,8 +36,8 @@ var policyCacheGetCmd = func(name, description string, f func() (models.Selector
 			} else if resp != nil {
 				w := tabwriter.NewWriter(os.Stdout, 5, 0, 3, ' ', 0)
 				// Sort to keep output stable
-				sort.Slice(resp, func(i, j int) bool {
-					return resp[i].Selector < resp[j].Selector
+				slices.SortFunc(resp, func(a, b *models.SelectorIdentityMapping) int {
+					return cmp.Compare(a.Selector, b.Selector)
 				})
 				fmt.Fprintf(w, "SELECTOR\tLABELS\tUSERS\tIDENTITIES\n")
 

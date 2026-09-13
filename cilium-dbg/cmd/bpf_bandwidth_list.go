@@ -9,7 +9,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -73,7 +73,7 @@ func listBandwidth(bpfBandwidthList map[string][]string) {
 	fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", labelsIDTitle, labelsDirection, labelsPrio, labelsBandwidth)
 
 	const numColumns = 4
-	rows := [][numColumns]string{}
+	rows := make([][numColumns]string, 0, len(bpfBandwidthList))
 
 	for key, value := range bpfBandwidthList {
 		keys := strings.Split(key, ",")
@@ -105,16 +105,14 @@ func listBandwidth(bpfBandwidthList map[string][]string) {
 		rows = append(rows, [numColumns]string{id, dirStr, prio, quantity.String()})
 	}
 
-	sort.Slice(rows, func(i, j int) bool {
+	slices.SortFunc(rows, func(a, b [numColumns]string) int {
 		for k := range numColumns {
-			c := strings.Compare(rows[i][k], rows[j][k])
-
+			c := strings.Compare(a[k], b[k])
 			if c != 0 {
-				return c < 0
+				return c
 			}
 		}
-
-		return false
+		return 0
 	})
 
 	for _, r := range rows {

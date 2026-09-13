@@ -4,10 +4,10 @@
 package cmd
 
 import (
+	"cmp"
 	"fmt"
 	"os"
 	"slices"
-	"sort"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
@@ -124,7 +124,7 @@ func listEndpoints() {
 }
 
 func printEndpointList(w *tabwriter.Writer, eps []*models.Endpoint) {
-	sort.Slice(eps, func(i, j int) bool { return eps[i].ID < eps[j].ID })
+	slices.SortFunc(eps, func(a, b *models.Endpoint) int { return cmp.Compare(a.ID, b.ID) })
 
 	const (
 		labelsIDTitle      = "IDENTITY"

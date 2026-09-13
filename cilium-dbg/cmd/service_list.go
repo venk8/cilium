@@ -4,9 +4,10 @@
 package cmd
 
 import (
+	"cmp"
 	"fmt"
 	"os"
-	"sort"
+	"slices"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
@@ -60,7 +61,7 @@ func printServiceList(w *tabwriter.Writer, list []*models.Service) {
 		FrontendAddress  string
 		BackendAddresses []string
 	}
-	svcs := []ServiceOutput{}
+	svcs := make([]ServiceOutput, 0, len(list))
 
 	for _, svc := range list {
 		if svc.Status == nil || svc.Status.Realized == nil {
@@ -74,7 +75,7 @@ func printServiceList(w *tabwriter.Writer, list []*models.Service) {
 			continue
 		}
 
-		var backendAddresses []string
+		backendAddresses := make([]string, 0, len(svc.Status.Realized.BackendAddresses))
 		for i, be := range svc.Status.Realized.BackendAddresses {
 			beA, err := loadbalancer.NewL3n4AddrFromBackendModel(be)
 			if err != nil {
@@ -104,8 +105,8 @@ func printServiceList(w *tabwriter.Writer, list []*models.Service) {
 		svcs = append(svcs, SvcOutput)
 	}
 
-	sort.Slice(svcs, func(i, j int) bool {
-		return svcs[i].ID <= svcs[j].ID
+	slices.SortFunc(svcs, func(a, b ServiceOutput) int {
+		return cmp.Compare(a.ID, b.ID)
 	})
 
 	for _, service := range svcs {

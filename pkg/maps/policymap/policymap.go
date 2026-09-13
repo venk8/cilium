@@ -4,8 +4,10 @@
 package policymap
 
 import (
+	"cmp"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strconv"
 	"strings"
 	"unsafe"
@@ -240,6 +242,24 @@ func (p PolicyEntriesDump) String() string {
 			entry.Key.String(), entry.PolicyEntry.String(), entry.StatsValue.String()))
 	}
 	return sb.String()
+}
+
+// Sort sorts PolicyEntriesDump in-place without reflection.
+func (p PolicyEntriesDump) Sort() {
+	slices.SortFunc(p, func(a, b PolicyEntryDump) int {
+		aDeny := a.PolicyEntry.IsDeny()
+		bDeny := b.PolicyEntry.IsDeny()
+		if aDeny != bDeny {
+			if aDeny {
+				return -1
+			}
+			return 1
+		}
+		if c := cmp.Compare(a.Key.TrafficDirection, b.Key.TrafficDirection); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.Key.Identity, b.Key.Identity)
+	})
 }
 
 // Less is a function used to sort PolicyEntriesDump by Policy Type
