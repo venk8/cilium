@@ -588,3 +588,33 @@ func getEventList() []*v1.Event {
 		},
 	}
 }
+
+func BenchmarkAggregator_Add(b *testing.B) {
+	fa, err := fieldaggregate.New(&fieldmaskpb.FieldMask{
+		Paths: []string{"source.namespace", "source.pod_name", "destination.namespace", "destination.pod_name", "verdict"},
+	})
+	require.NoError(b, err)
+	agg := NewAggregatorWithFields(fa, hivetest.Logger(b))
+
+	event := &v1.Event{
+		Event: &flowpb.Flow{
+			Time:    &timestamp.Timestamp{Seconds: 1692369604},
+			Verdict: flowpb.Verdict_FORWARDED,
+			Source: &flowpb.Endpoint{
+				Namespace: "default",
+				PodName:   "src-pod1",
+			},
+			Destination: &flowpb.Endpoint{
+				Namespace: "default",
+				PodName:   "dest-pod1",
+			},
+			TrafficDirection: flowpb.TrafficDirection_EGRESS,
+		},
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for b.Loop() {
+		agg.Add(event)
+	}
+}
