@@ -246,6 +246,20 @@ func (ipc *IPCache) getHostIPCacheRLocked(ip string) (net.IP, uint8) {
 	return ipKeyPair.IP, ipKeyPair.Key
 }
 
+func (ipc *IPCache) getEntryInfoRLocked(ip string) (id Identity, exists bool, hostIP net.IP, hostKey uint8, epFlags uint8) {
+	id, exists = ipc.ipToIdentityCache[ip]
+	ipKeyPair := ipc.ipToHostIPCache[ip]
+	hostIP, hostKey = ipKeyPair.IP, ipKeyPair.Key
+	epFlags = ipc.ipToEndpointFlags[ip]
+	return
+}
+
+func (ipc *IPCache) getEntryInfo(ip string) (id Identity, exists bool, hostIP net.IP, hostKey uint8, epFlags uint8) {
+	ipc.mutex.RLock()
+	defer ipc.mutex.RUnlock()
+	return ipc.getEntryInfoRLocked(ip)
+}
+
 // GetK8sMetadata returns Kubernetes metadata for the given IP address.
 // The returned pointer should *never* be modified.
 func (ipc *IPCache) GetK8sMetadata(ip netip.Addr) *K8sMetadata {
@@ -888,7 +902,9 @@ func (ipc *IPCache) LookupByPrefixRLocked(prefix string) (identity Identity, exi
 	if p, err := netip.ParsePrefix(prefix); err == nil {
 		// If it's a fully specified prefix, attempt to find the host
 		if p.IsSingleIP() {
-			identity, exists = ipc.ipToIdentityCache[p.Addr().String()]
+			var buf [64]byte
+			b := p.Addr().AppendTo(buf[:0])
+			identity, exists = ipc.ipToIdentityCache[string(b)]
 			if exists {
 				return
 			}
@@ -919,7 +935,9 @@ func (ipc *IPCache) LookupSecIDByIP(ip netip.Addr) (id Identity, ok bool) {
 	ipc.mutex.RLock()
 	defer ipc.mutex.RUnlock()
 
-	if id, ok = ipc.lookupByIPRLocked(ip.String()); ok {
+	var buf [64]byte
+	b := ip.AppendTo(buf[:0])
+	if id, ok = ipc.ipToIdentityCache[string(b)]; ok {
 		return id, ok
 	}
 
@@ -932,8 +950,12 @@ func (ipc *IPCache) LookupSecIDByIP(ip netip.Addr) (id Identity, ok bool) {
 		// note: we perform a lookup even when `prefixLen == bits`, as some
 		// entries derived by a single address cidr-range will not have been
 		// found by the above lookup
-		cidr, _ := ip.Prefix(prefixLen)
-		if id, ok = ipc.ipToIdentityCache[cidr.String()]; ok {
+		cidr, err := ip.Prefix(prefixLen)
+		if err != nil {
+			continue
+		}
+		b = cidr.AppendTo(buf[:0])
+		if id, ok = ipc.ipToIdentityCache[string(b)]; ok {
 			return id, ok
 		}
 	}

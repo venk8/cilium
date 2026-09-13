@@ -140,6 +140,12 @@ func newMetadata(logger *slog.Logger) *metadata {
 // completed.
 func (m *metadata) dequeuePrefixUpdates() (modifiedPrefixes []cmtypes.PrefixCluster, revision uint64) {
 	m.queuedChangesMU.Lock()
+	if len(m.queuedPrefixes) == 0 {
+		revision = m.queuedRevision
+		m.queuedRevision++
+		m.queuedChangesMU.Unlock()
+		return nil, revision
+	}
 	modifiedPrefixes = make([]cmtypes.PrefixCluster, 0, len(m.queuedPrefixes))
 	for p := range m.queuedPrefixes {
 		modifiedPrefixes = append(modifiedPrefixes, p)
@@ -303,6 +309,22 @@ func (m *metadata) getLockedSource(prefix cmtypes.PrefixCluster) source.Source {
 	return source.Unspec
 }
 
+// getLockedFlattened returns the flattened prefix info without a deep copy.
+// The caller must hold m.Lock or m.RLock and must NOT mutate the returned resourceInfo.
+func (m *metadata) getLockedFlattened(prefix cmtypes.PrefixCluster) *resourceInfo {
+	if pi, ok := m.m[prefix]; ok {
+		if pi.flattened == nil {
+			// re-compute the flattened set of prefixes
+			pi.flattened = pi.flatten(m.logger.With(
+				logfields.CIDR, prefix,
+				logfields.ClusterID, prefix.ClusterID(),
+			))
+		}
+		return pi.flattened
+	}
+	return nil
+}
+
 // mergeLabels pulls down all labels from parent prefixes, with "longer" prefixes having
 // preference, including the prefix itself.
 //
@@ -319,10 +341,12 @@ func (m *metadata) mergeLabels(lbls labels.Labels, prefixCluster cmtypes.PrefixC
 	// Iterate over all shorter prefixes, from `prefix` to 0.0.0.0/0 // ::/0.
 	// Merge all labels, preferring those from longer prefixes, but only merge a single "cidr:XXX" label at most.
 	prefix := prefixCluster.AsPrefix()
+	clusterID := prefixCluster.ClusterID()
 	for bits := prefix.Bits(); bits >= 0; bits-- {
 		parent, _ := prefix.Addr().Unmap().Prefix(bits) // canonical
-		if info := m.getLocked(cmtypes.NewPrefixCluster(parent, prefixCluster.ClusterID())); info != nil {
-			for k, v := range info.ToLabels() {
+		parentCluster := cmtypes.NewPrefixCluster(parent, clusterID)
+		if info := m.getLockedFlattened(parentCluster); info != nil {
+			for k, v := range info.labels {
 				if v.Source == labels.LabelSourceCIDR && hasCIDR {
 					continue
 				}
@@ -411,9 +435,7 @@ func (ipc *IPCache) doInjectLabels(ctx context.Context, modifiedPrefixes []cmtyp
 
 	for i, prefix := range modifiedPrefixes {
 		pstr := prefix.String()
-		oldID, entryExists := ipc.LookupByIP(pstr)
-		oldTunnelIP, oldEncryptionKey := ipc.getHostIPCache(pstr)
-		oldEndpointFlags := ipc.getEndpointFlags(pstr)
+		oldID, entryExists, oldTunnelIP, oldEncryptionKey, oldEndpointFlags := ipc.getEntryInfo(pstr)
 		prefixInfo := ipc.metadata.get(prefix)
 		var newID *identity.Identity
 		var isNew bool

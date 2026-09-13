@@ -186,6 +186,14 @@ func (s prefixInfo) isValid() bool {
 }
 
 func (s *prefixInfo) sortedBySourceThenResourceID() []ipcachetypes.ResourceID {
+	if len(s.byResource) == 0 {
+		return nil
+	}
+	if len(s.byResource) == 1 {
+		for k := range s.byResource {
+			return []ipcachetypes.ResourceID{k}
+		}
+	}
 	return slices.SortedStableFunc(maps.Keys(s.byResource), func(a ipcachetypes.ResourceID, b ipcachetypes.ResourceID) int {
 		if s.byResource[a].source != s.byResource[b].source {
 			if !source.AllowOverwrite(s.byResource[a].source, s.byResource[b].source) {
@@ -256,6 +264,35 @@ func (r *resourceInfo) IdentityOverride() bool {
 // will win.
 func (s *prefixInfo) flatten(scopedLog *slog.Logger) *resourceInfo {
 	out := &resourceInfo{}
+
+	if len(s.byResource) == 0 {
+		return out
+	}
+	if len(s.byResource) == 1 {
+		for resourceID, info := range s.byResource {
+			out.source = info.source
+			if info.identityOverride {
+				if len(info.labels) == 0 {
+					scopedLog.Warn(
+						"Detected identity override, but no labels where specified. "+
+							"Falling back on the old non-override labels. "+
+							"This may cause connectivity issues for this address.",
+						logfields.Resource, resourceID,
+					)
+				} else {
+					out.identityOverride = true
+					out.labels = info.labels
+				}
+			} else if len(info.labels) > 0 {
+				out.labels = labels.NewFrom(info.labels)
+			}
+			out.tunnelPeer = info.tunnelPeer
+			out.encryptKey = info.encryptKey
+			out.requestedIdentity = info.requestedIdentity
+			out.endpointFlags = info.endpointFlags
+			return out
+		}
+	}
 
 	var (
 		overrideResourceID      ipcachetypes.ResourceID
