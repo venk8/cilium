@@ -454,6 +454,40 @@ func TestSortableRoute(t *testing.T) {
 	}, namesAfterSort)
 }
 
+func BenchmarkSortableRoute(b *testing.B) {
+	routes := make([]*envoy_config_route_v3.Route, 20)
+	for i := 0; i < 20; i++ {
+		routes[i] = &envoy_config_route_v3.Route{
+			Name: fmt.Sprintf("route-%d", i),
+			Match: &envoy_config_route_v3.RouteMatch{
+				PathSpecifier: &envoy_config_route_v3.RouteMatch_Prefix{
+					Prefix: fmt.Sprintf("/prefix-%d", i%5),
+				},
+				Headers: []*envoy_config_route_v3.HeaderMatcher{
+					{
+						Name: ":method",
+						HeaderMatchSpecifier: &envoy_config_route_v3.HeaderMatcher_StringMatch{
+							StringMatch: &envoy_type_matcher_v3.StringMatcher{
+								MatchPattern: &envoy_type_matcher_v3.StringMatcher_Exact{
+									Exact: "GET",
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		arr := make(SortableRoute, len(routes))
+		copy(arr, routes)
+		arr.Sort()
+	}
+}
+
 func buildNameSlice(arr []*envoy_config_route_v3.Route) []string {
 	var names []string
 

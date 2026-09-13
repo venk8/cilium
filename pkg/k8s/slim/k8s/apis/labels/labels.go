@@ -8,7 +8,7 @@ package labels
 import (
 	"fmt"
 	"maps"
-	"sort"
+	"slices"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -26,7 +26,7 @@ type Labels interface {
 	Lookup(label string) (value string, exists bool)
 }
 
-// Set is a map of label:value. It implements Labels.
+// Set represents a label set.
 type Set map[string]string
 
 // String returns all labels listed as a human readable string.
@@ -37,7 +37,7 @@ func (ls Set) String() string {
 		selector = append(selector, key+"="+value)
 	}
 	// Sort for determinism.
-	sort.StringSlice(selector).Sort()
+	slices.Sort(selector)
 	return strings.Join(selector, ",")
 }
 

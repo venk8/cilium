@@ -6,10 +6,10 @@
 package labels
 
 import (
+	"cmp"
 	"fmt"
 	"maps"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -145,6 +145,12 @@ func (a ByKey) Len() int { return len(a) }
 func (a ByKey) Swap(i, j int) { a[i], a[j] = a[j], a[i] }
 
 func (a ByKey) Less(i, j int) bool { return a[i].key < a[j].key }
+
+func (a ByKey) Sort() {
+	slices.SortFunc(a, func(x, y Requirement) int {
+		return cmp.Compare(x.key, y.key)
+	})
+}
 
 // Requirement contains values, a key, and an operator that relates the key and values.
 // The zero value of Requirement is invalid.
@@ -402,7 +408,7 @@ func (s internalSelector) Add(reqs ...Requirement) Selector {
 	ret := make(internalSelector, 0, len(s)+len(reqs))
 	ret = append(ret, s...)
 	ret = append(ret, reqs...)
-	sort.Sort(ByKey(ret))
+	ByKey(ret).Sort()
 	return ret
 }
 
@@ -914,7 +920,7 @@ func parse(selector string, _ *field.Path) (internalSelector, error) {
 	if err != nil {
 		return nil, err
 	}
-	sort.Sort(ByKey(items)) // sort to grant determistic parsing
+	ByKey(items).Sort() // sort to grant deterministic parsing
 	return internalSelector(items), err
 }
 
@@ -956,7 +962,7 @@ func ValidatedSelectorFromSet(ls Set) (Selector, error) {
 		requirements = append(requirements, *r)
 	}
 	// sort to have deterministic string representation
-	sort.Sort(ByKey(requirements))
+	ByKey(requirements).Sort()
 	return internalSelector(requirements), nil
 }
 
@@ -974,7 +980,7 @@ func SelectorFromValidatedSet(ls Set) Selector {
 		requirements = append(requirements, Requirement{key: label, operator: selection.Equals, strValues: []string{value}})
 	}
 	// sort to have deterministic string representation
-	sort.Sort(ByKey(requirements))
+	ByKey(requirements).Sort()
 	return internalSelector(requirements)
 }
 
