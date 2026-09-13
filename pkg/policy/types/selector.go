@@ -286,11 +286,15 @@ func NewLabelSelector(es api.EndpointSelector) *LabelSelector {
 	for _, entity := range api.EntitySelectorMapping[api.EntityCluster] {
 		if entity.SelectorKey() == key {
 			class = LabelValueSCCluster
+			break
 		}
 	}
-	for _, entity := range api.EntitySelectorMapping[api.EntityWorld] {
-		if entity.SelectorKey() == key {
-			class = LabelValueSCWorld
+	if class == LabelValueSCOther {
+		for _, entity := range api.EntitySelectorMapping[api.EntityWorld] {
+			if entity.SelectorKey() == key {
+				class = LabelValueSCWorld
+				break
+			}
 		}
 	}
 
@@ -304,7 +308,7 @@ func NewLabelSelector(es api.EndpointSelector) *LabelSelector {
 }
 
 func NewLabelSelectorFromLabels(lbls ...labels.Label) *LabelSelector {
-	ml := map[string]string{}
+	ml := make(map[string]string, len(lbls))
 	for _, lbl := range lbls {
 		ml[lbl.GetExtendedKey()] = lbl.Value
 	}
