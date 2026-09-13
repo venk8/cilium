@@ -244,3 +244,106 @@ func (i *identitySelector) updateSelections() {
 
 	i.selectorCache.writeableSelections.Set(i.id, ids)
 }
+
+// updateSelectionsDelta incrementally updates the immutable slice representation
+// of the cached selections with the provided added and deleted identities.
+//
+// lock must be held
+func (i *identitySelector) updateSelectionsDelta(adds, dels []identity.NumericIdentity) {
+	if len(i.cachedSelections) == 0 {
+		i.selectorCache.writeableSelections.Delete(i.id)
+		return
+	}
+
+	oldIDs, found := i.selectorCache.writeableSelections.Get(i.id)
+	if !found || len(oldIDs) == 0 {
+		i.updateSelections()
+		return
+	}
+
+	// Fast path: single deletion, no additions
+	if len(dels) == 1 && len(adds) == 0 {
+		delID := dels[0]
+		if idx, exists := slices.BinarySearch(oldIDs, delID); exists {
+			if len(oldIDs) == 1 {
+				i.selectorCache.writeableSelections.Delete(i.id)
+				return
+			}
+			newIDs := make(identity.NumericIdentitySlice, len(oldIDs)-1)
+			copy(newIDs[:idx], oldIDs[:idx])
+			copy(newIDs[idx:], oldIDs[idx+1:])
+			i.selectorCache.writeableSelections.Set(i.id, newIDs)
+			return
+		}
+		// Inconsistency or already removed; fall back to full rebuild
+		i.updateSelections()
+		return
+	}
+
+	// Fast path: single addition, no deletions
+	if len(adds) == 1 && len(dels) == 0 {
+		addID := adds[0]
+		idx, exists := slices.BinarySearch(oldIDs, addID)
+		if !exists {
+			newIDs := make(identity.NumericIdentitySlice, len(oldIDs)+1)
+			copy(newIDs[:idx], oldIDs[:idx])
+			newIDs[idx] = addID
+			copy(newIDs[idx+1:], oldIDs[idx:])
+			i.selectorCache.writeableSelections.Set(i.id, newIDs)
+			return
+		}
+		// Inconsistency or already present; fall back to full rebuild
+		i.updateSelections()
+		return
+	}
+
+	// Multi-item delta path: 3-way merge
+	slices.Sort(adds)
+	adds = slices.Compact(adds)
+	slices.Sort(dels)
+	dels = slices.Compact(dels)
+
+	newCap := len(oldIDs) + len(adds)
+	if len(dels) <= newCap {
+		newCap -= len(dels)
+	}
+	newIDs := make(identity.NumericIdentitySlice, 0, newCap)
+
+	iOld, iAdd, iDel := 0, 0, 0
+	for iOld < len(oldIDs) || iAdd < len(adds) {
+		var candidate identity.NumericIdentity
+		if iAdd < len(adds) && (iOld >= len(oldIDs) || adds[iAdd] < oldIDs[iOld]) {
+			candidate = adds[iAdd]
+			iAdd++
+		} else if iOld < len(oldIDs) && (iAdd >= len(adds) || oldIDs[iOld] < adds[iAdd]) {
+			candidate = oldIDs[iOld]
+			iOld++
+		} else {
+			candidate = adds[iAdd]
+			iAdd++
+			iOld++
+		}
+
+		for iDel < len(dels) && dels[iDel] < candidate {
+			iDel++
+		}
+		if iDel < len(dels) && dels[iDel] == candidate {
+			iDel++
+			continue
+		}
+
+		newIDs = append(newIDs, candidate)
+	}
+
+	if len(newIDs) != len(i.cachedSelections) {
+		// Parity mismatch with cachedSelections map; fall back to full rebuild
+		i.updateSelections()
+		return
+	}
+
+	if len(newIDs) == 0 {
+		i.selectorCache.writeableSelections.Delete(i.id)
+	} else {
+		i.selectorCache.writeableSelections.Set(i.id, newIDs)
+	}
+}

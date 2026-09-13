@@ -6,6 +6,7 @@ package policy
 import (
 	"iter"
 	"log/slog"
+	"slices"
 	"sync"
 	"sync/atomic"
 
@@ -58,6 +59,28 @@ func (c *scIdentityCache) Len() int {
 
 func (c *scIdentityCache) insert(nid identity.NumericIdentity, lbls labels.LabelArray) *scIdentity {
 	namespace, _ := lbls.LookupLabel(&podNamespaceLabel)
+	if old, exists := c.ids[nid]; exists {
+		if old.namespace == namespace {
+			old.lbls = lbls
+			return old
+		}
+		if m := c.byNamespace[old.namespace]; m != nil {
+			delete(m, old)
+			if len(m) == 0 {
+				delete(c.byNamespace, old.namespace)
+			}
+		}
+		old.lbls = lbls
+		old.namespace = namespace
+		m := c.byNamespace[namespace]
+		if m == nil {
+			m = make(map[*scIdentity]struct{})
+			c.byNamespace[namespace] = m
+		}
+		m[old] = struct{}{}
+		return old
+	}
+
 	id := &scIdentity{
 		NID:       nid,
 		lbls:      lbls,
@@ -717,7 +740,7 @@ func (sc *SelectorCache) CanSkipUpdate(added, deleted identity.IdentityMap) bool
 // - updated as true if any changes were made
 // - mutated as true if any identity was mutated
 func (sc *SelectorCache) updateSelections(sel *identitySelector, added identity.NumericIdentitySlice, deleted identity.IdentityMap, wg *sync.WaitGroup) (updated, mutated bool) {
-	var adds, dels []identity.NumericIdentity
+	var adds, dels, internalDels []identity.NumericIdentity
 	for numericID := range deleted {
 		if _, exists := sel.cachedSelections[numericID]; exists {
 			dels = append(dels, numericID)
@@ -740,13 +763,22 @@ func (sc *SelectorCache) updateSelections(sel *identitySelector, added identity.
 			// recompute the policy as if the mutated identity
 			// was never selected by the affected selector.
 			mutated = true
+			if internalDels == nil {
+				internalDels = slices.Clone(dels)
+			}
+			internalDels = append(internalDels, numericID)
 			delete(sel.cachedSelections, numericID)
 		}
 	}
-	if len(dels)+len(adds) > 0 {
+	if internalDels == nil {
+		internalDels = dels
+	}
+	if len(internalDels)+len(adds) > 0 {
 		updated = true
-		sel.updateSelections()
-		sel.notifyUsers(sc, adds, dels, wg)
+		sel.updateSelectionsDelta(adds, internalDels)
+		if len(dels)+len(adds) > 0 {
+			sel.notifyUsers(sc, adds, dels, wg)
+		}
 	}
 	return updated, mutated
 }
@@ -767,6 +799,10 @@ func (sc *SelectorCache) updateSelections(sel *identitySelector, added identity.
 // endpoints to remove the affected identity only from selectors that no longer select the mutated
 // identity.
 func (sc *SelectorCache) UpdateIdentities(added, deleted identity.IdentityMap, wg *sync.WaitGroup) (mutated bool) {
+	if len(added) == 0 && len(deleted) == 0 {
+		return false
+	}
+
 	// Map of namespaces to scan for updates with added identities in the map value. All
 	// identities are matched against selectors that have no namespace requirements.
 	namespaces := make(map[string]identity.NumericIdentitySlice, 1+len(added)+len(deleted))
@@ -862,7 +898,7 @@ func (sc *SelectorCache) UpdateIdentities(added, deleted identity.IdentityMap, w
 		for ns, nsAdded := range namespaces {
 			// Iterate through all locally used identity selectors and
 			// update the cached numeric identities as required.
-			for sel := range sc.selectors.ByNamespace(ns) {
+			for sel := range sc.selectors.selectorsByNamespace[ns] {
 				u, m := sc.updateSelections(sel, nsAdded, deleted, wg)
 				updated = updated || u
 				mutated = mutated || m
