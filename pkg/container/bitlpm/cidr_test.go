@@ -460,10 +460,8 @@ func generatePrefix(b *testing.B, r *rand.Rand) netip.Prefix {
 
 func generateCIDRs(b *testing.B, r *rand.Rand, n int) *CIDRTrie[struct{}] {
 	t := NewCIDRTrie[struct{}]()
-	for range n {
-		if !t.Upsert(generatePrefix(b, r), struct{}{}) {
-			n++
-		}
+	for t.Len() < uint(n) {
+		t.Upsert(generatePrefix(b, r), struct{}{})
 	}
 	return t
 }
@@ -522,7 +520,9 @@ func BenchmarkTraversal(b *testing.B) {
 			lastLen = prefixLen
 			t.AncestorsLongestPrefixFirst(prefix, func(k netip.Prefix, _ struct{}) bool {
 				pLen := k.Bits()
-				assert.LessOrEqual(b, pLen, lastLen)
+				if pLen > lastLen {
+					b.Fatalf("expected pLen %d <= lastLen %d", pLen, lastLen)
+				}
 				lastLen = pLen
 				n++
 				return true
@@ -542,7 +542,9 @@ func BenchmarkTraversal(b *testing.B) {
 			lastLen = prefixLen
 			for ok, k, _ := iter.Next(); ok; ok, k, _ = iter.Next() {
 				pLen := netip.Prefix(k).Bits()
-				assert.LessOrEqual(b, pLen, lastLen)
+				if pLen > lastLen {
+					b.Fatalf("expected pLen %d <= lastLen %d", pLen, lastLen)
+				}
 				lastLen = pLen
 				n++
 			}
@@ -588,7 +590,9 @@ func BenchmarkTraversal(b *testing.B) {
 			lastLen = 0
 			t.DescendantsShortestPrefixFirst(prefix, func(k netip.Prefix, _ struct{}) bool {
 				pLen := k.Bits()
-				assert.GreaterOrEqual(b, pLen, lastLen)
+				if pLen < lastLen {
+					b.Fatalf("expected pLen %d >= lastLen %d", pLen, lastLen)
+				}
 				lastLen = pLen
 				n++
 				return true
@@ -608,10 +612,29 @@ func BenchmarkTraversal(b *testing.B) {
 			lastLen = 0
 			for ok, k, _ := iter.Next(); ok; ok, k, _ = iter.Next() {
 				pLen := netip.Prefix(k).Bits()
-				assert.GreaterOrEqual(b, pLen, lastLen)
+				if pLen < lastLen {
+					b.Fatalf("expected pLen %d >= lastLen %d", pLen, lastLen)
+				}
 				lastLen = pLen
 				n++
 			}
+		}
+	})
+
+	b.Run("ExactLookup", func(b *testing.B) {
+		b.ReportAllocs()
+
+		for b.Loop() {
+			t.ExactLookup(prefix)
+		}
+	})
+
+	b.Run("LongestPrefixMatch", func(b *testing.B) {
+		addr := prefix.Addr()
+		b.ReportAllocs()
+
+		for b.Loop() {
+			t.LongestPrefixMatch(addr)
 		}
 	})
 }

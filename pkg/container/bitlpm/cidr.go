@@ -12,15 +12,15 @@ import (
 // CIDRTrie can hold both IPv4 and IPv6 prefixes
 // at the same time.
 type CIDRTrie[T any] struct {
-	v4 Trie[cidrKey, T]
-	v6 Trie[cidrKey, T]
+	v4 *trie[cidrKey, T]
+	v6 *trie[cidrKey, T]
 }
 
 // NewCIDRTrie creates a new CIDRTrie[T any].
 func NewCIDRTrie[T any]() *CIDRTrie[T] {
 	return &CIDRTrie[T]{
-		v4: NewTrie[cidrKey, T](32),
-		v6: NewTrie[cidrKey, T](128),
+		v4: newTrie[cidrKey, T](32),
+		v6: newTrie[cidrKey, T](128),
 	}
 }
 
@@ -49,9 +49,21 @@ func (c *CIDRTrie[T]) LongestPrefixMatch(addr netip.Addr) (netip.Prefix, T, bool
 
 // Ancestors iterates over every CIDR pair that contains the CIDR argument.
 func (c *CIDRTrie[T]) Ancestors(cidr netip.Prefix, fn func(k netip.Prefix, v T) bool) {
-	c.treeForFamily(cidr).Ancestors(uint(cidr.Bits()), cidrKey(cidr), func(prefix uint, k cidrKey, v T) bool {
-		return fn(netip.Prefix(k), v)
-	})
+	t := c.treeForFamily(cidr)
+	prefixLen := min(uint(cidr.Bits()), t.maxPrefix)
+	k := cidrKey(cidr)
+	for currentNode := t.root; currentNode != nil; currentNode = currentNode.children[k.BitValueAt(currentNode.prefixLen)] {
+		matchLen := currentNode.prefixMatch(prefixLen, k)
+		if matchLen < currentNode.prefixLen {
+			return
+		}
+		if currentNode.intermediate {
+			continue
+		}
+		if !fn(netip.Prefix(currentNode.key), currentNode.value) || matchLen == t.maxPrefix {
+			return
+		}
+	}
 }
 
 func (c *CIDRTrie[T]) AncestorIterator(cidr netip.Prefix) ancestorIterator[cidrKey, T] {
@@ -61,9 +73,30 @@ func (c *CIDRTrie[T]) AncestorIterator(cidr netip.Prefix) ancestorIterator[cidrK
 // AncestorsLongestPrefixFirst iterates over every CIDR pair that contains the CIDR argument,
 // longest matching prefix first, then iterating towards the root of the trie.
 func (c *CIDRTrie[T]) AncestorsLongestPrefixFirst(cidr netip.Prefix, fn func(k netip.Prefix, v T) bool) {
-	c.treeForFamily(cidr).AncestorsLongestPrefixFirst(uint(cidr.Bits()), cidrKey(cidr), func(prefix uint, k cidrKey, v T) bool {
-		return fn(netip.Prefix(k), v)
-	})
+	t := c.treeForFamily(cidr)
+	prefixLen := min(uint(cidr.Bits()), t.maxPrefix)
+	k := cidrKey(cidr)
+	var buf [32]*node[cidrKey, T]
+	stack := buf[:0]
+	for currentNode := t.root; currentNode != nil; currentNode = currentNode.children[k.BitValueAt(currentNode.prefixLen)] {
+		matchLen := currentNode.prefixMatch(prefixLen, k)
+		if matchLen < currentNode.prefixLen {
+			break
+		}
+		if currentNode.intermediate {
+			continue
+		}
+		stack = append(stack, currentNode)
+		if matchLen == t.maxPrefix {
+			break
+		}
+	}
+	for i := len(stack) - 1; i >= 0; i-- {
+		n := stack[i]
+		if !fn(netip.Prefix(n.key), n.value) {
+			return
+		}
+	}
 }
 
 func (c *CIDRTrie[T]) AncestorLongestPrefixFirstIterator(cidr netip.Prefix) ancestorLPFIterator[cidrKey, T] {
@@ -72,9 +105,56 @@ func (c *CIDRTrie[T]) AncestorLongestPrefixFirstIterator(cidr netip.Prefix) ance
 
 // Descendants iterates over every CIDR that is contained by the CIDR argument.
 func (c *CIDRTrie[T]) Descendants(cidr netip.Prefix, fn func(k netip.Prefix, v T) bool) {
-	c.treeForFamily(cidr).Descendants(uint(cidr.Bits()), cidrKey(cidr), func(prefix uint, k cidrKey, v T) bool {
-		return fn(netip.Prefix(k), v)
-	})
+	t := c.treeForFamily(cidr)
+	prefixLen := min(uint(cidr.Bits()), t.maxPrefix)
+	k := cidrKey(cidr)
+	currentNode := t.root
+	for currentNode != nil {
+		matchLen := currentNode.prefixMatch(prefixLen, k)
+		if matchLen >= prefixLen {
+			forEachCIDR(currentNode, fn)
+			return
+		}
+		if currentNode.prefixLen >= t.maxPrefix {
+			return
+		}
+		currentNode = currentNode.children[k.BitValueAt(currentNode.prefixLen)]
+	}
+}
+
+func forEachCIDR[T any](n *node[cidrKey, T], fn func(k netip.Prefix, v T) bool) {
+	if !n.intermediate {
+		if !fn(netip.Prefix(n.key), n.value) {
+			return
+		}
+	}
+	if n.children[0] != nil {
+		forEachCIDR(n.children[0], fn)
+	}
+	if n.children[1] != nil {
+		forEachCIDR(n.children[1], fn)
+	}
+}
+
+func forEachShortestPrefixFirstCIDR[T any](n *node[cidrKey, T], fn func(k netip.Prefix, v T) bool) {
+	var buf [16]*node[cidrKey, T]
+	nodes := nodes[cidrKey, T](buf[:0])
+	nodes.pushHeap(n)
+
+	for nodes.Len() > 0 {
+		n := nodes.popHeap()
+		if !n.intermediate {
+			if !fn(netip.Prefix(n.key), n.value) {
+				return
+			}
+		}
+		if n.children[0] != nil {
+			nodes.pushHeap(n.children[0])
+		}
+		if n.children[1] != nil {
+			nodes.pushHeap(n.children[1])
+		}
+	}
 }
 
 func (c *CIDRTrie[T]) DescendantIterator(cidr netip.Prefix) descendantIterator[cidrKey, T] {
@@ -83,9 +163,21 @@ func (c *CIDRTrie[T]) DescendantIterator(cidr netip.Prefix) descendantIterator[c
 
 // DescendantsShortestPrefixFirst iterates over every CIDR that is contained by the CIDR argument.
 func (c *CIDRTrie[T]) DescendantsShortestPrefixFirst(cidr netip.Prefix, fn func(k netip.Prefix, v T) bool) {
-	c.treeForFamily(cidr).DescendantsShortestPrefixFirst(uint(cidr.Bits()), cidrKey(cidr), func(prefix uint, k cidrKey, v T) bool {
-		return fn(netip.Prefix(k), v)
-	})
+	t := c.treeForFamily(cidr)
+	prefixLen := min(uint(cidr.Bits()), t.maxPrefix)
+	k := cidrKey(cidr)
+	currentNode := t.root
+	for currentNode != nil {
+		matchLen := currentNode.prefixMatch(prefixLen, k)
+		if matchLen >= prefixLen {
+			forEachShortestPrefixFirstCIDR(currentNode, fn)
+			return
+		}
+		if currentNode.prefixLen >= t.maxPrefix {
+			return
+		}
+		currentNode = currentNode.children[k.BitValueAt(currentNode.prefixLen)]
+	}
 }
 
 func (c *CIDRTrie[T]) DescendantShortestPrefixFirstIterator(cidr netip.Prefix) descendantSPFIterator[cidrKey, T] {
@@ -126,7 +218,7 @@ func (c *CIDRTrie[T]) ForEach(fn func(k netip.Prefix, v T) bool) {
 
 }
 
-func (c *CIDRTrie[T]) treeForFamily(cidr netip.Prefix) Trie[cidrKey, T] {
+func (c *CIDRTrie[T]) treeForFamily(cidr netip.Prefix) *trie[cidrKey, T] {
 	if cidr.Addr().Is6() {
 		return c.v6
 	}
@@ -136,33 +228,27 @@ func (c *CIDRTrie[T]) treeForFamily(cidr netip.Prefix) Trie[cidrKey, T] {
 type cidrKey netip.Prefix
 
 func (k cidrKey) BitValueAt(idx uint) uint8 {
-	addr := netip.Prefix(k).Addr()
-	if addr.Is4() {
-		word := (*(*[2]uint64)(unsafe.Pointer(&addr)))[1]
-		return uint8((word >> (31 - idx)) & 1)
+	words := (*[2]uint64)(unsafe.Pointer(&k))
+	if netip.Prefix(k).Addr().Is4() {
+		return uint8((words[1] >> (31 - idx)) & 1)
 	}
 	if idx < 64 {
-		word := (*(*[2]uint64)(unsafe.Pointer(&addr)))[0]
-		return uint8((word >> (63 - idx)) & 1)
-	} else {
-		word := (*(*[2]uint64)(unsafe.Pointer(&addr)))[1]
-		return uint8((word >> (127 - idx)) & 1)
+		return uint8((words[0] >> (63 - idx)) & 1)
 	}
+	return uint8((words[1] >> (127 - idx)) & 1)
 }
 
 func (k cidrKey) CommonPrefix(k2 cidrKey) uint {
-	addr1 := netip.Prefix(k).Addr()
-	addr2 := netip.Prefix(k2).Addr()
-	words1 := (*[2]uint64)(unsafe.Pointer(&addr1))
-	words2 := (*[2]uint64)(unsafe.Pointer(&addr2))
-	if addr1.Is4() {
-		word1 := uint32((*words1)[1])
-		word2 := uint32((*words2)[1])
+	words1 := (*[2]uint64)(unsafe.Pointer(&k))
+	words2 := (*[2]uint64)(unsafe.Pointer(&k2))
+	if netip.Prefix(k).Addr().Is4() {
+		word1 := uint32(words1[1])
+		word2 := uint32(words2[1])
 		return uint(bits.LeadingZeros32(word1 ^ word2))
 	}
-	v := bits.LeadingZeros64((*words1)[0] ^ (*words2)[0])
+	v := bits.LeadingZeros64(words1[0] ^ words2[0])
 	if v == 64 {
-		v += bits.LeadingZeros64((*words1)[1] ^ (*words2)[1])
+		v += bits.LeadingZeros64(words1[1] ^ words2[1])
 	}
 	return uint(v)
 }
