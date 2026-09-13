@@ -13,7 +13,6 @@ import (
 	"os"
 	"path"
 	"strconv"
-	"strings"
 
 	"github.com/cilium/ebpf"
 
@@ -1178,8 +1177,16 @@ func (e *Endpoint) notifyEndpointRegeneration(err error) {
 // / <global ID Prefix>:<cluster name>:<node name>:<endpoint ID> as a string.
 func (e *Endpoint) FormatGlobalEndpointID() string {
 	localNodeName := nodeTypes.GetName()
-	metadata := []string{endpointid.CiliumGlobalIdPrefix.String(), ipcache.AddressSpace, localNodeName, strconv.Itoa(int(e.ID))}
-	return strings.Join(metadata, ":")
+	prefix := endpointid.CiliumGlobalIdPrefix.String()
+	var buf [128]byte
+	b := append(buf[:0], prefix...)
+	b = append(b, ':')
+	b = append(b, ipcache.AddressSpace...)
+	b = append(b, ':')
+	b = append(b, localNodeName...)
+	b = append(b, ':')
+	b = strconv.AppendUint(b, uint64(e.ID), 10)
+	return string(b)
 }
 
 // This synchronizes the key-value store with a mapping of the endpoint's IP

@@ -60,8 +60,8 @@ func (k EndpointKey) ToAddr() netip.Addr {
 // String provides a string representation of the EndpointKey.
 func (k EndpointKey) String() string {
 	if addr := k.ToAddr(); addr.IsValid() {
-		b := make([]byte, 0, 16+1+5+1+3)
-		b = addr.AppendTo(b)
+		var buf [64]byte
+		b := addr.AppendTo(buf[:0])
 		if k.ClusterID != 0 {
 			b = append(b, '@')
 			b = strconv.AppendUint(b, uint64(k.ClusterID), 10)

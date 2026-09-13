@@ -11,6 +11,7 @@ import (
 	"maps"
 	"net/netip"
 	"runtime"
+	"strconv"
 	"sync"
 
 	"github.com/cilium/hive/cell"
@@ -318,12 +319,12 @@ func (mgr *endpointManager) Lookup(id string) (*endpoint.Endpoint, error) {
 
 	switch prefix {
 	case endpointid.CiliumLocalIdPrefix:
-		n, err := endpointid.ParseCiliumID(id)
-		if err != nil {
-			return nil, err
+		n, err := strconv.ParseInt(eid, 0, 64)
+		if err != nil || n < 0 {
+			return nil, fmt.Errorf("invalid numeric cilium id: %w", err)
 		}
 		if n > endpointid.MaxEndpointID {
-			return nil, fmt.Errorf("%d: endpoint ID too large", n)
+			return nil, fmt.Errorf("endpoint id too large: %d", n)
 		}
 		return mgr.lookupCiliumID(uint16(n)), nil
 

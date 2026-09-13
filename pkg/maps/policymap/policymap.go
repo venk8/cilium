@@ -114,8 +114,11 @@ func (pe PolicyEntry) IsDeny() bool {
 }
 
 func (pe *PolicyEntry) String() string {
-	prefixLen := pe.Flags.getPrefixLen()
-	return fmt.Sprintf("%d %d", pe.GetProxyPort(), prefixLen)
+	var buf [32]byte
+	b := strconv.AppendUint(buf[:0], uint64(pe.GetProxyPort()), 10)
+	b = append(b, ' ')
+	b = strconv.AppendUint(b, uint64(pe.Flags.getPrefixLen()), 10)
+	return string(b)
 }
 
 func (pe *PolicyEntry) New() bpf.MapValue { return &PolicyEntry{} }
@@ -237,9 +240,18 @@ type PolicyEntriesDump []PolicyEntryDump
 // String returns a string representation of PolicyEntriesDump
 func (p PolicyEntriesDump) String() string {
 	var sb strings.Builder
+	sb.Grow(len(p) * 60)
 	for _, entry := range p {
-		sb.WriteString(fmt.Sprintf("%20s: %s %s\n",
-			entry.Key.String(), entry.PolicyEntry.String(), entry.StatsValue.String()))
+		k := entry.Key.String()
+		if len(k) < 20 {
+			sb.WriteString(strings.Repeat(" ", 20-len(k)))
+		}
+		sb.WriteString(k)
+		sb.WriteString(": ")
+		sb.WriteString(entry.PolicyEntry.String())
+		sb.WriteByte(' ')
+		sb.WriteString(entry.StatsValue.String())
+		sb.WriteByte('\n')
 	}
 	return sb.String()
 }
@@ -288,7 +300,7 @@ func prefixLenToPortLen(plen uint8) uint16 {
 	return 0xffff >> plen
 }
 
-func (key *PolicyKey) PortProtoString() string {
+func (key *PolicyKey) appendPortProto(b []byte) []byte {
 	dport := key.GetDestPort()
 	protoStr := u8proto.U8proto(key.Nexthdr).String()
 	prefixLen := key.GetPrefixLen()
@@ -296,25 +308,39 @@ func (key *PolicyKey) PortProtoString() string {
 
 	switch {
 	case prefixLen == 0, prefixLen == NexthdrBits:
-		// Protocol wildcarded or specified, wildcarded port
-		return protoStr
+		return append(b, protoStr...)
 	case prefixLen > NexthdrBits && prefixLen < FullPrefixBits:
-		// Protocol specified, partially wildcarded port
 		portLen := prefixLenToPortLen(portPrefixLen)
-		return fmt.Sprintf("%d-%d/%s", dport, dport+portLen, protoStr)
+		b = strconv.AppendUint(b, uint64(dport), 10)
+		b = append(b, '-')
+		b = strconv.AppendUint(b, uint64(dport+portLen), 10)
+		b = append(b, '/')
+		return append(b, protoStr...)
 	case prefixLen == FullPrefixBits:
-		// Both protocol and port specified, nothing wildcarded
-		return fmt.Sprintf("%d/%s", dport, protoStr)
+		b = strconv.AppendUint(b, uint64(dport), 10)
+		b = append(b, '/')
+		return append(b, protoStr...)
 	default:
-		// Invalid prefix length
-		return fmt.Sprintf("<INVALID PREFIX LENGTH: %d>", prefixLen)
+		b = append(b, "<INVALID PREFIX LENGTH: "...)
+		b = strconv.AppendUint(b, uint64(prefixLen), 10)
+		return append(b, '>')
 	}
+}
+
+func (key *PolicyKey) PortProtoString() string {
+	var buf [32]byte
+	return string(key.appendPortProto(buf[:0]))
 }
 
 func (key *PolicyKey) String() string {
 	trafficDirectionString := trafficdirection.TrafficDirection(key.TrafficDirection).String()
-	portProtoStr := key.PortProtoString()
-	return fmt.Sprintf("%s: %d %s", trafficDirectionString, key.Identity, portProtoStr)
+	var buf [64]byte
+	b := append(buf[:0], trafficDirectionString...)
+	b = append(b, ':', ' ')
+	b = strconv.AppendUint(b, uint64(key.Identity), 10)
+	b = append(b, ' ')
+	b = key.appendPortProto(b)
+	return string(b)
 }
 
 func (key *PolicyKey) New() bpf.MapKey { return &PolicyKey{} }
