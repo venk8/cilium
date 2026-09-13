@@ -5,17 +5,35 @@ package watchers
 
 import (
 	"log/slog"
+	"sync"
 
 	"github.com/cilium/cilium/pkg/endpoint"
 	"github.com/cilium/cilium/pkg/k8s"
 	cilium_v2a1 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
 	"github.com/cilium/cilium/pkg/k8s/types"
-	k8sUtils "github.com/cilium/cilium/pkg/k8s/utils"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/metrics"
 	"github.com/cilium/cilium/pkg/time"
 )
+
+var cesIndexMapPool = sync.Pool{
+	New: func() any {
+		return make(map[string]*cilium_v2a1.CoreCiliumEndpoint, 64)
+	},
+}
+
+func getCESIndexMap() map[string]*cilium_v2a1.CoreCiliumEndpoint {
+	return cesIndexMapPool.Get().(map[string]*cilium_v2a1.CoreCiliumEndpoint)
+}
+
+func putCESIndexMap(m map[string]*cilium_v2a1.CoreCiliumEndpoint) {
+	if len(m) > 512 {
+		return
+	}
+	clear(m)
+	cesIndexMapPool.Put(m)
+}
 
 type endpointWatcher interface {
 	endpointUpdated(oldC, newC *types.CiliumEndpoint)
@@ -45,15 +63,16 @@ func newCESSubscriber(logger *slog.Logger, k *K8sCiliumEndpointsWatcher) *cesSub
 // OnAdd invoked for newly created CESs, iterates over coreCEPs
 // packed in the CES, converts coreCEP into types.CEP and calls endpointUpdated only for remoteNode CEPs.
 func (cs *cesSubscriber) OnAdd(ces *cilium_v2a1.CiliumEndpointSlice) {
-	for _, ep := range ces.Endpoints {
-		cep := k8s.ConvertCoreCiliumEndpointToTypesCiliumEndpoint(&ep, ces.Namespace)
+	for i := range ces.Endpoints {
+		ep := &ces.Endpoints[i]
+		cep := k8s.ConvertCoreCiliumEndpointToTypesCiliumEndpoint(ep, ces.Namespace)
 		CEPName := cep.Namespace + "/" + cep.Name
 		cs.logger.Debug(
 			"CES added, calling CoreEndpointUpdate",
 			logfields.CESName, ces.GetName(),
 			logfields.CEPName, CEPName,
 		)
-		if p := cs.epCache.LookupCEPName(k8sUtils.GetObjNamespaceName(cep)); p != nil {
+		if p := cs.epCache.LookupCEPName(CEPName); p != nil {
 			timeSinceCepCreated := time.Since(p.GetCreatedAt())
 			metrics.EndpointPropagationDelay.WithLabelValues().Observe(timeSinceCepCreated.Seconds())
 		}
@@ -69,35 +88,38 @@ func (cs *cesSubscriber) OnAdd(ces *cilium_v2a1.CiliumEndpointSlice) {
 // 3) any existing coreCEPs are modified in CES
 // call endpointUpdated/endpointDeleted only for remote node CEPs.
 func (cs *cesSubscriber) OnUpdate(oldCES, newCES *cilium_v2a1.CiliumEndpointSlice) {
-	oldCEPs := make(map[string]*types.CiliumEndpoint, len(oldCES.Endpoints))
-	for _, ep := range oldCES.Endpoints {
-		cep := k8s.ConvertCoreCiliumEndpointToTypesCiliumEndpoint(&ep, oldCES.Namespace)
-		oldCEPs[cep.Namespace+"/"+cep.Name] = cep
+	oldMap := getCESIndexMap()
+	defer putCESIndexMap(oldMap)
+	for i := range oldCES.Endpoints {
+		oldMap[oldCES.Endpoints[i].Name] = &oldCES.Endpoints[i]
 	}
 
-	newCEPs := make(map[string]*types.CiliumEndpoint, len(newCES.Endpoints))
-	for _, ep := range newCES.Endpoints {
-		cep := k8s.ConvertCoreCiliumEndpointToTypesCiliumEndpoint(&ep, newCES.Namespace)
-		newCEPs[cep.Namespace+"/"+cep.Name] = cep
+	newMap := getCESIndexMap()
+	defer putCESIndexMap(newMap)
+	for i := range newCES.Endpoints {
+		newMap[newCES.Endpoints[i].Name] = &newCES.Endpoints[i]
 	}
 
 	// Handle, removed CEPs from the CES.
 	// old CES would have one or more stale cep entries, remove stale CEPs from oldCES.
-	for CEPName, oldCEP := range oldCEPs {
-		if _, exists := newCEPs[CEPName]; !exists {
+	for name, oldEP := range oldMap {
+		if _, exists := newMap[name]; !exists {
+			oldCEP := k8s.ConvertCoreCiliumEndpointToTypesCiliumEndpoint(oldEP, oldCES.Namespace)
 			cs.onDelete(newCES, oldCEP)
 		}
 	}
 
 	// Handle any new CEPs inserted in the CES.
-	for CEPName, newCEP := range newCEPs {
-		if _, exists := oldCEPs[CEPName]; !exists {
+	for name, newEP := range newMap {
+		if _, exists := oldMap[name]; !exists {
+			newCEP := k8s.ConvertCoreCiliumEndpointToTypesCiliumEndpoint(newEP, newCES.Namespace)
+			CEPName := newCEP.Namespace + "/" + newCEP.Name
 			cs.logger.Debug(
 				"CEP inserted, calling endpointUpdated",
 				logfields.CESName, newCES.GetName(),
 				logfields.CEPName, CEPName,
 			)
-			if p := cs.epCache.LookupCEPName(k8sUtils.GetObjNamespaceName(newCEP)); p != nil {
+			if p := cs.epCache.LookupCEPName(CEPName); p != nil {
 				timeSinceCepCreated := time.Since(p.GetCreatedAt())
 				metrics.EndpointPropagationDelay.WithLabelValues().Observe(timeSinceCepCreated.Seconds())
 			}
@@ -106,11 +128,13 @@ func (cs *cesSubscriber) OnUpdate(oldCES, newCES *cilium_v2a1.CiliumEndpointSlic
 	}
 
 	// process if any CEP value changed from old to new
-	for CEPName, newCEP := range newCEPs {
-		if oldCEP, exists := oldCEPs[CEPName]; exists {
-			if oldCEP.DeepEqual(newCEP) {
+	for name, newEP := range newMap {
+		if oldEP, exists := oldMap[name]; exists {
+			if oldEP.DeepEqual(newEP) {
 				continue
 			}
+			newCEP := k8s.ConvertCoreCiliumEndpointToTypesCiliumEndpoint(newEP, newCES.Namespace)
+			CEPName := newCEP.Namespace + "/" + newCEP.Name
 			cs.logger.Debug(
 				"CES updated, calling endpointUpdated",
 				logfields.CESName, newCES.GetName(),
@@ -124,8 +148,8 @@ func (cs *cesSubscriber) OnUpdate(oldCES, newCES *cilium_v2a1.CiliumEndpointSlic
 // OnDelete iterates over core CEPs in the slice and deletes those from remote Nodes.
 // This is invoked in response to a CES delete event.
 func (cs *cesSubscriber) OnDelete(ces *cilium_v2a1.CiliumEndpointSlice) {
-	for _, ep := range ces.Endpoints {
-		cep := k8s.ConvertCoreCiliumEndpointToTypesCiliumEndpoint(&ep, ces.Namespace)
+	for i := range ces.Endpoints {
+		cep := k8s.ConvertCoreCiliumEndpointToTypesCiliumEndpoint(&ces.Endpoints[i], ces.Namespace)
 		cs.onDelete(ces, cep)
 	}
 }
