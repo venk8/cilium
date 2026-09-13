@@ -5,10 +5,10 @@ package namemanager
 
 import (
 	"context"
-	"hash/fnv"
 	"log/slog"
 	"net/netip"
 	"regexp"
+	"strings"
 
 	"github.com/cilium/hive/cell"
 	"github.com/cilium/hive/job"
@@ -407,9 +407,16 @@ func (n *manager) UnlockName(name string) {
 // nameLockIndex hashes the DNS name to a uint32, then returns that
 // mod the bucket count.
 func nameLockIndex(name string, cnt int) uint32 {
-	h := fnv.New32()
-	_, _ = h.Write([]byte(name)) // cannot return error
-	return h.Sum32() % uint32(cnt)
+	const (
+		offset32 = 2166136261
+		prime32  = 16777619
+	)
+	var h uint32 = offset32
+	for i := 0; i < len(name); i++ {
+		h *= prime32
+		h ^= uint32(name[i])
+	}
+	return h % uint32(cnt)
 }
 
 type nameMetadata struct {
@@ -417,16 +424,40 @@ type nameMetadata struct {
 	labels labels.Labels // if empty, metadata will be removed for this name
 }
 
+func matchLiteralName(dnsName, matchName string) bool {
+	if len(dnsName) > 0 && dnsName[len(dnsName)-1] == '.' {
+		dnsName = dnsName[:len(dnsName)-1]
+	}
+	if len(matchName) > 0 && matchName[len(matchName)-1] == '.' {
+		matchName = matchName[:len(matchName)-1]
+	}
+	if len(dnsName) != len(matchName) {
+		return false
+	}
+	return strings.EqualFold(dnsName, matchName)
+}
+
 // deriveLabelsForName derives what `fqdn:` labels we want to associate with
 // IPs for this DNS name, i.e. what selectors match the DNS name.
 func deriveLabelsForName(dnsName string, selectors map[api.FQDNSelector]*regexp.Regexp) labels.Labels {
-	lbls := labels.Labels{}
+	var lbls labels.Labels
 	for fqdnSel, fqdnRegex := range selectors {
-		matches := fqdnRegex.MatchString(dnsName)
+		var matches bool
+		if len(fqdnSel.MatchName) > 0 {
+			matches = matchLiteralName(dnsName, fqdnSel.MatchName)
+		} else if fqdnRegex != nil {
+			matches = fqdnRegex.MatchString(dnsName)
+		}
 		if matches {
+			if lbls == nil {
+				lbls = make(labels.Labels)
+			}
 			l := fqdnSel.IdentityLabel()
 			lbls[l.Key] = l
 		}
+	}
+	if lbls == nil {
+		return labels.Labels{}
 	}
 	return lbls
 }

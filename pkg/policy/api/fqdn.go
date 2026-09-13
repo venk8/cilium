@@ -97,11 +97,27 @@ func (s *FQDNSelector) IdentityLabel() labels.Label {
 // Validate for FQDNSelector is a little wonky. While we do more processing
 // when using MatchName the basic requirement is that is a valid regexp. We
 // test that it can compile here.
+func isAllowedMatchNameChar(c byte) bool {
+	return (c >= 'a' && c <= 'z') ||
+		(c >= 'A' && c <= 'Z') ||
+		(c >= '0' && c <= '9') ||
+		c == '-' || c == '_' || c == '.'
+}
+
+func hasOnlyAllowedMatchNameChars(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if !isAllowedMatchNameChar(s[i]) {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *FQDNSelector) Validate() error {
 	if len(s.MatchName) > 0 && len(s.MatchPattern) > 0 {
 		return fmt.Errorf("only one of MatchName or MatchPattern is allowed in an FQDNSelector")
 	}
-	if len(s.MatchName) > 0 && !allowedMatchNameChars.MatchString(s.MatchName) {
+	if len(s.MatchName) > 0 && !hasOnlyAllowedMatchNameChars(s.MatchName) {
 		return fmt.Errorf("Invalid characters in MatchName: \"%s\". Only 0-9, a-z, A-Z and ., -, _ characters are allowed", s.MatchName)
 	}
 
@@ -136,7 +152,7 @@ type PortRulesDNS []PortRuleDNS
 // Validate checks that the matchName in the portRule can be compiled as a
 // regex. It does not check that a DNS name is a valid DNS name.
 func (r *PortRuleDNS) Validate() error {
-	if len(r.MatchName) > 0 && !allowedMatchNameChars.MatchString(r.MatchName) {
+	if len(r.MatchName) > 0 && !hasOnlyAllowedMatchNameChars(r.MatchName) {
 		return fmt.Errorf("Invalid characters in MatchName: \"%s\". Only 0-9, a-z, A-Z and . and - characters are allowed", r.MatchName)
 	}
 
