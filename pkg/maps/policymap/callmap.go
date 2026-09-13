@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 
 	"github.com/cilium/cilium/pkg/bpf"
 )
@@ -26,15 +27,22 @@ type PlumbingValue struct {
 }
 
 func (k *PlumbingKey) String() string {
-	return fmt.Sprintf("Endpoint: %d", k.Key)
+	var buf [24]byte
+	b := append(buf[:0], "Endpoint: "...)
+	b = strconv.AppendUint(b, uint64(k.Key), 10)
+	return string(b)
 }
 func (k *PlumbingKey) New() bpf.MapKey { return &PlumbingKey{} }
 
 func (v *PlumbingValue) String() string {
-	return fmt.Sprintf("fd: %d", v.Fd)
+	var buf [16]byte
+	b := append(buf[:0], "fd: "...)
+	b = strconv.AppendUint(b, uint64(v.Fd), 10)
+	return string(b)
 }
 
 func (k *PlumbingValue) New() bpf.MapValue { return &PlumbingValue{} }
+
 
 // RemoveGlobalMapping removes the mapping from the specified endpoint ID to
 // the BPF policy program for that endpoint.

@@ -193,7 +193,13 @@ func (s *ActiveConnectionTrackerKey) New() bpf.MapKey { return &ActiveConnection
 
 func (v *ActiveConnectionTrackerKey) String() string {
 	svcID := byteorder.HostToNetwork16(v.SvcID)
-	return fmt.Sprintf("%d[%s]", svcID, option.Config.GetZone(v.Zone))
+	zone := option.Config.GetZone(v.Zone)
+	var buf [32]byte
+	b := strconv.AppendUint(buf[:0], uint64(svcID), 10)
+	b = append(b, '[')
+	b = append(b, zone...)
+	b = append(b, ']')
+	return string(b)
 }
 
 // ActiveConnectionTrackerValue is the value in ActiveConnectionTrackingMap.
@@ -207,8 +213,14 @@ type ActiveConnectionTrackerValue struct {
 func (s *ActiveConnectionTrackerValue) New() bpf.MapValue { return &ActiveConnectionTrackerValue{} }
 
 func (s *ActiveConnectionTrackerValue) String() string {
-	return fmt.Sprintf("+%d -%d", s.Opened, s.Closed)
+	var buf [32]byte
+	b := append(buf[:0], '+')
+	b = strconv.AppendUint(b, uint64(s.Opened), 10)
+	b = append(b, ' ', '-')
+	b = strconv.AppendUint(b, uint64(s.Closed), 10)
+	return string(b)
 }
+
 
 // FailedConnectionTrackerValue is the value in FailedConnectionTrackingMap.
 type FailedConnectionTrackerValue struct {

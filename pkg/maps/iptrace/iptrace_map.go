@@ -4,7 +4,7 @@
 package iptrace
 
 import (
-	"fmt"
+	"strconv"
 
 	"github.com/cilium/ebpf"
 
@@ -26,16 +26,17 @@ type Key uint32
 type TraceId uint64
 
 // String returns the string representation of the key.
-func (k *Key) String() string { return fmt.Sprintf("%d", uint32(*k)) }
+func (k *Key) String() string { return strconv.FormatUint(uint64(*k), 10) }
 
 // New creates a new key.
 func (k *Key) New() bpf.MapKey { return new(Key) }
 
 // String returns the string representation of the value.
-func (v *TraceId) String() string { return fmt.Sprintf("%d", uint64(*v)) }
+func (v *TraceId) String() string { return strconv.FormatUint(uint64(*v), 10) }
 
 // New creates a new value.
 func (v *TraceId) New() bpf.MapValue { return new(TraceId) }
+
 
 // ipTraceMap is the trace map.
 type ipTraceMap struct {

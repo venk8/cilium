@@ -107,8 +107,14 @@ type PerClusterNATMapVal struct {
 	Fd uint32
 }
 
-func (v *PerClusterNATMapVal) String() string    { return fmt.Sprintf("fd=%d", v.Fd) }
+func (v *PerClusterNATMapVal) String() string {
+	var buf [16]byte
+	b := append(buf[:0], "fd="...)
+	b = strconv.AppendUint(b, uint64(v.Fd), 10)
+	return string(b)
+}
 func (n *PerClusterNATMapVal) New() bpf.MapValue { return &PerClusterNATMapVal{} }
+
 
 func newPerClusterNATMap(family IPFamily, innerMapEntries int) *perClusterNATMap {
 	var (

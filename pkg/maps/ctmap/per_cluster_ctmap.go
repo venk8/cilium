@@ -120,9 +120,15 @@ type PerClusterCTMapVal struct {
 	Fd uint32
 }
 
-func (v *PerClusterCTMapVal) String() string { return fmt.Sprintf("fd=%d", v.Fd) }
+func (v *PerClusterCTMapVal) String() string {
+	var buf [16]byte
+	b := append(buf[:0], "fd="...)
+	b = strconv.AppendUint(b, uint64(v.Fd), 10)
+	return string(b)
+}
 
 func (v *PerClusterCTMapVal) New() bpf.MapValue { return &PerClusterCTMapVal{} }
+
 
 // NewPerClusterCTMaps returns a new instance of the per-cluster CT maps manager.
 func NewPerClusterCTMaps(ipv4, ipv6 bool) *perClusterCTMaps {

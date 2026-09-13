@@ -381,12 +381,25 @@ func (pc PrefixCluster) ClusterID() uint32 {
 	return pc.clusterID
 }
 
+// AppendTo appends the string representation of the PrefixCluster to b and returns the resulting slice.
+func (pc PrefixCluster) AppendTo(b []byte) []byte {
+	b = pc.prefix.AppendTo(b)
+	if pc.clusterID != 0 {
+		b = append(b, '@')
+		b = strconv.AppendUint(b, uint64(pc.clusterID), 10)
+	}
+	return b
+}
+
 func (pc PrefixCluster) String() string {
 	if pc.clusterID == 0 {
 		return pc.prefix.String()
 	}
-	return pc.prefix.String() + "@" + strconv.FormatUint(uint64(pc.clusterID), 10)
+	b := make([]byte, 0, 64)
+	b = pc.AppendTo(b)
+	return string(b)
 }
+
 
 // AsPrefix returns the IP prefix part of PrefixCluster as a netip.Prefix type.
 // This function exists for keeping backward compatibility between the existing
