@@ -91,7 +91,7 @@ func BenchmarkFqdnCache(b *testing.B) {
 	const endpoints = 8
 
 	caches := make([]*fqdn.DNSCache, 0, endpoints)
-	for b.Loop() {
+	for range endpoints {
 		lookupTime := time.Now()
 		dnsHistory := fqdn.NewDNSCache(0)
 
@@ -115,6 +115,8 @@ func BenchmarkFqdnCache(b *testing.B) {
 	prefixMatcher := func(_ netip.Addr) bool { return true }
 	nameMatcher := func(_ string) bool { return true }
 
+	b.ResetTimer()
+	b.ReportAllocs()
 	for b.Loop() {
 		nameManager.dnsHistoryModel("", prefixMatcher, nameMatcher, "")
 	}
