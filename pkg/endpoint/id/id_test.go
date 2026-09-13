@@ -125,3 +125,29 @@ func TestNewIPPrefix(t *testing.T) {
 	require.True(t, strings.HasPrefix(NewIPPrefixID(netip.MustParseAddr("1.1.1.1")), string(IPv4Prefix)))
 	require.True(t, strings.HasPrefix(NewIPPrefixID(netip.MustParseAddr("f00d::1")), string(IPv6Prefix)))
 }
+
+func BenchmarkNewCiliumID(b *testing.B) {
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = NewCiliumID(12345)
+	}
+}
+
+func BenchmarkNewIPPrefixID(b *testing.B) {
+	ip4 := netip.MustParseAddr("10.0.0.1")
+	ip6 := netip.MustParseAddr("fd00::1")
+
+	b.Run("IPv4", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			_ = NewIPPrefixID(ip4)
+		}
+	})
+
+	b.Run("IPv6", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			_ = NewIPPrefixID(ip6)
+		}
+	})
+}
