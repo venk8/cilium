@@ -18,6 +18,7 @@ import (
 	"github.com/cilium/statedb/index"
 	"github.com/cilium/stream"
 
+	"github.com/cilium/cilium/pkg/byteorder"
 	"github.com/cilium/cilium/pkg/loadbalancer"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/maps/nat"
@@ -230,14 +231,13 @@ func (m *Stats) countNat(ctx context.Context) error {
 	if m.natMap4 != nil {
 		tupleToPortCount := make(map[SNATTuple4]uint16, 128)
 		_, err := m.natMap4.DumpBatch4(func(k *tuple.TupleKey4, _ *nat.NatEntry4) {
-			key := *k.ToHost().(*tuple.TupleKey4)
-			if flagsIsIn(key.Flags) &&
-				(key.NextHeader == u8proto.TCP || key.NextHeader == u8proto.ICMP ||
-					key.NextHeader == u8proto.UDP) {
+			if flagsIsIn(k.Flags) &&
+				(k.NextHeader == u8proto.TCP || k.NextHeader == u8proto.ICMP ||
+					k.NextHeader == u8proto.UDP) {
+				key := *k
+				key.SourcePort = byteorder.NetworkToHost16(k.SourcePort)
 				key.DestPort = 0
-				ports := tupleToPortCount[SNATTuple4(key)]
-				ports++
-				tupleToPortCount[SNATTuple4(key)] = ports
+				tupleToPortCount[SNATTuple4(key)]++
 			}
 		})
 
@@ -260,14 +260,13 @@ func (m *Stats) countNat(ctx context.Context) error {
 	if m.natMap6 != nil {
 		tupleToPortCount := make(map[SNATTuple6]uint16, 128)
 		_, err := m.natMap6.DumpBatch6(func(k *tuple.TupleKey6, _ *nat.NatEntry6) {
-			key := *k.ToHost().(*tuple.TupleKey6)
-			if flagsIsIn(key.Flags) &&
-				(key.NextHeader == u8proto.TCP || key.NextHeader == u8proto.ICMPv6 ||
-					key.NextHeader == u8proto.UDP) {
+			if flagsIsIn(k.Flags) &&
+				(k.NextHeader == u8proto.TCP || k.NextHeader == u8proto.ICMPv6 ||
+					k.NextHeader == u8proto.UDP) {
+				key := *k
+				key.SourcePort = byteorder.NetworkToHost16(k.SourcePort)
 				key.DestPort = 0
-				ports := tupleToPortCount[SNATTuple6(key)]
-				ports++
-				tupleToPortCount[SNATTuple6(key)] = ports
+				tupleToPortCount[SNATTuple6(key)]++
 			}
 		})
 
