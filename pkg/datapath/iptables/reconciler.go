@@ -10,6 +10,7 @@ import (
 
 	"github.com/cilium/hive/cell"
 	"github.com/cilium/stream"
+	"go4.org/netipx"
 	"k8s.io/apimachinery/pkg/util/sets"
 
 	"github.com/cilium/cilium/pkg/datapath/tables"
@@ -51,8 +52,8 @@ func (lni localNodeInfo) isValid() bool {
 }
 
 func toLocalNodeInfo(n node.LocalNode) localNodeInfo {
-	internalIPv4, _ := netip.AddrFromSlice(n.GetCiliumInternalIP(false).To4())
-	internalIPv6, _ := netip.AddrFromSlice(n.GetCiliumInternalIP(true).To16())
+	internalIPv4, _ := netipx.FromStdIP(n.GetCiliumInternalIP(false))
+	internalIPv6, _ := netipx.FromStdIP(n.GetCiliumInternalIP(true))
 
 	return localNodeInfo{
 		internalIPv4:          internalIPv4,
