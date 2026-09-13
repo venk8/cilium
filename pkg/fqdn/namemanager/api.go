@@ -61,13 +61,13 @@ func (n *manager) model() *models.NameManager {
 // endpointID may be "" in order to get DNS history for all endpoints.
 func (n *manager) dnsHistoryModel(endpointID string, prefixMatcher fqdn.PrefixMatcherFunc, nameMatcher fqdn.NameMatcherFunc, source string) (lookups []*models.DNSLookup, err error) {
 	if source == DNSSourceGlobal {
-		globalSourceEntries := []*models.DNSLookup{}
-		for _, lookup := range n.cache.Dump() {
+		cachedLookups := n.cache.Dump()
+		globalSourceEntries := make([]*models.DNSLookup, 0, len(cachedLookups))
+		for _, lookup := range cachedLookups {
 			// The API model needs strings
-			IPStrings := make([]string, 0, len(lookup.IPs))
-
-			for _, ip := range lookup.IPs {
-				IPStrings = append(IPStrings, ip.String())
+			IPStrings := make([]string, len(lookup.IPs))
+			for i, ip := range lookup.IPs {
+				IPStrings[i] = ip.String()
 			}
 
 			globalSourceEntries = append(globalSourceEntries, &models.DNSLookup{
@@ -95,63 +95,60 @@ func (n *manager) dnsHistoryModel(endpointID string, prefixMatcher fqdn.PrefixMa
 	}
 
 	for _, ep := range eps {
-		lookupSourceEntries := []*models.DNSLookup{}
-		connectionSourceEntries := []*models.DNSLookup{}
-		for _, lookup := range ep.DNSHistory.Dump() {
-			if !nameMatcher(lookup.Name) {
-				continue
-			}
-
-			// The API model needs strings
-			IPStrings := make([]string, 0, len(lookup.IPs))
-
-			// only proceed if any IP matches the prefix selector
-			anIPMatches := false
-			for _, ip := range lookup.IPs {
-				anIPMatches = anIPMatches || prefixMatcher(ip)
-				IPStrings = append(IPStrings, ip.String())
-			}
-			if !anIPMatches {
-				continue
-			}
-
-			lookupSourceEntries = append(lookupSourceEntries, &models.DNSLookup{
-				Fqdn:           lookup.Name,
-				Ips:            IPStrings,
-				LookupTime:     strfmt.DateTime(lookup.LookupTime),
-				TTL:            int64(lookup.TTL),
-				ExpirationTime: strfmt.DateTime(lookup.ExpirationTime),
-				EndpointID:     int64(ep.ID),
-				Source:         DNSSourceLookup,
-			})
-		}
-
-		for _, delete := range ep.DNSZombies.DumpAlive(prefixMatcher) {
-			for _, name := range delete.Names {
-				if !nameMatcher(name) {
+		if source != DNSSourceConnection {
+			for _, lookup := range ep.DNSHistory.Dump() {
+				if !nameMatcher(lookup.Name) {
 					continue
 				}
 
-				connectionSourceEntries = append(connectionSourceEntries, &models.DNSLookup{
-					Fqdn:           name,
-					Ips:            []string{delete.IP.String()},
-					LookupTime:     strfmt.DateTime(delete.AliveAt),
-					TTL:            0,
-					ExpirationTime: strfmt.DateTime(ep.DNSZombies.NextCTGCUpdate()),
+				// only proceed if any IP matches the prefix selector
+				anIPMatches := false
+				for _, ip := range lookup.IPs {
+					if prefixMatcher(ip) {
+						anIPMatches = true
+						break
+					}
+				}
+				if !anIPMatches {
+					continue
+				}
+
+				// The API model needs strings
+				IPStrings := make([]string, len(lookup.IPs))
+				for i, ip := range lookup.IPs {
+					IPStrings[i] = ip.String()
+				}
+
+				lookups = append(lookups, &models.DNSLookup{
+					Fqdn:           lookup.Name,
+					Ips:            IPStrings,
+					LookupTime:     strfmt.DateTime(lookup.LookupTime),
+					TTL:            int64(lookup.TTL),
+					ExpirationTime: strfmt.DateTime(lookup.ExpirationTime),
 					EndpointID:     int64(ep.ID),
-					Source:         DNSSourceConnection,
+					Source:         DNSSourceLookup,
 				})
 			}
 		}
 
-		switch source {
-		case DNSSourceLookup:
-			lookups = append(lookups, lookupSourceEntries...)
-		case DNSSourceConnection:
-			lookups = append(lookups, connectionSourceEntries...)
-		default:
-			lookups = append(lookups, lookupSourceEntries...)
-			lookups = append(lookups, connectionSourceEntries...)
+		if source != DNSSourceLookup {
+			for _, delete := range ep.DNSZombies.DumpAlive(prefixMatcher) {
+				for _, name := range delete.Names {
+					if !nameMatcher(name) {
+						continue
+					}
+
+					lookups = append(lookups, &models.DNSLookup{
+						Fqdn:           name,
+						Ips:            []string{delete.IP.String()},
+						LookupTime:     strfmt.DateTime(delete.AliveAt),
+						TTL:            0,
+						ExpirationTime: strfmt.DateTime(ep.DNSZombies.NextCTGCUpdate()),
+						EndpointID:     int64(ep.ID),
+						Source:         DNSSourceConnection,
+					})
+				}
+			}
 		}
 	}
 
