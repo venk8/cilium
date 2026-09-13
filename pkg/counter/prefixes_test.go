@@ -187,3 +187,15 @@ func TestDefaultPrefixLengthCounter(t *testing.T) {
 	require.Equal(t, 1, result.v4[net.IPv4len*8])
 	require.Equal(t, 1, result.v6[net.IPv6len*8])
 }
+
+func BenchmarkPrefixLengthCounter_ToBPFData(b *testing.B) {
+	c := DefaultPrefixLengthCounter()
+	for i := 1; i <= 30; i++ {
+		_, _ = c.Add([]netip.Prefix{createIPNet(i, 32)})
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = c.ToBPFData()
+	}
+}
