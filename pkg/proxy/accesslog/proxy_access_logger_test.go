@@ -23,6 +23,7 @@ import (
 	"github.com/cilium/cilium/pkg/monitor/agent/listener"
 	"github.com/cilium/cilium/pkg/monitor/api"
 	"github.com/cilium/cilium/pkg/monitor/payload"
+	"github.com/cilium/cilium/pkg/time"
 	"github.com/cilium/cilium/pkg/u8proto"
 )
 
@@ -283,3 +284,36 @@ func BenchmarkLogNotifierWithListeners(b *testing.B) {
 		b.Fatalf("failed to stop hive: %v", err)
 	}
 }
+
+func TestNewLogRecordTimestamp(t *testing.T) {
+	logger := NewProxyAccessLogger(hivetest.Logger(t), ProxyAccessLoggerConfig{}, nil, nil, nil)
+	customTime := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
+
+	// With explicit timestamp tag
+	recordWithTag, err := logger.NewLogRecord(context.Background(), TypeRequest, true, LogTags.Timestamp(customTime))
+	require.NoError(t, err)
+	require.Equal(t, customTime.Format(time.RFC3339Nano), recordWithTag.Timestamp)
+
+	// Without timestamp tag
+	recordWithoutTag, err := logger.NewLogRecord(context.Background(), TypeRequest, true)
+	require.NoError(t, err)
+	require.NotEmpty(t, recordWithoutTag.Timestamp)
+}
+
+func TestGetLogFields(t *testing.T) {
+	pal := &proxyAccessLogger{}
+	lr := &LogRecord{
+		Type:    TypeRequest,
+		Verdict: VerdictForwarded,
+		Info:    "test",
+		HTTP: &LogRecordHTTP{
+			Code:     200,
+			Method:   "GET",
+			Protocol: "HTTP/1.1",
+		},
+	}
+	fields := pal.getLogFields(lr)
+	require.NotEmpty(t, fields)
+	require.Equal(t, 16, len(fields))
+}
+

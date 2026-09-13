@@ -67,25 +67,30 @@ func (r *proxyAccessLogger) NewLogRecord(ctx context.Context, t FlowType, ingres
 		ObservationPoint:  observationPoint,
 		IPVersion:         VersionIPv4,
 		TransportProtocol: 6,
-		Timestamp:         time.Now().UTC().Format(time.RFC3339Nano),
 		NodeAddressInfo:   NodeAddressInfo{},
 	}
 
-	ln, err := r.localNodeStore.Get(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get local node: %w", err)
-	}
+	if r.localNodeStore != nil {
+		ln, err := r.localNodeStore.Get(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get local node: %w", err)
+		}
 
-	if ip := ln.GetNodeIP(false); ip != nil {
-		lr.NodeAddressInfo.IPv4 = ip.String()
-	}
+		if ip := ln.GetNodeIP(false); ip != nil {
+			lr.NodeAddressInfo.IPv4 = ip.String()
+		}
 
-	if ip := ln.GetNodeIP(true); ip != nil {
-		lr.NodeAddressInfo.IPv6 = ip.String()
+		if ip := ln.GetNodeIP(true); ip != nil {
+			lr.NodeAddressInfo.IPv6 = ip.String()
+		}
 	}
 
 	for _, tagFn := range tags {
 		tagFn(&lr, r.endpointInfoRegistry)
+	}
+
+	if lr.Timestamp == "" {
+		lr.Timestamp = time.Now().UTC().Format(time.RFC3339Nano)
 	}
 
 	return &lr, nil
@@ -102,7 +107,7 @@ func (r *proxyAccessLogger) Log(lr *LogRecord) {
 }
 
 func (r *proxyAccessLogger) getLogFields(lr *LogRecord) []any {
-	fields := []any{}
+	fields := make([]any, 0, 16)
 
 	fields = append(fields,
 		FieldType, lr.Type,
