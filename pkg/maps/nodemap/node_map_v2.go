@@ -95,11 +95,10 @@ func newNodeKey(ip netip.Addr) NodeKey {
 	if ip.Is4() {
 		ip4 := ip.As4()
 		result.Family = bpf.EndpointKeyIPv4
-		copy(result.IP[:], ip4[:])
+		*(*[4]byte)(result.IP[:4]) = ip4
 	} else {
-		ip6 := ip.As16()
 		result.Family = bpf.EndpointKeyIPv6
-		copy(result.IP[:], ip6[:])
+		result.IP = ip.As16()
 	}
 	return result
 }

@@ -4,8 +4,8 @@
 package authmap
 
 import (
-	"fmt"
 	"log/slog"
+	"strconv"
 
 	"github.com/cilium/cilium/pkg/bpf"
 	"github.com/cilium/cilium/pkg/datapath/linux/utime"
@@ -95,7 +95,16 @@ type AuthKey struct {
 }
 
 func (r *AuthKey) String() string {
-	return fmt.Sprintf("localIdentity=%d, remoteIdentity=%d, remoteNodeID=%d, authType=%d", r.LocalIdentity, r.RemoteIdentity, r.RemoteNodeID, r.AuthType)
+	var buf [96]byte
+	b := append(buf[:0], "localIdentity="...)
+	b = strconv.AppendUint(b, uint64(r.LocalIdentity), 10)
+	b = append(b, ", remoteIdentity="...)
+	b = strconv.AppendUint(b, uint64(r.RemoteIdentity), 10)
+	b = append(b, ", remoteNodeID="...)
+	b = strconv.AppendUint(b, uint64(r.RemoteNodeID), 10)
+	b = append(b, ", authType="...)
+	b = strconv.AppendUint(b, uint64(r.AuthType), 10)
+	return string(b)
 }
 func (r *AuthKey) New() bpf.MapKey { return &AuthKey{} }
 
@@ -107,7 +116,11 @@ type AuthInfo struct {
 }
 
 func (r *AuthInfo) String() string {
-	return fmt.Sprintf("expiration=%q", r.Expiration)
+	var buf [64]byte
+	b := append(buf[:0], "expiration=\""...)
+	b = append(b, r.Expiration.String()...)
+	b = append(b, '"')
+	return string(b)
 }
 
 func (r *AuthInfo) New() bpf.MapValue { return &AuthInfo{} }

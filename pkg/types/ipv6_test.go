@@ -25,3 +25,30 @@ func TestStringV6(t *testing.T) {
 
 	require.Equal(t, expectedStr, result)
 }
+
+func BenchmarkIPv6_FromAddr(b *testing.B) {
+	addr := netip.MustParseAddr("f00d::ac10:14:0:1")
+	var v6 IPv6
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		v6.FromAddr(addr)
+	}
+}
+
+func BenchmarkIPv6_IsZero(b *testing.B) {
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		_ = testIPv6Address.IsZero()
+	}
+}
+
+func BenchmarkIPv6_AppendTo(b *testing.B) {
+	var buf [64]byte
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		_ = testIPv6Address.AppendTo(buf[:0])
+	}
+}

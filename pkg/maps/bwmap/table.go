@@ -5,6 +5,7 @@ package bwmap
 
 import (
 	"encoding"
+	"encoding/binary"
 	"strconv"
 	"strings"
 
@@ -45,8 +46,10 @@ type EdtIDKey struct {
 }
 
 func (k EdtIDKey) Key() index.Key {
-	key := append(index.Uint16(k.EndpointID), '+')
-	key = append(key, index.Uint16(uint16(k.Direction))...)
+	key := make(index.Key, 5)
+	binary.BigEndian.PutUint16(key[0:2], k.EndpointID)
+	key[2] = '+'
+	binary.BigEndian.PutUint16(key[3:5], uint16(k.Direction))
 	return key
 }
 

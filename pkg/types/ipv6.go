@@ -9,12 +9,7 @@ import "net/netip"
 type IPv6 [16]byte
 
 func (v6 IPv6) IsZero() bool {
-	for i := range 16 {
-		if v6[i] != 0 {
-			return false
-		}
-	}
-	return true
+	return v6 == IPv6{}
 }
 
 func (v6 IPv6) Addr() netip.Addr {
@@ -25,14 +20,18 @@ func (v6 IPv6) String() string {
 	return v6.Addr().String()
 }
 
+// AppendTo appends the string representation of v6 to b and returns the resulting slice.
+func (v6 IPv6) AppendTo(b []byte) []byte {
+	return v6.Addr().AppendTo(b)
+}
+
 // FromAddr will populate the receiver with the specified address if and only
 // if the provided address is a valid IPv6 address. Any other address,
 // including the "invalid ip" value netip.Addr{} will zero the receiver.
 func (v6 *IPv6) FromAddr(addr netip.Addr) {
 	if addr.Is6() {
-		a := IPv6(addr.As16())
-		copy(v6[:], a[:])
+		*v6 = addr.As16()
 	} else {
-		clear(v6[:])
+		*v6 = IPv6{}
 	}
 }

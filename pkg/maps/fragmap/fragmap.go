@@ -6,6 +6,7 @@ package fragmap
 import (
 	"fmt"
 	"log/slog"
+	"strconv"
 
 	"github.com/cilium/ebpf"
 
@@ -113,7 +114,15 @@ type FragmentValue4 struct {
 
 // String converts the key into a human-readable string format.
 func (k *FragmentKey4) String() string {
-	return fmt.Sprintf("%s --> %s, %d, %d", k.SourceAddr, k.DestAddr, k.Proto, k.NativeID())
+	var buf [64]byte
+	b := k.SourceAddr.AppendTo(buf[:0])
+	b = append(b, " --> "...)
+	b = k.DestAddr.AppendTo(b)
+	b = append(b, ", "...)
+	b = strconv.AppendUint(b, uint64(k.Proto), 10)
+	b = append(b, ", "...)
+	b = strconv.AppendUint(b, uint64(k.NativeID()), 10)
+	return string(b)
 }
 
 func (k *FragmentKey4) New() bpf.MapKey { return &FragmentKey4{} }
@@ -122,7 +131,11 @@ func (k *FragmentKey4) NativeID() uint16 { return byteorder.NetworkToHost16(k.ID
 
 // String converts the value into a human-readable string format.
 func (v *FragmentValue4) String() string {
-	return fmt.Sprintf("%d, %d", v.DestPort, v.SourcePort)
+	var buf [16]byte
+	b := strconv.AppendUint(buf[:0], uint64(v.DestPort), 10)
+	b = append(b, ", "...)
+	b = strconv.AppendUint(b, uint64(v.SourcePort), 10)
+	return string(b)
 }
 
 func (v *FragmentValue4) New() bpf.MapValue { return &FragmentValue4{} }
@@ -144,7 +157,15 @@ type FragmentValue6 struct {
 
 // String converts the key into a human-readable string format.
 func (k *FragmentKey6) String() string {
-	return fmt.Sprintf("%s --> %s, %d, %d", k.SourceAddr, k.DestAddr, k.Proto, k.NativeID())
+	var buf [128]byte
+	b := k.SourceAddr.AppendTo(buf[:0])
+	b = append(b, " --> "...)
+	b = k.DestAddr.AppendTo(b)
+	b = append(b, ", "...)
+	b = strconv.AppendUint(b, uint64(k.Proto), 10)
+	b = append(b, ", "...)
+	b = strconv.AppendUint(b, uint64(k.NativeID()), 10)
+	return string(b)
 }
 
 func (k *FragmentKey6) New() bpf.MapKey { return &FragmentKey6{} }
@@ -153,7 +174,11 @@ func (k *FragmentKey6) NativeID() uint32 { return byteorder.NetworkToHost32(k.ID
 
 // String converts the value into a human-readable string format.
 func (v *FragmentValue6) String() string {
-	return fmt.Sprintf("%d, %d", v.DestPort, v.SourcePort)
+	var buf [16]byte
+	b := strconv.AppendUint(buf[:0], uint64(v.DestPort), 10)
+	b = append(b, ", "...)
+	b = strconv.AppendUint(b, uint64(v.SourcePort), 10)
+	return string(b)
 }
 
 func (v *FragmentValue6) New() bpf.MapValue { return &FragmentValue6{} }

@@ -25,3 +25,30 @@ func TestString(t *testing.T) {
 
 	require.Equal(t, expectedStr, result)
 }
+
+func BenchmarkIPv4_FromAddr(b *testing.B) {
+	addr := netip.MustParseAddr("10.0.0.2")
+	var v4 IPv4
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		v4.FromAddr(addr)
+	}
+}
+
+func BenchmarkIPv4_IsZero(b *testing.B) {
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		_ = testIPv4Address.IsZero()
+	}
+}
+
+func BenchmarkIPv4_AppendTo(b *testing.B) {
+	var buf [32]byte
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		_ = testIPv4Address.AppendTo(buf[:0])
+	}
+}

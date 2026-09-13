@@ -6,6 +6,7 @@ package ratelimitmap
 import (
 	"fmt"
 	"log/slog"
+	"strconv"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/hive/cell"
@@ -91,7 +92,7 @@ func (k *Key) String() string {
 	if k == nil {
 		return ""
 	}
-	return fmt.Sprintf("%d", k.Usage)
+	return strconv.FormatUint(uint64(k.Usage), 10)
 }
 
 // Value must be in sync with struct ratelimit_value in <bpf/lib/ratelimit.h>
@@ -108,7 +109,11 @@ func (v *Value) String() string {
 	if v == nil {
 		return ""
 	}
-	return fmt.Sprintf("%d %d", v.LastTopup, v.Tokens)
+	var buf [48]byte
+	b := strconv.AppendUint(buf[:0], v.LastTopup, 10)
+	b = append(b, ' ')
+	b = strconv.AppendUint(b, v.Tokens, 10)
+	return string(b)
 }
 
 // MetricsKey must be in sync with struct ratelimit_metrics_key in <bpf/lib/ratelimit.h>
@@ -124,7 +129,7 @@ func (k *MetricsKey) String() string {
 	if k == nil {
 		return ""
 	}
-	return fmt.Sprintf("%d", k.Usage)
+	return strconv.FormatUint(uint64(k.Usage), 10)
 }
 
 // MetricsValue must be in sync with struct ratelimit_metrics_value in <bpf/lib/ratelimit.h>
@@ -140,7 +145,7 @@ func (v *MetricsValue) String() string {
 	if v == nil {
 		return ""
 	}
-	return fmt.Sprintf("%d", v.Dropped)
+	return strconv.FormatUint(v.Dropped, 10)
 }
 
 // DumpWithCallback iterates through all the keys/values of the ratelimit metrics map,
