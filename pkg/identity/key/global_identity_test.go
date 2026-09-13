@@ -69,3 +69,38 @@ func TestGetCIDKeyFromLabels(t *testing.T) {
 		})
 	}
 }
+
+func TestGlobalIdentity_GetKey(t *testing.T) {
+	gi := &GlobalIdentity{
+		LabelArray: labels.ParseLabelArray(
+			"k8s:app=frontend",
+			"k8s:tier=cache",
+			"k8s:io.kubernetes.pod.namespace=default",
+			"k8s:version=v1.2.3",
+		),
+	}
+	expected := "k8s:app=frontend;k8s:io.kubernetes.pod.namespace=default;k8s:tier=cache;k8s:version=v1.2.3;"
+	if gi.GetKey() != expected {
+		t.Fatalf("Expected %q, got %q", expected, gi.GetKey())
+	}
+}
+
+func BenchmarkGlobalIdentity_GetKey(b *testing.B) {
+	gi := &GlobalIdentity{
+		LabelArray: labels.ParseLabelArray(
+			"k8s:app=frontend",
+			"k8s:tier=cache",
+			"k8s:io.kubernetes.pod.namespace=default",
+			"k8s:version=v1.2.3",
+			"k8s:region=us-west1",
+			"k8s:zone=us-west1-a",
+			"k8s:env=prod",
+			"k8s:owner=networking",
+		),
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = gi.GetKey()
+	}
+}
