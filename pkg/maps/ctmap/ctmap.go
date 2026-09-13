@@ -657,8 +657,8 @@ func PurgeOrphanNATEntries(ctMapTCP, ctMapAny *Map) *NatGCStats {
 	}
 	stats := newNatGCStats(natMap, family, ctMapTCP.clusterID)
 	defer stats.finish()
-	var egressEntriesToDelete []nat.NatKey
-	var ingressEntriesToDelete []nat.NatKey
+	egressEntriesToDelete := make([]nat.NatKey, 0, 32)
+	ingressEntriesToDelete := make([]nat.NatKey, 0, 32)
 
 	cb := func(key bpf.MapKey, value bpf.MapValue) {
 		natKey := key.(nat.NatKey)

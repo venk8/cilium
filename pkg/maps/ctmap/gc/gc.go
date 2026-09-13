@@ -439,18 +439,18 @@ func (gc *GC) runGC(ipv4, ipv6, triggeredBySignal bool, filter ctmap.GCFilter) (
 
 	// maps defines the maps that need garbage collection.
 	// The value defines whether the maps need to be opened and closed.
-	maps := []*gcMap{}
+	maps := make([]gcMap, 0, 4)
 
 	for _, m := range gc.ctMaps.ActiveMaps() {
-		maps = append(maps, &gcMap{m: m, openCloseRequired: false})
+		maps = append(maps, gcMap{m: m, openCloseRequired: false})
 	}
 
 	// Inject additional maps (e.g. per cluster ID maps)
 	for _, getMapPairs := range gc.additionalCTMapsFns {
 		for _, mapPair := range getMapPairs() {
 			maps = append(maps,
-				&gcMap{m: mapPair.TCP, openCloseRequired: !mapPair.IsOpen},
-				&gcMap{m: mapPair.Any, openCloseRequired: !mapPair.IsOpen})
+				gcMap{m: mapPair.TCP, openCloseRequired: !mapPair.IsOpen},
+				gcMap{m: mapPair.Any, openCloseRequired: !mapPair.IsOpen})
 		}
 	}
 
@@ -474,10 +474,12 @@ func (gc *GC) runGC(ipv4, ipv6, triggeredBySignal bool, filter ctmap.GCFilter) (
 				}
 				continue
 			}
-			defer m.Close()
 		}
 
 		deleted, err := m.GC(filter, gc.next4, gc.next6)
+		if gcMap.openCloseRequired {
+			m.Close()
+		}
 		if err != nil {
 			gc.logger.Error("failed to perform CT garbage collection",
 				logfields.Error, err,
