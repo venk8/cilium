@@ -81,3 +81,15 @@ func TestNamespaceManager(t *testing.T) {
 	// no namespaces left, nothing has been refreshed
 	assert.Equal(t, []*observerpb.Namespace{}, nsManager.GetNamespaces())
 }
+
+func BenchmarkNamespaceManager_AddNamespace(b *testing.B) {
+	m := NewManager()
+	ns := &observerpb.Namespace{
+		Cluster:   "cluster-1",
+		Namespace: "kube-system",
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		m.AddNamespace(ns)
+	}
+}

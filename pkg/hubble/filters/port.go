@@ -14,29 +14,53 @@ import (
 )
 
 func sourcePort(ev *v1.Event) (port uint16, ok bool) {
-	l4 := ev.GetFlow().GetL4()
-	if tcp := l4.GetTCP(); tcp != nil {
-		return uint16(tcp.SourcePort), true
+	flow := ev.GetFlow()
+	if flow == nil {
+		return 0, false
 	}
-	if udp := l4.GetUDP(); udp != nil {
-		return uint16(udp.SourcePort), true
+	l4 := flow.GetL4()
+	if l4 == nil {
+		return 0, false
 	}
-	if sctp := l4.GetSCTP(); sctp != nil {
-		return uint16(sctp.SourcePort), true
+	switch p := l4.Protocol.(type) {
+	case *flowpb.Layer4_TCP:
+		if p.TCP != nil {
+			return uint16(p.TCP.SourcePort), true
+		}
+	case *flowpb.Layer4_UDP:
+		if p.UDP != nil {
+			return uint16(p.UDP.SourcePort), true
+		}
+	case *flowpb.Layer4_SCTP:
+		if p.SCTP != nil {
+			return uint16(p.SCTP.SourcePort), true
+		}
 	}
 	return 0, false
 }
 
 func destinationPort(ev *v1.Event) (port uint16, ok bool) {
-	l4 := ev.GetFlow().GetL4()
-	if tcp := l4.GetTCP(); tcp != nil {
-		return uint16(tcp.DestinationPort), true
+	flow := ev.GetFlow()
+	if flow == nil {
+		return 0, false
 	}
-	if udp := l4.GetUDP(); udp != nil {
-		return uint16(udp.DestinationPort), true
+	l4 := flow.GetL4()
+	if l4 == nil {
+		return 0, false
 	}
-	if sctp := l4.GetSCTP(); sctp != nil {
-		return uint16(sctp.DestinationPort), true
+	switch p := l4.Protocol.(type) {
+	case *flowpb.Layer4_TCP:
+		if p.TCP != nil {
+			return uint16(p.TCP.DestinationPort), true
+		}
+	case *flowpb.Layer4_UDP:
+		if p.UDP != nil {
+			return uint16(p.UDP.DestinationPort), true
+		}
+	case *flowpb.Layer4_SCTP:
+		if p.SCTP != nil {
+			return uint16(p.SCTP.DestinationPort), true
+		}
 	}
 	return 0, false
 }
@@ -51,12 +75,31 @@ func filterByPort(portStrs []string, getPort func(*v1.Event) (port uint16, ok bo
 		ports = append(ports, uint16(port))
 	}
 
-	return func(ev *v1.Event) bool {
-		if port, ok := getPort(ev); ok {
-			return slices.Contains(ports, port)
-		}
-		return false
-	}, nil
+	switch len(ports) {
+	case 1:
+		p0 := ports[0]
+		return func(ev *v1.Event) bool {
+			if port, ok := getPort(ev); ok {
+				return port == p0
+			}
+			return false
+		}, nil
+	case 2:
+		p0, p1 := ports[0], ports[1]
+		return func(ev *v1.Event) bool {
+			if port, ok := getPort(ev); ok {
+				return port == p0 || port == p1
+			}
+			return false
+		}, nil
+	default:
+		return func(ev *v1.Event) bool {
+			if port, ok := getPort(ev); ok {
+				return slices.Contains(ports, port)
+			}
+			return false
+		}, nil
+	}
 }
 
 // PortFilter implements filtering based on L4 port numbers
