@@ -424,10 +424,7 @@ func (m *RouteStatusManager) setUDPRouteStatuses(ctx context.Context, scopedLog 
 }
 
 func (m *RouteStatusManager) updateHTTPRouteStatus(ctx context.Context, scopedLog *slog.Logger, original *gatewayv1.HTTPRoute, new *gatewayv1.HTTPRoute) error {
-	oldStatus := original.Status.DeepCopy()
-	newStatus := new.Status.DeepCopy()
-
-	if cmp.Equal(oldStatus, newStatus, cmpopts.IgnoreFields(metav1.Condition{}, lastTransitionTime)) {
+	if cmp.Equal(&original.Status, &new.Status, cmpopts.IgnoreFields(metav1.Condition{}, lastTransitionTime)) {
 		return nil
 	}
 	scopedLog.DebugContext(ctx, "Updating HTTPRoute status", httpRoute, types.NamespacedName{Name: original.Name, Namespace: original.Namespace})
@@ -435,10 +432,7 @@ func (m *RouteStatusManager) updateHTTPRouteStatus(ctx context.Context, scopedLo
 }
 
 func (m *RouteStatusManager) updateTLSRouteStatus(ctx context.Context, scopedLog *slog.Logger, original *gatewayv1.TLSRoute, new *gatewayv1.TLSRoute) error {
-	oldStatus := original.Status.DeepCopy()
-	newStatus := new.Status.DeepCopy()
-
-	if cmp.Equal(oldStatus, newStatus, cmpopts.IgnoreFields(metav1.Condition{}, lastTransitionTime)) {
+	if cmp.Equal(&original.Status, &new.Status, cmpopts.IgnoreFields(metav1.Condition{}, lastTransitionTime)) {
 		return nil
 	}
 	scopedLog.Debug("Updating TLSRoute status", tlsRoute, types.NamespacedName{Name: original.Name, Namespace: original.Namespace})
@@ -446,10 +440,7 @@ func (m *RouteStatusManager) updateTLSRouteStatus(ctx context.Context, scopedLog
 }
 
 func (m *RouteStatusManager) updateTCPRouteStatus(ctx context.Context, scopedLog *slog.Logger, original *gatewayv1.TCPRoute, new *gatewayv1.TCPRoute) error {
-	oldStatus := original.Status.DeepCopy()
-	newStatus := new.Status.DeepCopy()
-
-	if cmp.Equal(oldStatus, newStatus, cmpopts.IgnoreFields(metav1.Condition{}, lastTransitionTime)) {
+	if cmp.Equal(&original.Status, &new.Status, cmpopts.IgnoreFields(metav1.Condition{}, lastTransitionTime)) {
 		return nil
 	}
 	scopedLog.Debug("Updating TCPRoute status", tcpRoute, types.NamespacedName{Name: original.Name, Namespace: original.Namespace})
@@ -457,10 +448,7 @@ func (m *RouteStatusManager) updateTCPRouteStatus(ctx context.Context, scopedLog
 }
 
 func (m *RouteStatusManager) updateUDPRouteStatus(ctx context.Context, scopedLog *slog.Logger, original *gatewayv1.UDPRoute, new *gatewayv1.UDPRoute) error {
-	oldStatus := original.Status.DeepCopy()
-	newStatus := new.Status.DeepCopy()
-
-	if cmp.Equal(oldStatus, newStatus, cmpopts.IgnoreFields(metav1.Condition{}, lastTransitionTime)) {
+	if cmp.Equal(&original.Status, &new.Status, cmpopts.IgnoreFields(metav1.Condition{}, lastTransitionTime)) {
 		return nil
 	}
 	scopedLog.Debug("Updating UDPRoute status", udpRoute, types.NamespacedName{Name: original.Name, Namespace: original.Namespace})
@@ -468,10 +456,7 @@ func (m *RouteStatusManager) updateUDPRouteStatus(ctx context.Context, scopedLog
 }
 
 func (m *RouteStatusManager) updateGRPCRouteStatus(ctx context.Context, scopedLog *slog.Logger, original *gatewayv1.GRPCRoute, new *gatewayv1.GRPCRoute) error {
-	oldStatus := original.Status.DeepCopy()
-	newStatus := new.Status.DeepCopy()
-
-	if cmp.Equal(oldStatus, newStatus, cmpopts.IgnoreFields(metav1.Condition{}, lastTransitionTime)) {
+	if cmp.Equal(&original.Status, &new.Status, cmpopts.IgnoreFields(metav1.Condition{}, lastTransitionTime)) {
 		return nil
 	}
 	scopedLog.Debug("Updating GRPCRoute status", grpcRoute, types.NamespacedName{Name: original.Name, Namespace: original.Namespace})

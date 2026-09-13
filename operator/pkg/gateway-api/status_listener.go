@@ -543,10 +543,7 @@ func (m *ListenerStatusManager) setListenerSetStatuses(
 }
 
 func (m *ListenerStatusManager) updateListenerSetStatus(ctx context.Context, original *gatewayv1.ListenerSet, new *gatewayv1.ListenerSet) error {
-	oldStatus := original.Status.DeepCopy()
-	newStatus := new.Status.DeepCopy()
-
-	if cmp.Equal(oldStatus, newStatus, cmpopts.IgnoreFields(metav1.Condition{}, lastTransitionTime)) {
+	if cmp.Equal(&original.Status, &new.Status, cmpopts.IgnoreFields(metav1.Condition{}, lastTransitionTime)) {
 		return nil
 	}
 	return m.client.Status().Update(ctx, new)
