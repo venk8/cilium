@@ -9,7 +9,7 @@ import (
 	"log/slog"
 	"maps"
 	"net/netip"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -244,8 +244,12 @@ func PolicyStatementName(advertType v2.BGPAdvertisementType, resourceID string) 
 
 func CreatePolicyStatements(namePrefix string, peerAddr netip.Addr, v4Prefixes, v6Prefixes types.PolicyPrefixList, advert v2.BGPAdvertisement) ([]*types.RoutePolicyStatement, error) {
 	// sort prefixes to have consistent order for DeepEqual
-	sort.Slice(v4Prefixes, v4Prefixes.Less)
-	sort.Slice(v6Prefixes, v6Prefixes.Less)
+	slices.SortFunc(v4Prefixes, func(a, b types.RoutePolicyPrefix) int {
+		return a.Compare(b)
+	})
+	slices.SortFunc(v6Prefixes, func(a, b types.RoutePolicyPrefix) int {
+		return a.Compare(b)
+	})
 
 	// get communities
 	communities, largeCommunities, err := getCommunities(advert)

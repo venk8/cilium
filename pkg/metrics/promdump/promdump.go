@@ -4,11 +4,13 @@
 package promdump
 
 import (
+	"cmp"
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 
+	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/expfmt"
 )
@@ -40,7 +42,9 @@ func dumpFromGatherer(g prometheus.Gatherer, outputFile string) error {
 	if err != nil {
 		return fmt.Errorf("gather: %w", err)
 	}
-	sort.Slice(mfs, func(i, j int) bool { return mfs[i].GetName() < mfs[j].GetName() })
+	slices.SortFunc(mfs, func(a, b *dto.MetricFamily) int {
+		return cmp.Compare(a.GetName(), b.GetName())
+	})
 
 	f, err := os.Create(outputFile)
 	if err != nil {

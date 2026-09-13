@@ -4,10 +4,11 @@
 package stats
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"io"
-	"sort"
+	"slices"
 	"strings"
 	"text/tabwriter"
 
@@ -89,12 +90,12 @@ func reportCommand(status bpfStatsStatus, statsCollector statstypes.ProgStatsCol
 				return nil, fmt.Errorf("querying program stats: %w", err)
 			}
 
-			cmp, err := getCompareFunc(sortField, stats)
+			cmpFunc, err := getCompareFunc(sortField)
 			if err != nil {
 				return nil, err
 			}
 
-			sort.Slice(stats, cmp)
+			slices.SortFunc(stats, cmpFunc)
 
 			if err := displayProgramStats(s.LogWriter(), stats, jsonOutput); err != nil {
 				return nil, fmt.Errorf("displaying program stats: %w", err)
@@ -193,14 +194,14 @@ func printResults(w io.Writer, res []statstypes.BPFProgramStats) {
 	tw.Flush()
 }
 
-func getCompareFunc(sortField string, stats []statstypes.BPFProgramStats) (func(i, j int) bool, error) {
+func getCompareFunc(sortField string) (func(a, b statstypes.BPFProgramStats) int, error) {
 	switch strings.ToLower(sortField) {
 	case "total":
-		return func(i, j int) bool { return stats[i].Stats.Runtime > stats[j].Stats.Runtime }, nil
+		return func(a, b statstypes.BPFProgramStats) int { return cmp.Compare(b.Stats.Runtime, a.Stats.Runtime) }, nil
 	case "runs":
-		return func(i, j int) bool { return stats[i].Stats.RunCount > stats[j].Stats.RunCount }, nil
+		return func(a, b statstypes.BPFProgramStats) int { return cmp.Compare(b.Stats.RunCount, a.Stats.RunCount) }, nil
 	case "avg":
-		return func(i, j int) bool { return stats[i].AvgRuntimeNS() > stats[j].AvgRuntimeNS() }, nil
+		return func(a, b statstypes.BPFProgramStats) int { return cmp.Compare(b.AvgRuntimeNS(), a.AvgRuntimeNS()) }, nil
 	default:
 		return nil, fmt.Errorf("invalid sort field: %s. Expected: avg, total, runs", sortField)
 	}
