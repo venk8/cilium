@@ -10,7 +10,6 @@ import (
 	"cmp"
 	"fmt"
 	"io"
-	"maps"
 	"slices"
 	"strconv"
 
@@ -306,16 +305,22 @@ func (e *Endpoint) getNamedPortsModel() models.NamedPorts {
 		return models.NamedPorts{}
 	}
 	k8sPorts := *p
+	if len(k8sPorts) == 0 {
+		return models.NamedPorts{}
+	}
 
 	np := make(models.NamedPorts, 0, len(k8sPorts))
-	// keep named ports ordered to avoid the unnecessary updates to
-	// kube-apiserver
-	for _, name := range slices.Sorted(maps.Keys(k8sPorts)) {
-		value := k8sPorts[name]
+	for name, value := range k8sPorts {
 		np = append(np, &models.Port{
 			Name:     name,
 			Port:     value.Port,
 			Protocol: u8proto.U8proto(value.Proto).String(),
+		})
+	}
+	if len(np) > 1 {
+		// keep named ports ordered to avoid unnecessary updates to kube-apiserver
+		slices.SortFunc(np, func(a, b *models.Port) int {
+			return cmp.Compare(a.Name, b.Name)
 		})
 	}
 	return np
