@@ -334,13 +334,33 @@ func decodeLayer4(protocol accesslog.TransportProtocol, source, destination acce
 	}
 }
 
+var (
+	boolValueTrue  = &wrapperspb.BoolValue{Value: true}
+	boolValueFalse = &wrapperspb.BoolValue{Value: false}
+
+	accessLogEventType = &flowpb.CiliumEventType{
+		Type: int32(api.MessageTypeAccessLog),
+	}
+
+	k8sClusterLabelKey = string(source.Kubernetes) + ciliumLabels.SourceDelimiter + k8sConst.PolicyLabelCluster
+)
+
+func boolValue(b bool) *wrapperspb.BoolValue {
+	if b {
+		return boolValueTrue
+	}
+	return boolValueFalse
+}
+
 func decodeEndpoint(endpoint accesslog.EndpointInfo, namespace, podName, podUID string) *flowpb.Endpoint {
 	labels := endpoint.Labels.GetModel()
-	slices.Sort(labels)
+	if len(labels) > 1 {
+		slices.Sort(labels)
+	}
 	return &flowpb.Endpoint{
 		ID:          uint32(endpoint.ID),
 		Identity:    uint32(endpoint.Identity),
-		ClusterName: endpoint.Labels.Get(string(source.Kubernetes) + ciliumLabels.SourceDelimiter + k8sConst.PolicyLabelCluster),
+		ClusterName: endpoint.Labels.Get(k8sClusterLabelKey),
 		Namespace:   namespace,
 		Labels:      labels,
 		PodName:     podName,
@@ -378,12 +398,13 @@ func decodeLayer7(r *accesslog.LogRecord, opts *options.Options) *flowpb.Layer7 
 }
 
 func decodeIsReply(t accesslog.FlowType) *wrapperspb.BoolValue {
-	return &wrapperspb.BoolValue{
-		Value: t == accesslog.TypeResponse,
-	}
+	return boolValue(t == accesslog.TypeResponse)
 }
 
 func decodeCiliumEventType(eventType uint8) *flowpb.CiliumEventType {
+	if eventType == api.MessageTypeAccessLog {
+		return accessLogEventType
+	}
 	return &flowpb.CiliumEventType{
 		Type: int32(eventType),
 	}

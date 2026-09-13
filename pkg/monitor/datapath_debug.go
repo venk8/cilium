@@ -504,6 +504,9 @@ func (n *DebugCapture) Decode(data []byte) error {
 // DataOffset returns the offset from the beginning of DebugCapture where the
 // notification data begins.
 func (n *DebugCapture) DataOffset() uint {
+	if n.ExtVersion == DebugCaptureExtensionDisabled {
+		return DebugCaptureLen
+	}
 	return DebugCaptureLen + debugCaptureExtensionLengthFromVersion[n.ExtVersion]
 }
 
