@@ -4,13 +4,14 @@
 package api
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
-	"cmp"
 	"net"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cilium/cilium/pkg/monitor/notifications"
@@ -79,33 +80,56 @@ var (
 		MessageTypeNamePolicyVerdict: MessageTypePolicyVerdict,
 		MessageTypeNameTraceSock:     MessageTypeTraceSock,
 	}
+
+	sortedMessageTypeNames   []string
+	initMessageTypeNamesOnce sync.Once
 )
+
+func getSortedMessageTypeNames() []string {
+	initMessageTypeNamesOnce.Do(func() {
+		names := make([]string, 0, len(MessageTypeNames))
+		for name := range MessageTypeNames {
+			names = append(names, name)
+		}
+
+		// Sort by the underlying MessageType
+		slices.SortStableFunc(names, func(a, b string) int {
+			return cmp.Compare(MessageTypeNames[a], MessageTypeNames[b])
+		})
+
+		sortedMessageTypeNames = names
+	})
+	return sortedMessageTypeNames
+}
 
 // AllMessageTypeNames returns a slice of MessageTypeNames
 func AllMessageTypeNames() []string {
-	names := make([]string, 0, len(MessageTypeNames))
-	for name := range MessageTypeNames {
-		names = append(names, name)
-	}
-
-	// Sort by the underlying MessageType
-	slices.SortStableFunc(names, func(a, b string) int {
-		return cmp.Compare(MessageTypeNames[a], MessageTypeNames[b])
-	})
-
-	return names
+	return slices.Clone(getSortedMessageTypeNames())
 }
 
 // MessageTypeName returns the name for a message type or the numeric value if
 // the name can't be found
 func MessageTypeName(typ int) string {
-	for name, value := range MessageTypeNames {
-		if value == typ {
-			return name
-		}
+	switch typ {
+	case MessageTypeDrop:
+		return MessageTypeNameDrop
+	case MessageTypeDebug:
+		return MessageTypeNameDebug
+	case MessageTypeCapture:
+		return MessageTypeNameCapture
+	case MessageTypeTrace:
+		return MessageTypeNameTrace
+	case MessageTypeAccessLog:
+		return MessageTypeNameL7
+	case MessageTypeAgent:
+		return MessageTypeNameAgent
+	case MessageTypePolicyVerdict:
+		return MessageTypeNamePolicyVerdict
+	case MessageTypeTraceSock:
+		return MessageTypeNameTraceSock
+	default:
+		return strconv.Itoa(typ)
 	}
-
-	return strconv.Itoa(typ)
 }
 
 func (m *MessageTypeFilter) String() string {
@@ -172,12 +196,20 @@ var TraceObservationPoints = map[uint8]string{
 	TraceFromCrypto:  "from-crypto",
 }
 
+var traceObsPointsArray [256]string
+
+func init() {
+	for k, v := range TraceObservationPoints {
+		traceObsPointsArray[k] = v
+	}
+}
+
 // TraceObservationPoint returns the name of a trace observation point
 func TraceObservationPoint(obsPoint uint8) string {
-	if str, ok := TraceObservationPoints[obsPoint]; ok {
+	if str := traceObsPointsArray[obsPoint]; str != "" {
 		return str
 	}
-	return fmt.Sprintf("%d", obsPoint)
+	return strconv.Itoa(int(obsPoint))
 }
 
 // AgentNotify is a notification from the agent. The notification is stored
@@ -239,16 +271,43 @@ var AgentNotifications = map[AgentNotification]string{
 	AgentNotifyPolicyDeleted:             "Policy deleted",
 }
 
+var agentNotificationNames = [...]string{
+	AgentNotifyUnspec:                    "unspecified",
+	AgentNotifyGeneric:                   "Message",
+	AgentNotifyStart:                     "Cilium agent started",
+	AgentNotifyEndpointRegenerateSuccess: "Endpoint regenerated",
+	AgentNotifyEndpointRegenerateFail:    "Failed endpoint regeneration",
+	AgentNotifyPolicyUpdated:             "Policy updated",
+	AgentNotifyPolicyDeleted:             "Policy deleted",
+	AgentNotifyEndpointCreated:           "Endpoint created",
+	AgentNotifyEndpointDeleted:           "Endpoint deleted",
+	AgentNotifyIPCacheUpserted:           "IPCache entry upserted",
+	AgentNotifyIPCacheDeleted:            "IPCache entry deleted",
+}
+
 func resolveAgentType(t AgentNotification) string {
+	if int(t) < len(agentNotificationNames) {
+		if n := agentNotificationNames[t]; n != "" {
+			return n
+		}
+	}
 	if n, ok := AgentNotifications[t]; ok {
 		return n
 	}
 
-	return fmt.Sprintf("%d", t)
+	return strconv.FormatUint(uint64(t), 10)
 }
 
 func (n *AgentNotify) getJSON() string {
-	return fmt.Sprintf(`{"type":"agent","subtype":"%s","message":%s}`, resolveAgentType(n.Type), n.Text)
+	subtype := resolveAgentType(n.Type)
+	var b strings.Builder
+	b.Grow(len(`{"type":"agent","subtype":"`)+len(subtype)+len(`","message":`)+len(n.Text)+1)
+	b.WriteString(`{"type":"agent","subtype":"`)
+	b.WriteString(subtype)
+	b.WriteString(`","message":`)
+	b.WriteString(n.Text)
+	b.WriteByte('}')
+	return b.String()
 }
 
 // PolicyUpdateNotification structures update notification
