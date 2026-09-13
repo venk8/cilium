@@ -8,7 +8,6 @@ import (
 	"net"
 	"regexp"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -26,7 +25,6 @@ import (
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
-	"k8s.io/utils/ptr"
 
 	"github.com/cilium/cilium/operator/pkg/model"
 )
@@ -64,54 +62,88 @@ func (s SortableRoute) Len() int {
 }
 
 func (s SortableRoute) Less(i, j int) bool {
+	return compareRoutes(s[i], s[j]) < 0
+}
+
+func (s SortableRoute) Swap(i, j int) {
+	s[i], s[j] = s[j], s[i]
+}
+
+func (s SortableRoute) Sort() {
+	slices.SortStableFunc(s, compareRoutes)
+}
+
+func compareRoutes(a, b *envoy_config_route_v3.Route) int {
 	// Make sure Exact Match always comes first
-	exactMatch1 := len(s[i].Match.GetPath())
-	exactMatch2 := len(s[j].Match.GetPath())
+	exactMatch1 := len(a.Match.GetPath())
+	exactMatch2 := len(b.Match.GetPath())
 	if exactMatch1 != exactMatch2 {
-		return exactMatch1 > exactMatch2
+		if exactMatch1 > exactMatch2 {
+			return -1
+		}
+		return 1
 	}
 
 	// Make sure longest Regex match always after Exact
-	regexMatch1 := len(s[i].Match.GetSafeRegex().GetRegex())
-	regexMatch2 := len(s[j].Match.GetSafeRegex().GetRegex())
+	regexMatch1 := len(a.Match.GetSafeRegex().GetRegex())
+	regexMatch2 := len(b.Match.GetSafeRegex().GetRegex())
 	if regexMatch1 != regexMatch2 {
-		return regexMatch1 > regexMatch2
+		if regexMatch1 > regexMatch2 {
+			return -1
+		}
+		return 1
 	}
 
 	// There are two types of prefix match, so get whichever one is bigger
-	prefixMatch1 := max(len(s[i].Match.GetPathSeparatedPrefix()), len(s[i].Match.GetPrefix()))
-	prefixMatch2 := max(len(s[j].Match.GetPathSeparatedPrefix()), len(s[j].Match.GetPrefix()))
+	prefixMatch1 := max(len(a.Match.GetPathSeparatedPrefix()), len(a.Match.GetPrefix()))
+	prefixMatch2 := max(len(b.Match.GetPathSeparatedPrefix()), len(b.Match.GetPrefix()))
 
 	// Next up, sort by prefix match length
 	if prefixMatch1 != prefixMatch2 {
-		return prefixMatch1 > prefixMatch2
+		if prefixMatch1 > prefixMatch2 {
+			return -1
+		}
+		return 1
 	}
 
 	// Next up, sort by method based on :method header
 	// Give higher priority for the route having method specified
-	method1 := getMethod(s[i].Match.GetHeaders())
-	method2 := getMethod(s[j].Match.GetHeaders())
-	if method1 == nil && method2 != nil {
-		return false
+	method1, hasMethod1 := getMethod(a.Match.GetHeaders())
+	method2, hasMethod2 := getMethod(b.Match.GetHeaders())
+	if !hasMethod1 && hasMethod2 {
+		return 1
 	}
-	if method1 != nil && method2 == nil {
-		return true
+	if hasMethod1 && !hasMethod2 {
+		return -1
 	}
-	if method1 != nil && *method1 != *method2 {
-		return *method1 < *method2
+	if hasMethod1 && hasMethod2 && method1 != method2 {
+		if method1 < method2 {
+			return -1
+		}
+		return 1
 	}
 
 	// If that's the same, then sort by header length
-	headerMatch1 := countMatchingHeaders(s[i].Match.GetHeaders())
-	headerMatch2 := countMatchingHeaders(s[j].Match.GetHeaders())
+	headerMatch1 := countMatchingHeaders(a.Match.GetHeaders())
+	headerMatch2 := countMatchingHeaders(b.Match.GetHeaders())
 	if headerMatch1 != headerMatch2 {
-		return headerMatch1 > headerMatch2
+		if headerMatch1 > headerMatch2 {
+			return -1
+		}
+		return 1
 	}
 
 	// lastly, sort by query match length
-	queryMatch1 := len(s[i].Match.GetQueryParameters())
-	queryMatch2 := len(s[j].Match.GetQueryParameters())
-	return queryMatch1 > queryMatch2
+	queryMatch1 := len(a.Match.GetQueryParameters())
+	queryMatch2 := len(b.Match.GetQueryParameters())
+	if queryMatch1 != queryMatch2 {
+		if queryMatch1 > queryMatch2 {
+			return -1
+		}
+		return 1
+	}
+
+	return 0
 }
 
 // countMatchingHeaders returns the number of Gateway API header matches that
@@ -134,17 +166,13 @@ func countMatchingHeaders(headers []*envoy_config_route_v3.HeaderMatcher) int {
 	return count
 }
 
-func getMethod(headers []*envoy_config_route_v3.HeaderMatcher) *string {
+func getMethod(headers []*envoy_config_route_v3.HeaderMatcher) (string, bool) {
 	for _, h := range headers {
 		if h.Name == ":method" {
-			return ptr.To(h.GetStringMatch().GetExact())
+			return h.GetStringMatch().GetExact(), true
 		}
 	}
-	return nil
-}
-
-func (s SortableRoute) Swap(i, j int) {
-	s[i], s[j] = s[j], s[i]
+	return "", false
 }
 
 // VirtualHostParameter is the parameter for NewVirtualHost
@@ -172,7 +200,7 @@ func (i *cecTranslator) desiredVirtualHost(httpRoutes []model.HTTPRoute, param V
 	// Each route entry in the virtual host is checked, in order. If there is a
 	// match, the route is used and no further route checks are made.
 	// Related docs https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_conn_man/route_matching
-	sort.Stable(routes)
+	routes.Sort()
 
 	var domains []string
 	for _, host := range param.HostNames {
