@@ -7,6 +7,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net/netip"
+	"strconv"
+	"strings"
 
 	"github.com/cilium/statedb"
 	"github.com/cilium/statedb/index"
@@ -29,28 +31,25 @@ var (
 		},
 		FromKey: NeighborID.Key,
 		FromString: func(key string) (index.Key, error) {
-			var (
-				linkIndex uint32
-				ipAddr    string
-			)
-			n, _ := fmt.Sscanf(key, "%d:%s", &linkIndex, &ipAddr)
-			if n == 0 {
+			linkStr, ipAddr, hasIP := strings.Cut(key, ":")
+			linkIndex, err := strconv.ParseUint(linkStr, 10, 32)
+			if err != nil {
 				return index.Key{}, fmt.Errorf("bad key, expected \"<link>:<ip>\"")
 			}
-			out := make([]byte, 0, neighborIndexSize)
-			if n > 0 {
-				out = binary.BigEndian.AppendUint32(out, linkIndex)
-				n--
+			if !hasIP || ipAddr == "" {
+				out := make([]byte, 4)
+				binary.BigEndian.PutUint32(out, uint32(linkIndex))
+				return out, nil
 			}
-			if n > 0 {
-				addr, err := netip.ParseAddr(ipAddr)
-				if err != nil {
-					return index.Key{}, err
-				}
-				addrBytes := addr.As16()
-				out = append(out, addrBytes[:]...)
-				out = append(out, byte(addr.BitLen()))
+			addr, err := netip.ParseAddr(ipAddr)
+			if err != nil {
+				return index.Key{}, err
 			}
+			out := make([]byte, neighborIndexSize)
+			binary.BigEndian.PutUint32(out[:4], uint32(linkIndex))
+			addrBytes := addr.As16()
+			copy(out[4:20], addrBytes[:])
+			out[20] = byte(addr.BitLen())
 			return out, nil
 		},
 		Unique: true,
@@ -100,11 +99,11 @@ type NeighborID struct {
 }
 
 func (id NeighborID) Key() index.Key {
-	key := make([]byte, 0, neighborIndexSize)
-	key = binary.BigEndian.AppendUint32(key, uint32(id.LinkIndex))
+	key := make([]byte, neighborIndexSize)
+	binary.BigEndian.PutUint32(key[:4], uint32(id.LinkIndex))
 	addrBytes := id.IPAddr.As16()
-	key = append(key, addrBytes[:]...)
-	key = append(key, byte(id.IPAddr.BitLen()))
+	copy(key[4:20], addrBytes[:])
+	key[20] = byte(id.IPAddr.BitLen())
 	return key
 }
 

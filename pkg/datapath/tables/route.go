@@ -7,6 +7,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net/netip"
+	"strconv"
+	"strings"
 
 	"github.com/cilium/statedb"
 	"github.com/cilium/statedb/index"
@@ -26,33 +28,38 @@ var (
 		},
 		FromKey: RouteID.Key,
 		FromString: func(key string) (index.Key, error) {
-			var (
-				table, linkIndex uint32
-				dst              string
-			)
-			n, _ := fmt.Sscanf(key, "%d:%d:%s", &table, &linkIndex, &dst)
-			if n == 0 {
+			tableStr, rest, hasRest := strings.Cut(key, ":")
+			table, err := strconv.ParseUint(tableStr, 10, 32)
+			if err != nil {
 				return index.Key{}, fmt.Errorf("bad key, expected \"<table>:<link>:<destination>\"")
 			}
-			out := []byte{}
-			if n > 0 {
-				out = binary.BigEndian.AppendUint32(out, table)
-				n--
+			if !hasRest || rest == "" {
+				out := make([]byte, 4)
+				binary.BigEndian.PutUint32(out, uint32(table))
+				return out, nil
 			}
-			if n > 0 {
-				out = binary.BigEndian.AppendUint32(out, linkIndex)
-				n--
+			linkStr, dst, hasDst := strings.Cut(rest, ":")
+			linkIndex, err := strconv.ParseUint(linkStr, 10, 32)
+			if err != nil {
+				return index.Key{}, fmt.Errorf("bad key, expected \"<table>:<link>:<destination>\"")
 			}
-			if n > 0 {
-				prefix, err := netip.ParsePrefix(dst)
-				if err != nil {
-					return index.Key{}, err
-				}
-				addrBytes := prefix.Addr().As16()
-				out = append(out, addrBytes[:]...)
-				out = append(out, uint8(prefix.Bits()))
+			if !hasDst || dst == "" {
+				out := make([]byte, 8)
+				binary.BigEndian.PutUint32(out[:4], uint32(table))
+				binary.BigEndian.PutUint32(out[4:8], uint32(linkIndex))
+				return out, nil
 			}
-			return index.Key(out), nil
+			prefix, err := netip.ParsePrefix(dst)
+			if err != nil {
+				return index.Key{}, err
+			}
+			out := make([]byte, 25)
+			binary.BigEndian.PutUint32(out[:4], uint32(table))
+			binary.BigEndian.PutUint32(out[4:8], uint32(linkIndex))
+			addrBytes := prefix.Addr().As16()
+			copy(out[8:24], addrBytes[:])
+			out[24] = uint8(prefix.Bits())
+			return out, nil
 		},
 		Unique: true,
 	}
@@ -92,18 +99,24 @@ type RouteID struct {
 // For prefix searching key prefix is returned if [LinkIndex] or [Dst]
 // are not defined.
 func (id RouteID) Key() index.Key {
-	key := make([]byte, 0, 4 /* table */ +4 /* link */ +17 /* prefix & bits */)
-	key = binary.BigEndian.AppendUint32(key, uint32(id.Table))
 	if id.LinkIndex == 0 && !id.Dst.IsValid() {
+		key := make([]byte, 4)
+		binary.BigEndian.PutUint32(key[:4], uint32(id.Table))
 		return key
 	}
-	key = binary.BigEndian.AppendUint32(key, uint32(id.LinkIndex))
 	if !id.Dst.IsValid() {
+		key := make([]byte, 8)
+		binary.BigEndian.PutUint32(key[:4], uint32(id.Table))
+		binary.BigEndian.PutUint32(key[4:8], uint32(id.LinkIndex))
 		return key
 	}
+	key := make([]byte, 25)
+	binary.BigEndian.PutUint32(key[:4], uint32(id.Table))
+	binary.BigEndian.PutUint32(key[4:8], uint32(id.LinkIndex))
 	addrBytes := id.Dst.Addr().As16()
-	key = append(key, addrBytes[:]...)
-	return append(key, uint8(id.Dst.Bits()))
+	copy(key[8:24], addrBytes[:])
+	key[24] = uint8(id.Dst.Bits())
+	return key
 }
 
 type Route struct {

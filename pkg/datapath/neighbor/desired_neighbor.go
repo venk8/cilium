@@ -4,8 +4,10 @@
 package neighbor
 
 import (
+	"encoding/binary"
 	"fmt"
 	"net/netip"
+	"strconv"
 	"strings"
 
 	"github.com/cilium/statedb"
@@ -42,11 +44,19 @@ type DesiredNeighborKey struct {
 }
 
 func (dn DesiredNeighborKey) TableKey() index.Key {
-	return append(index.Int(dn.IfIndex), index.NetIPAddr(dn.IP)...)
+	key := make(index.Key, 20)
+	binary.BigEndian.PutUint32(key[:4], uint32(dn.IfIndex))
+	addrBytes := dn.IP.As16()
+	copy(key[4:20], addrBytes[:])
+	return key
 }
 
-func (dn *DesiredNeighborKey) String() string {
-	return fmt.Sprintf("%s@%d", dn.IP.String(), dn.IfIndex)
+func (dn DesiredNeighborKey) String() string {
+	b := make([]byte, 0, 16+1+10)
+	b = dn.IP.AppendTo(b)
+	b = append(b, '@')
+	b = strconv.AppendInt(b, int64(dn.IfIndex), 10)
+	return string(b)
 }
 
 func desiredNeighborKeyFromString(s string) (index.Key, error) {
@@ -55,17 +65,21 @@ func desiredNeighborKeyFromString(s string) (index.Key, error) {
 		return nil, fmt.Errorf("invalid key format: '%s' expected {ip}@{ifindex}", s)
 	}
 
-	ip, err := index.NetIPAddrString(ipStr)
+	addr, err := netip.ParseAddr(ipStr)
 	if err != nil {
 		return nil, fmt.Errorf("invalid IP address: %w", err)
 	}
 
-	ifIndex, err := index.IntString(ifIndexStr)
+	ifIndex, err := strconv.ParseUint(ifIndexStr, 10, 32)
 	if err != nil {
 		return nil, fmt.Errorf("invalid interface index: %w", err)
 	}
 
-	return append(ifIndex, ip...), nil
+	key := make(index.Key, 20)
+	binary.BigEndian.PutUint32(key[:4], uint32(ifIndex))
+	addrBytes := addr.As16()
+	copy(key[4:20], addrBytes[:])
+	return key, nil
 }
 
 func (dn *DesiredNeighbor) TableHeader() []string {
