@@ -686,14 +686,14 @@ func (l Labels) Remove(from Labels) {
 // DO NOT BREAK THE FORMAT OF THIS. THE RETURNED STRING IS USED AS
 // PART OF THE KEY IN THE KEY-VALUE STORE.
 //
+// AppendForKVStore appends the label formatted for the kvstore (source:key=value;)
+// to the given byte slice and returns the slice.
+//
+// DO NOT BREAK THE FORMAT OF THIS. THE RETURNED STRING IS USED AS
+// PART OF THE KEY IN THE KEY-VALUE STORE.
+//
 // Non-pointer receiver allows this to be called on a value in a map.
-func (l Label) FormatForKVStore() []byte {
-	// We don't care if the values already have a '='.
-	//
-	// We absolutely care that the final character is a semi-colon.
-	// Identity allocation in the kvstore depends on this (see
-	// kvstore.prefixMatchesKey())
-	b := make([]byte, 0, len(l.Source)+len(l.Key)+len(l.Value)+3)
+func (l Label) AppendForKVStore(b []byte) []byte {
 	b = append(b, l.Source...)
 	b = append(b, byte(sourceDelimiter))
 	b = append(b, l.Key...)
@@ -701,6 +701,16 @@ func (l Label) FormatForKVStore() []byte {
 	b = append(b, l.Value...)
 	b = append(b, ';')
 	return b
+}
+
+func (l Label) FormatForKVStore() []byte {
+	// We don't care if the values already have a '='.
+	//
+	// We absolutely care that the final character is a semi-colon.
+	// Identity allocation in the kvstore depends on this (see
+	// kvstore.prefixMatchesKey())
+	b := make([]byte, 0, len(l.Source)+len(l.Key)+len(l.Value)+3)
+	return l.AppendForKVStore(b)
 }
 
 // formatForKVStoreInto writes the label as a formatted string, ending in
@@ -740,22 +750,30 @@ func (l Label) FormatForKVStoreIntoBuilder(sb *strings.Builder) {
 // DO NOT BREAK THE FORMAT OF THIS. THE RETURNED STRING IS USED AS KEY IN
 // THE KEY-VALUE STORE.
 func (l Labels) SortedList() []byte {
-	keys := slices.Sorted(maps.Keys(l))
+	n := len(l)
+	if n == 0 {
+		return nil
+	}
+	if n == 1 {
+		for _, lbl := range l {
+			totalLen := len(lbl.Source) + 1 + len(lbl.Key) + 1 + len(lbl.Value) + 1
+			b := make([]byte, 0, totalLen)
+			return lbl.AppendForKVStore(b)
+		}
+	}
 
+	keys := make([]string, 0, n)
 	totalLen := 0
-	for _, k := range keys {
-		lbl := l[k]
+	for k, lbl := range l {
+		keys = append(keys, k)
 		totalLen += len(lbl.Source) + 1 + len(lbl.Key) + 1 + len(lbl.Value) + 1
 	}
+
+	slices.Sort(keys)
+
 	b := make([]byte, 0, totalLen)
 	for _, k := range keys {
-		lbl := l[k]
-		b = append(b, lbl.Source...)
-		b = append(b, byte(sourceDelimiter))
-		b = append(b, lbl.Key...)
-		b = append(b, '=')
-		b = append(b, lbl.Value...)
-		b = append(b, ';')
+		b = l[k].AppendForKVStore(b)
 	}
 
 	return b

@@ -252,6 +252,9 @@ func LookupReservedIdentityByLabels(lbls labels.Labels) *Identity {
 	}
 
 	if nid != IdentityUnknown {
+		if id := LookupReservedIdentity(nid); id != nil && lbls.Equals(id.Labels) {
+			return id
+		}
 		return NewIdentity(nid, lbls)
 	}
 
@@ -263,7 +266,10 @@ func LookupReservedIdentityByLabels(lbls labels.Labels) *Identity {
 		return nil
 	}
 
-	nid = GetReservedID(lbls.ToSlice()[0].Key)
+	for k := range lbls {
+		nid = GetReservedID(k)
+		break
+	}
 	if nid != IdentityUnknown && !IsUserReservedIdentity(nid) {
 		return LookupReservedIdentity(nid)
 	}

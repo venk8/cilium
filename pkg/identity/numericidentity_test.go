@@ -87,3 +87,23 @@ func TestAsUint32Slice(t *testing.T) {
 		require.Equal(t, nid.Uint32(), uint32Slice[i])
 	}
 }
+
+func BenchmarkNumericIdentity_String(b *testing.B) {
+	nidReserved := ReservedIdentityHost
+	nidAllocated := NumericIdentity(123456)
+
+	b.Run("Reserved", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			_ = nidReserved.String()
+		}
+	})
+
+	b.Run("Allocated", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			_ = nidAllocated.String()
+		}
+	})
+}
+

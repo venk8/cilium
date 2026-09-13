@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
 	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/option"
 )
@@ -354,3 +355,62 @@ func TestLookupReservedIdentityByLabels(t *testing.T) {
 		})
 	}
 }
+
+func BenchmarkLookupReservedIdentityByLabels(b *testing.B) {
+	InitWellKnownIdentities("kube-system", cmtypes.ClusterInfo{Name: "default"})
+
+	workloadLabels := labels.NewLabelsFromModel([]string{
+		"k8s:app=frontend",
+		"k8s:io.kubernetes.pod.namespace=default",
+		"k8s:version=v1",
+		"k8s:tier=web",
+	})
+	largeWorkloadLabels := labels.NewLabelsFromModel([]string{
+		"k8s:app=frontend",
+		"k8s:io.kubernetes.pod.namespace=default",
+		"k8s:version=v1",
+		"k8s:tier=web",
+		"k8s:env=prod",
+		"k8s:region=us-west1",
+		"k8s:zone=us-west1-a",
+		"k8s:owner=networking",
+		"k8s:team=cilium",
+		"k8s:component=ui",
+	})
+	hostLabels := labels.LabelHost
+	kubeDNSLabels := labels.NewLabelsFromModel([]string{
+		"k8s:k8s-app=kube-dns",
+		"k8s:io.kubernetes.pod.namespace=kube-system",
+		"k8s:io.cilium.k8s.policy.serviceaccount=kube-dns",
+		"k8s:io.cilium.k8s.policy.cluster=default",
+	})
+
+	b.Run("WorkloadPod_Miss", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			_ = LookupReservedIdentityByLabels(workloadLabels)
+		}
+	})
+
+	b.Run("WorkloadPod_LengthMiss", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			_ = LookupReservedIdentityByLabels(largeWorkloadLabels)
+		}
+	})
+
+	b.Run("ReservedHost_Hit", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			_ = LookupReservedIdentityByLabels(hostLabels)
+		}
+	})
+
+	b.Run("WellKnown_Hit", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			_ = LookupReservedIdentityByLabels(kubeDNSLabels)
+		}
+	})
+}
+

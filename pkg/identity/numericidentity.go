@@ -182,19 +182,45 @@ type wellKnownIdentity struct {
 	labelArray labels.LabelArray
 }
 
-// wellKnownMU protects the wellKnownIdentities map. InitWellKnownIdentities can
-// run concurrently with readers (e.g. multiple agent instances in tests), so the
-// map needs synchronization of its own.
-var wellKnownMU lock.RWMutex
+var (
+	// wellKnownMU protects the wellKnownIdentities map and slice. InitWellKnownIdentities can
+	// run concurrently with readers (e.g. multiple agent instances in tests), so the
+	// map needs synchronization of its own.
+	wellKnownMU      lock.RWMutex
+	wellKnownList    []wellKnownIdentity
+	wellKnownMinLen  int
+	wellKnownMaxLen  int
+)
 
 func (w wellKnownIdentities) add(i NumericIdentity, lbls []string) {
 	labelMap := labels.NewLabelsFromModel(lbls)
 	identity := NewIdentity(i, labelMap)
 
 	wellKnownMU.Lock()
-	w[i] = wellKnownIdentity{
-		identity:   NewIdentity(i, labelMap),
+	item := wellKnownIdentity{
+		identity:   identity,
 		labelArray: labelMap.LabelArray(),
+	}
+	w[i] = item
+
+	found := false
+	for idx := range wellKnownList {
+		if wellKnownList[idx].identity.ID == i {
+			wellKnownList[idx] = item
+			found = true
+			break
+		}
+	}
+	if !found {
+		wellKnownList = append(wellKnownList, item)
+	}
+
+	n := len(labelMap)
+	if wellKnownMinLen == 0 || n < wellKnownMinLen {
+		wellKnownMinLen = n
+	}
+	if n > wellKnownMaxLen {
+		wellKnownMaxLen = n
 	}
 	wellKnownMU.Unlock()
 
@@ -204,10 +230,27 @@ func (w wellKnownIdentities) add(i NumericIdentity, lbls []string) {
 }
 
 func (w wellKnownIdentities) LookupByLabels(lbls labels.Labels) *Identity {
+	n := len(lbls)
 	wellKnownMU.RLock()
 	defer wellKnownMU.RUnlock()
-	for _, i := range w {
-		if lbls.Equals(i.identity.Labels) {
+
+	if n < wellKnownMinLen || n > wellKnownMaxLen {
+		return nil
+	}
+
+	for _, i := range wellKnownList {
+		if len(i.labelArray) != n {
+			continue
+		}
+		match := true
+		for _, l := range i.labelArray {
+			lbl, ok := lbls[l.Key]
+			if !ok || lbl.Source != l.Source || lbl.Value != l.Value {
+				match = false
+				break
+			}
+		}
+		if match {
 			return i.identity
 		}
 	}
@@ -218,7 +261,7 @@ func (w wellKnownIdentities) LookupByLabels(lbls labels.Labels) *Identity {
 func (w wellKnownIdentities) ForEach(yield func(*Identity)) {
 	wellKnownMU.RLock()
 	defer wellKnownMU.RUnlock()
-	for _, id := range w {
+	for _, id := range wellKnownList {
 		yield(id.identity)
 	}
 }
@@ -455,11 +498,34 @@ func ParseNumericIdentity(id string) (NumericIdentity, error) {
 	return NumericIdentity(nid), nil
 }
 
+var reservedIdentityNamesArray = [...]string{
+	IdentityUnknown:                      "unknown",
+	ReservedIdentityHost:                 labels.IDNameHost,
+	ReservedIdentityWorld:                labels.IDNameWorld,
+	ReservedIdentityWorldIPv4:            labels.IDNameWorldIPv4,
+	ReservedIdentityWorldIPv6:            labels.IDNameWorldIPv6,
+	ReservedIdentityUnmanaged:            labels.IDNameUnmanaged,
+	ReservedIdentityHealth:               labels.IDNameHealth,
+	ReservedIdentityInit:                 labels.IDNameInit,
+	ReservedIdentityRemoteNode:           labels.IDNameRemoteNode,
+	ReservedIdentityKubeAPIServer:        labels.IDNameKubeAPIServer,
+	ReservedIdentityIngress:              labels.IDNameIngress,
+	ReservedIdentityAggregateCluster:     labels.IDNameAggregateCluster,
+	ReservedIdentityAggregateClusterMesh: labels.IDNameAggregateClusterMesh,
+	ReservedIdentityAggregateWorld:       labels.IDNameAggregateWorld,
+	ReservedIdentityAggregateRemoteNode:  labels.IDNameAggregateRemoteNode,
+}
+
 func (id NumericIdentity) StringID() string {
 	return strconv.FormatUint(uint64(id), 10)
 }
 
 func (id NumericIdentity) String() string {
+	if int(id) < len(reservedIdentityNamesArray) {
+		if v := reservedIdentityNamesArray[id]; v != "" {
+			return v
+		}
+	}
 	if v, exists := reservedIdentityNames[id]; exists {
 		return v
 	}
@@ -481,6 +547,9 @@ func GetReservedID(name string) NumericIdentity {
 
 // IsReservedIdentity returns whether id is one of the special reserved identities.
 func (id NumericIdentity) IsReservedIdentity() bool {
+	if int(id) < len(reservedIdentityNamesArray) {
+		return reservedIdentityNamesArray[id] != ""
+	}
 	_, isReservedIdentity := reservedIdentityNames[id]
 	return isReservedIdentity
 }
