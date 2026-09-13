@@ -120,6 +120,13 @@ const (
 	forwardedMTUErrorMessage  = 15
 )
 
+var directionNames = [...]string{
+	dirUnknown: "UNKNOWN",
+	dirIngress: "INGRESS",
+	dirEgress:  "EGRESS",
+	dirService: "SERVICE",
+}
+
 // direction is the metrics direction i.e ingress (to an endpoint),
 // egress (from an endpoint) or service (NodePort service being accessed from
 // outside or a ClusterIP service being accessed from inside the cluster).
@@ -168,10 +175,10 @@ func (m metricsMap) Delete(key *Key) error {
 
 // MetricDirection gets the direction in human readable string format
 func MetricDirection(dir uint8) string {
-	if desc, ok := direction[dir]; ok {
-		return desc
+	if int(dir) < len(directionNames) {
+		return directionNames[dir]
 	}
-	return direction[dirUnknown]
+	return directionNames[dirUnknown]
 }
 
 // Direction gets the direction in human readable string format
@@ -202,6 +209,15 @@ func (k *Key) IsFragNeeded() bool {
 // IsFragmentedCount checks if the reason is forwarded packets with fragmentation.
 func (k *Key) IsFragmentedCount() bool {
 	return k.Reason == forwardedFragmentedPacket
+}
+
+// Sum returns the sum of all the per-CPU count and bytes values in a single pass.
+func (vs Values) Sum() (count uint64, bytes uint64) {
+	for _, v := range vs {
+		count += v.Count
+		bytes += v.Bytes
+	}
+	return count, bytes
 }
 
 // Count returns the sum of all the per-CPU count values
@@ -295,7 +311,15 @@ type labels comparable
 
 // promMetrics is used to sum values by a desired set of labels for both
 // forwarded and dropped metrics.
-type promMetrics[k labels] map[k]*metricValues
+type promMetrics[k labels] map[k]metricValues
+
+// sumValues accumulates bytes and count for the given label set k and stores it in p.
+func (p promMetrics[k]) sumValues(labels k, bytes, count float64) {
+	v := p[labels]
+	v.bytes += bytes
+	v.count += count
+	p[labels] = v
+}
 
 // sum accumulates a value for the given label set k and stores it in p. Can be
 // called multiple times with the same label set.
@@ -304,16 +328,8 @@ type promMetrics[k labels] map[k]*metricValues
 // in the row are summed, and the result is added to any preexisting values
 // belonging to the label set.
 func (p promMetrics[k]) sum(labels k, values *Values) {
-	if v, ok := p[labels]; ok {
-		v.bytes += float64(values.Bytes())
-		v.count += float64(values.Count())
-		return
-	}
-
-	p[labels] = &metricValues{
-		bytes: float64(values.Bytes()),
-		count: float64(values.Count()),
-	}
+	count, bytes := values.Sum()
+	p.sumValues(labels, float64(bytes), float64(count))
 }
 
 func (mc *metricsmapCollector) Collect(ch chan<- prometheus.Metric) {
@@ -351,12 +367,15 @@ func (mc *metricsmapCollector) Collect(ch chan<- prometheus.Metric) {
 	fragmentedPacketsCount := make(promMetrics[forwardLabels])
 
 	err := mc.metricsMap.IterateWithCallback(func(key *Key, values *Values) {
+		count, bytes := values.Sum()
+		bFloat, cFloat := float64(bytes), float64(count)
+
 		if key.IsDrop() {
 			labelSet := dropLabels{
 				direction: key.Direction(),
 				reason:    key.DropForwardReason(),
 			}
-			drop.sum(labelSet, values)
+			drop.sumValues(labelSet, bFloat, cFloat)
 
 			return
 		}
@@ -364,13 +383,13 @@ func (mc *metricsmapCollector) Collect(ch chan<- prometheus.Metric) {
 		labelSet := forwardLabels{
 			direction: key.Direction(),
 		}
-		fwd.sum(labelSet, values)
+		fwd.sumValues(labelSet, bFloat, cFloat)
 
 		if key.IsFragNeeded() {
-			fragNeededCount.sum(labelSet, values)
+			fragNeededCount.sumValues(labelSet, bFloat, cFloat)
 		}
 		if key.IsFragmentedCount() {
-			fragmentedPacketsCount.sum(labelSet, values)
+			fragmentedPacketsCount.sumValues(labelSet, bFloat, cFloat)
 		}
 	})
 	if err != nil {
