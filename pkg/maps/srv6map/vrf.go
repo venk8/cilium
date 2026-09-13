@@ -4,7 +4,6 @@
 package srv6map
 
 import (
-	"fmt"
 	"log/slog"
 	"net/netip"
 	"strconv"
@@ -47,7 +46,14 @@ func (v *VRFKey4) New() bpf.MapKey {
 }
 
 func (v *VRFKey4) String() string {
-	return fmt.Sprintf("srcip=%s, destCIDR=%s", v.SourceIP, v.getDestCIDR())
+	var buf [48]byte
+	b := append(buf[:0], "srcip="...)
+	b = v.SourceIP.AppendTo(b)
+	b = append(b, ", destCIDR="...)
+	b = v.DestCIDR.AppendTo(b)
+	b = append(b, '/')
+	b = strconv.AppendUint(b, uint64(v.PrefixLen-vrf4StaticPrefixBits), 10)
+	return string(b)
 }
 
 func (k *VRFKey4) getDestCIDR() netip.Prefix {
@@ -70,7 +76,14 @@ func (v *VRFKey6) New() bpf.MapKey {
 }
 
 func (v *VRFKey6) String() string {
-	return fmt.Sprintf("srcip=%s, destCIDR=%s", v.SourceIP, v.getDestCIDR())
+	var buf [96]byte
+	b := append(buf[:0], "srcip="...)
+	b = v.SourceIP.AppendTo(b)
+	b = append(b, ", destCIDR="...)
+	b = v.DestCIDR.AppendTo(b)
+	b = append(b, '/')
+	b = strconv.AppendUint(b, uint64(v.PrefixLen-vrf6StaticPrefixBits), 10)
+	return string(b)
 }
 
 func (k *VRFKey6) getDestCIDR() netip.Prefix {
@@ -96,7 +109,7 @@ func (v *VRFValue) New() bpf.MapValue {
 }
 
 func (v *VRFValue) String() string {
-	return fmt.Sprintf("vrfid=%d", v.ID)
+	return "vrfid=" + strconv.FormatUint(uint64(v.ID), 10)
 }
 
 // SRv6VRFIterateCallback represents the signature of the callback function

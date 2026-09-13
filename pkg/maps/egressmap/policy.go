@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/netip"
+	"strconv"
 	"unsafe"
 
 	"github.com/cilium/ebpf"
@@ -254,7 +255,13 @@ func NewEgressPolicyVal4V2(egressIP, gatewayIP netip.Addr, egressIfindex uint32)
 
 // String returns the string representation of an egress policy key.
 func (k *EgressPolicyKey4) String() string {
-	return fmt.Sprintf("%s %s/%d", k.SourceIP, k.DestCIDR, k.PrefixLen-PolicyStaticPrefixBits4)
+	var buf [48]byte
+	b := k.SourceIP.AppendTo(buf[:0])
+	b = append(b, ' ')
+	b = k.DestCIDR.AppendTo(b)
+	b = append(b, '/')
+	b = strconv.AppendUint(b, uint64(k.PrefixLen-PolicyStaticPrefixBits4), 10)
+	return string(b)
 }
 
 // New returns an egress policy key
@@ -300,7 +307,13 @@ func (v *EgressPolicyVal4V2) GetGatewayAddr() netip.Addr {
 
 // String returns the string representation of an egress policy value.
 func (v *EgressPolicyVal4V2) String() string {
-	return fmt.Sprintf("%s %s %d", v.GetGatewayAddr(), v.GetEgressAddr(), v.EgressIfindex)
+	var buf [48]byte
+	b := v.GatewayIP.AppendTo(buf[:0])
+	b = append(b, ' ')
+	b = v.EgressIP.AppendTo(b)
+	b = append(b, ' ')
+	b = strconv.AppendUint(b, uint64(v.EgressIfindex), 10)
+	return string(b)
 }
 
 // Lookup returns the egress policy object associated with the provided (source
@@ -374,7 +387,13 @@ func NewEgressPolicyVal6(egressIP, gatewayIP netip.Addr, egressIfindex uint32) E
 
 // String returns the string representation of an egress policy key.
 func (k *EgressPolicyKey6) String() string {
-	return fmt.Sprintf("%s %s/%d", k.SourceIP, k.DestCIDR, k.PrefixLen-PolicyStaticPrefixBits6)
+	var buf [96]byte
+	b := k.SourceIP.AppendTo(buf[:0])
+	b = append(b, ' ')
+	b = k.DestCIDR.AppendTo(b)
+	b = append(b, '/')
+	b = strconv.AppendUint(b, uint64(k.PrefixLen-PolicyStaticPrefixBits6), 10)
+	return string(b)
 }
 
 // New returns an egress policy key
@@ -420,7 +439,13 @@ func (v *EgressPolicyVal6) GetGatewayAddr() netip.Addr {
 
 // String returns the string representation of an egress policy value.
 func (v *EgressPolicyVal6) String() string {
-	return fmt.Sprintf("%s %s %d", v.GetGatewayAddr(), v.GetEgressAddr(), v.EgressIfindex)
+	var buf [96]byte
+	b := v.GatewayIP.AppendTo(buf[:0])
+	b = append(b, ' ')
+	b = v.EgressIP.AppendTo(b)
+	b = append(b, ' ')
+	b = strconv.AppendUint(b, uint64(v.EgressIfindex), 10)
+	return string(b)
 }
 
 // Lookup returns the egress policy object associated with the provided (source

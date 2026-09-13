@@ -4,7 +4,6 @@
 package srv6map
 
 import (
-	"fmt"
 	"log/slog"
 	"net/netip"
 	"strconv"
@@ -43,7 +42,14 @@ func (k *PolicyKey4) New() bpf.MapKey {
 }
 
 func (k *PolicyKey4) String() string {
-	return fmt.Sprintf("vrfid=%d, destCIDR=%s", k.VRFID, k.getDestCIDR())
+	var buf [48]byte
+	b := append(buf[:0], "vrfid="...)
+	b = strconv.AppendUint(b, uint64(k.VRFID), 10)
+	b = append(b, ", destCIDR="...)
+	b = k.DestCIDR.AppendTo(b)
+	b = append(b, '/')
+	b = strconv.AppendUint(b, uint64(k.PrefixLen-policyStaticPrefixBits), 10)
+	return string(b)
 }
 
 func (k *PolicyKey4) getDestCIDR() netip.Prefix {
@@ -66,7 +72,14 @@ func (k *PolicyKey6) New() bpf.MapKey {
 }
 
 func (k *PolicyKey6) String() string {
-	return fmt.Sprintf("vrfid=%d, destCIDR=%s", k.VRFID, k.getDestCIDR())
+	var buf [80]byte
+	b := append(buf[:0], "vrfid="...)
+	b = strconv.AppendUint(b, uint64(k.VRFID), 10)
+	b = append(b, ", destCIDR="...)
+	b = k.DestCIDR.AppendTo(b)
+	b = append(b, '/')
+	b = strconv.AppendUint(b, uint64(k.PrefixLen-policyStaticPrefixBits), 10)
+	return string(b)
 }
 
 func (k *PolicyKey6) getDestCIDR() netip.Prefix {
@@ -92,7 +105,7 @@ func (k *PolicyValue) New() bpf.MapValue {
 }
 
 func (v *PolicyValue) String() string {
-	return fmt.Sprintf("sid=%s", v.SID.String())
+	return "sid=" + v.SID.String()
 }
 
 // SRv6PolicyIterateCallback represents the signature of the callback function

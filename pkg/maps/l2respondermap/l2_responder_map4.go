@@ -4,9 +4,9 @@
 package l2respondermap
 
 import (
-	"fmt"
 	"log/slog"
 	"net/netip"
+	"strconv"
 	"unsafe"
 
 	"github.com/cilium/hive/cell"
@@ -120,7 +120,12 @@ type L2ResponderKey struct {
 }
 
 func (k *L2ResponderKey) String() string {
-	return fmt.Sprintf("ip=%s, ifIndex=%d", k.IP, k.IfIndex)
+	var buf [40]byte
+	b := append(buf[:0], "ip="...)
+	b = k.IP.AppendTo(b)
+	b = append(b, ", ifIndex="...)
+	b = strconv.AppendUint(b, uint64(k.IfIndex), 10)
+	return string(b)
 }
 
 func newL2ResponderKey(ip netip.Addr, ifIndex uint32) L2ResponderKey {
@@ -138,5 +143,5 @@ type L2ResponderStats struct {
 }
 
 func (s *L2ResponderStats) String() string {
-	return fmt.Sprintf("responses_sent=%d", s.ResponsesSent)
+	return "responses_sent=" + strconv.FormatUint(s.ResponsesSent, 10)
 }
