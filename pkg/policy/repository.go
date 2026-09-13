@@ -248,8 +248,9 @@ func (p *Repository) del(key ruleKey) {
 // newRule allocates a CachedSelector for a given rule.
 func (p *Repository) newRule(policyEntry types.PolicyEntry, key ruleKey) *rule {
 	r := &rule{
-		PolicyEntry: policyEntry,
-		key:         key,
+		PolicyEntry:  policyEntry,
+		key:          key,
+		cachedOrigin: makeSingleRuleOrigin(policyEntry.Labels.Sort(), policyEntry.Log.Value),
 	}
 	css, _ := p.subjectSelectorCache.AddSelectors(r, r.Subject)
 	r.subjectSelector = css[0]
@@ -570,6 +571,7 @@ func (rules ruleSlice) addDefaultRule(subject *identity.Identity, peers types.Se
 			L3:       peers,
 			Labels:   lbls,
 		},
+		cachedOrigin: makeSingleRuleOrigin(lbls.Sort(), ""),
 	})
 }
 
