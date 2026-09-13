@@ -6,7 +6,6 @@ package maps
 import (
 	"fmt"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -186,6 +185,6 @@ func DumpLBMaps(lbmaps LBMaps, sanitizeIDs bool, customizeAddr func(types.AddrCl
 		panic(err)
 	}
 
-	sort.Strings(out)
+	slices.Sort(out)
 	return
 }

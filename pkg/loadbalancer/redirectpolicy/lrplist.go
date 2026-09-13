@@ -6,7 +6,7 @@ package redirectpolicy
 import (
 	"fmt"
 	"os"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/cilium/hive"
@@ -84,7 +84,7 @@ func formatLRPSpec(spec *models.LRPSpec) string {
 			bes = append(bes, fmt.Sprintf("%s:%d/%s (%s, %s)",
 				ip, be.BackendAddress.Port, be.BackendAddress.Protocol, be.PodID, be.BackendAddress.State))
 		}
-		sort.Strings(bes)
+		slices.Sort(bes)
 		besStr := "(no backends)"
 		if len(bes) > 0 {
 			besStr = strings.Join(bes, ", ")

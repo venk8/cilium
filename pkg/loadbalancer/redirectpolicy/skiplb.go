@@ -12,7 +12,6 @@ import (
 	"net/netip"
 	"os"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -142,13 +141,17 @@ func (dsl *desiredSkipLB) TableRow() []string {
 	if dsl.NetnsCookie != nil {
 		cookie = strconv.FormatUint(*dsl.NetnsCookie, 10)
 	}
-	var skipRedirects []string
+	count := 0
+	for _, addrs := range dsl.SkipRedirectForFrontends {
+		count += len(addrs)
+	}
+	skipRedirects := make([]string, 0, count)
 	for _, addrs := range dsl.SkipRedirectForFrontends {
 		for _, addr := range addrs {
 			skipRedirects = append(skipRedirects, addr.StringWithProtocol())
 		}
 	}
-	sort.Strings(skipRedirects)
+	slices.Sort(skipRedirects)
 
 	return []string{
 		dsl.PodNamespacedName,
@@ -435,7 +438,7 @@ func newSkipLBMapCommand(m lbmaps.SkipLBMap) hive.ScriptCmdsOut {
 				}
 
 				// Sort since the iteration order of lock.Map is undeterministic.
-				sort.Strings(out)
+				slices.Sort(out)
 				for _, line := range out {
 					fmt.Fprint(file, line)
 				}
