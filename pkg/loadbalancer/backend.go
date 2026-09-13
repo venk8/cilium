@@ -4,14 +4,17 @@
 package loadbalancer
 
 import (
+	"encoding/binary"
 	"fmt"
 	"iter"
 	"strings"
 	"unsafe"
 
+	"github.com/cespare/xxhash/v2"
 	"github.com/cilium/statedb"
 	"github.com/cilium/statedb/index"
 
+	"github.com/cilium/cilium/pkg/container/cache"
 	"github.com/cilium/cilium/pkg/source"
 	"github.com/cilium/cilium/pkg/time"
 )
@@ -128,7 +131,39 @@ type BackendKey struct {
 	SourcePriority uint8
 }
 
+type backendKeyCacheEntry struct {
+	key   BackendKey
+	bytes []byte
+}
+
+var backendKeyCache = cache.New(
+	func(e backendKeyCacheEntry) uint64 {
+		return e.key.cacheHash()
+	},
+	nil,
+	func(a, b backendKeyCacheEntry) bool {
+		return b.bytes != nil && a.key == b.key
+	},
+)
+
+func (k BackendKey) cacheHash() uint64 {
+	var d xxhash.Digest
+	d.WriteString(k.ServiceName.String())
+	buf := k.Address.Addr().As16()
+	d.Write(buf[:])
+	var p [3]byte
+	binary.BigEndian.PutUint16(p[:2], k.Address.Port())
+	p[2] = k.SourcePriority
+	d.Write(p[:])
+	return d.Sum64()
+}
+
 func (k BackendKey) Key() index.Key {
+	entry := backendKeyCache.Get(backendKeyCacheEntry{key: k})
+	if entry.bytes != nil {
+		return entry.bytes
+	}
+
 	const separator = 0x00
 	sKey := k.ServiceName.Key()
 	addrBytes := k.Address.Bytes()
@@ -137,6 +172,7 @@ func (k BackendKey) Key() index.Key {
 	key = append(key, separator)
 	key = append(key, addrBytes...)
 	key = append(key, separator, k.SourcePriority)
+	backendKeyCache.Get(backendKeyCacheEntry{key: k, bytes: key})
 	return key
 }
 

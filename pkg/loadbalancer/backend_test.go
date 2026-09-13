@@ -126,3 +126,21 @@ func TestListBackendsByServiceNameAndAddress(t *testing.T) {
 	seq, _ = ListBackendsByServiceNameAndAddress(rtxn, backends, svc2, addr2)
 	assert.Empty(t, collectBackends(seq))
 }
+
+func BenchmarkBackendKey(b *testing.B) {
+	name := NewServiceNameInCluster("foo", "bar", "baz")
+	addr := cmtypes.MustParseAddrCluster("1.2.3.4")
+	backendAddr := NewL3n4Addr(TCP, addr, 8080, ScopeExternal)
+
+	key := BackendKey{
+		ServiceName:    name,
+		Address:        backendAddr,
+		SourcePriority: 0,
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		_ = key.Key()
+	}
+}

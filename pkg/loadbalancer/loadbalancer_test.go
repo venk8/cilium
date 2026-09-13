@@ -775,3 +775,12 @@ func BenchmarkL3n4Addr_StringWithProtocol_IPv6_Max(b *testing.B) {
 	addr := NewL3n4Addr(TCP, cmtypes.MustParseAddrCluster("1020:3040:5060:7080:90a0:b0c0:d0e0:f000"), 30303, 100)
 	benchmarkStringWithProtocol(b, addr)
 }
+
+func BenchmarkL3n4Addr_Bytes(b *testing.B) {
+	addr := NewL3n4Addr(TCP, cmtypes.MustParseAddrCluster("192.168.123.210"), 8080, ScopeInternal)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		_ = addr.Bytes()
+	}
+}
