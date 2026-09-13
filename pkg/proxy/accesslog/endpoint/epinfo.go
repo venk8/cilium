@@ -79,7 +79,7 @@ func (r *endpointInfoRegistry) FillEndpointInfo(ctx context.Context, info *acces
 
 		// Fall back to ipcache
 		if info.Identity == 0 && addr.IsValid() {
-			ID, exists := r.ipcache.LookupByIP(addr.String())
+			ID, exists := r.ipcache.LookupSecIDByIP(addr)
 			if exists {
 				info.Identity = uint64(ID.ID)
 			}
