@@ -632,15 +632,99 @@ func init() {
 	initPrivatePrefixes()
 }
 
+// IsPublicNetIP returns whether a given IP address is from a public range.
+// It is fully zero-allocation and checks the RFC private/reserved prefixes.
+func IsPublicNetIP(addr netip.Addr) bool {
+	if !addr.IsValid() {
+		return false
+	}
+	if addr.Is4() {
+		a4 := addr.As4()
+		return isPublicIPv4(a4[0], a4[1], a4[2])
+	}
+	a16 := addr.As16()
+	return isPublicIPv6(a16)
+}
+
 // IsPublicAddr returns whether a given global IP is from
 // a public range.
 func IsPublicAddr(ip net.IP) bool {
-	for _, block := range privateIPBlocks {
-		if block.Contains(ip) {
+	if ip4 := ip.To4(); ip4 != nil {
+		return isPublicIPv4(ip4[0], ip4[1], ip4[2])
+	}
+	if len(ip) == net.IPv6len {
+		var a16 [16]byte
+		copy(a16[:], ip)
+		return isPublicIPv6(a16)
+	}
+	return false
+}
+
+func isPublicIPv4(b0, b1, b2 byte) bool {
+	switch b0 {
+	case 0, 10, 127:
+		return false
+	case 100:
+		return (b1 & 0xc0) != 64
+	case 169:
+		return b1 != 254
+	case 172:
+		return (b1 & 0xf0) != 16
+	case 192:
+		if b1 == 168 || (b1 == 0 && (b2 == 0 || b2 == 2)) {
 			return false
 		}
+		return true
+	case 198:
+		if (b1 & 0xfe) == 18 || (b1 == 51 && b2 == 100) {
+			return false
+		}
+		return true
+	case 203:
+		return !(b1 == 0 && b2 == 113)
+	default:
+		return (b0 & 0xf0) != 224
 	}
-	return true
+}
+
+func isPublicIPv6(a [16]byte) bool {
+	switch a[0] {
+	case 0:
+		// ::/128 and ::1/128
+		if a[1] == 0 && a[2] == 0 && a[3] == 0 && a[4] == 0 &&
+			a[5] == 0 && a[6] == 0 && a[7] == 0 && a[8] == 0 &&
+			a[9] == 0 && a[10] == 0 && a[11] == 0 && a[12] == 0 &&
+			a[13] == 0 && a[14] == 0 && a[15] <= 1 {
+			return false
+		}
+		return true
+	case 0x01:
+		// 100::/64
+		if a[1] == 0 && a[2] == 0 && a[3] == 0 &&
+			a[4] == 0 && a[5] == 0 && a[6] == 0 && a[7] == 0 {
+			return false
+		}
+		return true
+	case 0x20:
+		// 2001:2::/48 or 2001:db8::/48
+		if a[1] == 0x01 && a[4] == 0 && a[5] == 0 {
+			if (a[2] == 0 && a[3] == 0x02) || (a[2] == 0x0d && a[3] == 0xb8) {
+				return false
+			}
+		}
+		return true
+	case 0xfc, 0xfd:
+		// fc00::/7
+		return false
+	case 0xfe:
+		// fe80::/10
+		return (a[1] & 0xc0) != 0x80
+	case 0xff:
+		// ff00::/8
+		return false
+	default:
+		return true
+	}
 }
 
 // IPToPrefix returns the corresponding IPNet for the given IP.

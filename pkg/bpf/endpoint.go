@@ -4,8 +4,8 @@
 package bpf
 
 import (
-	"fmt"
 	"net/netip"
+	"strconv"
 
 	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
 	"github.com/cilium/cilium/pkg/types"
@@ -31,16 +31,18 @@ type EndpointKey struct {
 // NewEndpointKey returns an EndpointKey based on the provided IP address. The
 // address family is automatically detected.
 func NewEndpointKey(addr netip.Addr, clusterID uint16) EndpointKey {
-	result := EndpointKey{}
+	result := EndpointKey{
+		ClusterID: clusterID,
+	}
 
 	if addr.Is4() {
 		result.Family = EndpointKeyIPv4
+		a4 := addr.As4()
+		copy(result.IP[:4], a4[:])
 	} else if addr.Is6() {
 		result.Family = EndpointKeyIPv6
+		result.IP = addr.As16()
 	}
-	copy(result.IP[:], addr.AsSlice())
-	result.Key = 0
-	result.ClusterID = clusterID
 
 	return result
 }
@@ -51,7 +53,7 @@ func (k EndpointKey) ToAddr() netip.Addr {
 	case EndpointKeyIPv4:
 		return netip.AddrFrom4([4]byte(k.IP[:4]))
 	case EndpointKeyIPv6:
-		return netip.AddrFrom16([16]byte(k.IP[:]))
+		return netip.AddrFrom16(k.IP)
 	}
 	return netip.Addr{}
 }
@@ -63,7 +65,7 @@ func (k EndpointKey) String() string {
 			addr,
 			uint32(k.ClusterID),
 		)
-		return addrCluster.String() + ":" + fmt.Sprintf("%d", k.Key)
+		return addrCluster.String() + ":" + strconv.Itoa(int(k.Key))
 	}
 	return "nil"
 }

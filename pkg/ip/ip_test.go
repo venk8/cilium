@@ -702,3 +702,98 @@ func BenchmarkSortAddrList(b *testing.B) {
 		SortAddrList(lists[i])
 	}
 }
+
+func TestIsPublicAddrEquivalence(t *testing.T) {
+	// Baseline checker using privateIPBlocks
+	isPublicBaseline := func(ip net.IP) bool {
+		for _, block := range privateIPBlocks {
+			if block.Contains(ip) {
+				return false
+			}
+		}
+		return true
+	}
+
+	testIPs := []string{
+		// RFC1122 host
+		"0.0.0.0", "0.255.255.255",
+		// RFC1918
+		"10.0.0.1", "10.255.255.254", "172.16.0.1", "172.31.255.255", "192.168.0.1", "192.168.255.255",
+		// RFC6598
+		"100.64.0.1", "100.127.255.255",
+		// RFC1122 Loopback
+		"127.0.0.1", "127.255.255.255",
+		// RFC3927 Link-Local
+		"169.254.0.1", "169.254.255.255",
+		// RFC6890, RFC5737
+		"192.0.0.1", "192.0.2.1", "198.51.100.1", "203.0.113.1",
+		// RFC2544
+		"198.18.0.1", "198.19.255.255",
+		// Multicast & Class E
+		"224.0.0.1", "239.255.255.255", "240.0.0.1",
+		// Public IPv4
+		"1.1.1.1", "8.8.8.8", "100.63.255.255", "100.128.0.1", "172.15.255.255", "172.32.0.1", "192.167.255.255", "192.169.0.1", "198.17.255.255", "198.20.0.1",
+
+		// IPv6
+		"::", "::1", "100::1", "2001:2::1", "2001:db8::1", "fc00::1", "fd12:3456::1", "fe80::1", "fec0::1", "ff02::1",
+		// Public IPv6
+		"2001:3::1", "2001:4860:4860::8888", "2600:beef::1", "2a00:1450:4009:820::200e",
+	}
+
+	for _, s := range testIPs {
+		addr := netip.MustParseAddr(s)
+		ip := net.ParseIP(s)
+		expected := isPublicBaseline(ip)
+		require.Equal(t, expected, IsPublicAddr(ip), "IsPublicAddr failed for %s", s)
+		require.Equal(t, expected, IsPublicNetIP(addr), "IsPublicNetIP failed for %s", s)
+	}
+
+	// Randomized fuzz equivalence across 10,000 IPv4 and IPv6 addresses
+	r := rand.New(rand.NewPCG(99, 12345))
+	var buf4 [4]byte
+	for range 5000 {
+		u := r.Uint32()
+		buf4[0] = byte(u)
+		buf4[1] = byte(u >> 8)
+		buf4[2] = byte(u >> 16)
+		buf4[3] = byte(u >> 24)
+		addr := netip.AddrFrom4(buf4)
+		ip := net.IP(buf4[:])
+		expected := isPublicBaseline(ip)
+		require.Equal(t, expected, IsPublicAddr(ip), "random IPv4 %s", addr)
+		require.Equal(t, expected, IsPublicNetIP(addr), "random IPv4 %s", addr)
+	}
+
+	var buf6 [16]byte
+	for range 5000 {
+		u1 := r.Uint64()
+		u2 := r.Uint64()
+		for i := 0; i < 8; i++ {
+			buf6[i] = byte(u1 >> (i * 8))
+			buf6[8+i] = byte(u2 >> (i * 8))
+		}
+		addr := netip.AddrFrom16(buf6)
+		ip := net.IP(buf6[:])
+		expected := isPublicBaseline(ip)
+		require.Equal(t, expected, IsPublicAddr(ip), "random IPv6 %s", addr)
+		require.Equal(t, expected, IsPublicNetIP(addr), "random IPv6 %s", addr)
+	}
+}
+
+func BenchmarkIsPublicAddr_Baseline(b *testing.B) {
+	ip := net.ParseIP("192.168.1.1")
+	b.ResetTimer()
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = IsPublicAddr(ip)
+	}
+}
+
+func BenchmarkIsPublicNetIP(b *testing.B) {
+	addr := netip.MustParseAddr("192.168.1.1")
+	b.ResetTimer()
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = IsPublicNetIP(addr)
+	}
+}

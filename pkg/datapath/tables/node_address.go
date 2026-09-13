@@ -102,7 +102,11 @@ type NodeAddressKey struct {
 }
 
 func (k NodeAddressKey) Key() index.Key {
-	return append(index.NetIPAddr(k.Addr), []byte(k.DeviceName)...)
+	buf := make(index.Key, 16+len(k.DeviceName))
+	a16 := k.Addr.As16()
+	copy(buf[:16], a16[:])
+	copy(buf[16:], k.DeviceName)
+	return buf
 }
 
 var (
@@ -501,7 +505,7 @@ func (n *nodeAddressController) getAddressesFromDevice(dev *Device, k8sIPv4, k8s
 
 		// index to which this address is appended.
 		index := len(addrs)
-		isPublic := ip.IsPublicAddr(addr.Addr.AsSlice())
+		isPublic := ip.IsPublicNetIP(addr.Addr)
 		if addr.Addr.Is4() {
 			if addr.Addr.Unmap() == k8sIPv4.Unmap() {
 				// Address matches the K8s Node IP. Prioritize it within its
@@ -628,12 +632,39 @@ func PreferredIPv6Address(addrs []DeviceAddress) netip.Addr {
 
 // PreferredIPv4Address returns the first usable IPv4 address ordered by SortedAddresses.
 func PreferredIPv4Address(addrs []DeviceAddress) netip.Addr {
-	for _, addr := range SortedAddresses(addrs) {
-		if addr.Addr.Is4() && !addr.Addr.IsUnspecified() {
-			return addr.Addr
+	var best *DeviceAddress
+	for i := range addrs {
+		addr := &addrs[i]
+		if !addr.Addr.Is4() || addr.Addr.IsUnspecified() {
+			continue
+		}
+		if best == nil || isBetterDeviceAddress(addr, best) {
+			best = addr
 		}
 	}
+	if best != nil {
+		return best.Addr
+	}
 	return netip.Addr{}
+}
+
+func isBetterDeviceAddress(a, b *DeviceAddress) bool {
+	switch {
+	case !a.Secondary && b.Secondary:
+		return true
+	case a.Secondary && !b.Secondary:
+		return false
+	case a.Scope < b.Scope:
+		return true
+	case a.Scope > b.Scope:
+		return false
+	}
+	aPublic := ip.IsPublicNetIP(a.Addr)
+	bPublic := ip.IsPublicNetIP(b.Addr)
+	if aPublic != bPublic {
+		return aPublic
+	}
+	return a.Addr.Compare(b.Addr) < 0
 }
 
 // SortedAddresses returns a copy of the addresses sorted by following predicates
@@ -646,6 +677,9 @@ func PreferredIPv4Address(addrs []DeviceAddress) netip.Addr {
 // The sorting order affects which address is marked 'Primary' and which is picked as
 // the 'NodePort' address (when --nodeport-addresses is not specified).
 func SortedAddresses(addrs []DeviceAddress) []DeviceAddress {
+	if len(addrs) <= 1 {
+		return slices.Clone(addrs)
+	}
 	addrs = slices.Clone(addrs)
 	slices.SortStableFunc(addrs, func(a, b DeviceAddress) int {
 		switch {
@@ -657,13 +691,16 @@ func SortedAddresses(addrs []DeviceAddress) []DeviceAddress {
 			return -1
 		case a.Scope > b.Scope:
 			return 1
-		case ip.IsPublicAddr(a.Addr.AsSlice()) && !ip.IsPublicAddr(b.Addr.AsSlice()):
-			return -1
-		case !ip.IsPublicAddr(a.Addr.AsSlice()) && ip.IsPublicAddr(b.Addr.AsSlice()):
-			return 1
-		default:
-			return a.Addr.Compare(b.Addr)
 		}
+		aPublic := ip.IsPublicNetIP(a.Addr)
+		bPublic := ip.IsPublicNetIP(b.Addr)
+		if aPublic != bPublic {
+			if aPublic {
+				return -1
+			}
+			return 1
+		}
+		return a.Addr.Compare(b.Addr)
 	})
 	return addrs
 }
@@ -700,6 +737,8 @@ func (f *fallbackAddresses) update(dev *Device) (updated bool) {
 		if addr.Addr.Is6() {
 			fa = &f.ipv6
 		}
+		addrPublic := ip.IsPublicNetIP(addr.Addr)
+		faPublic := ip.IsPublicNetIP(fa.addr.Addr)
 		better := false
 		switch {
 		case fa.dev == nil:
@@ -708,9 +747,9 @@ func (f *fallbackAddresses) update(dev *Device) (updated bool) {
 			better = true
 		case !dev.Selected && fa.dev.Selected:
 			better = false
-		case ip.IsPublicAddr(addr.Addr.AsSlice()) && !ip.IsPublicAddr(fa.addr.Addr.AsSlice()):
+		case addrPublic && !faPublic:
 			better = true
-		case !ip.IsPublicAddr(addr.Addr.AsSlice()) && ip.IsPublicAddr(fa.addr.Addr.AsSlice()):
+		case !addrPublic && faPublic:
 			better = false
 		case addr.Scope < fa.addr.Scope:
 			better = true
