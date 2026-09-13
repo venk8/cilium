@@ -13,6 +13,7 @@ import (
 	"github.com/cilium/hive/hivetest"
 	"github.com/stretchr/testify/assert"
 
+	"github.com/cilium/cilium/pkg/byteorder"
 	"github.com/cilium/cilium/pkg/hive"
 	"github.com/cilium/cilium/pkg/loadbalancer"
 	"github.com/cilium/cilium/pkg/maps/nat"
@@ -136,4 +137,28 @@ type fakeMetrics map[string]int
 
 func (m fakeMetrics) updateLocalPorts(family nat.IPFamily, count, maxPorts int) {
 	m[family.String()] = count
+}
+
+func BenchmarkProcessTuple4(b *testing.B) {
+	k := &tuple.TupleKey4{
+		SourceAddr: types.IPv4{10, 0, 0, 1},
+		DestAddr:   types.IPv4{10, 0, 0, 2},
+		SourcePort: 1234,
+		DestPort:   80,
+		NextHeader: u8proto.TCP,
+		Flags:      tuple.TUPLE_F_IN,
+	}
+	tupleToPortCount := make(map[SNATTuple4]uint16, 128)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		if flagsIsIn(k.Flags) &&
+			(k.NextHeader == u8proto.TCP || k.NextHeader == u8proto.ICMP ||
+				k.NextHeader == u8proto.UDP) {
+			key := *k
+			key.SourcePort = byteorder.NetworkToHost16(k.SourcePort)
+			key.DestPort = 0
+			tupleToPortCount[SNATTuple4(key)]++
+		}
+	}
 }
