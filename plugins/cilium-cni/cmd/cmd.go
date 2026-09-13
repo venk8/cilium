@@ -13,7 +13,6 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 
 	cniInvoke "github.com/containernetworking/cni/pkg/invoke"
@@ -298,7 +297,7 @@ func addIPConfigToLink(logger *slog.Logger, ip netip.Addr, routes []route.Route,
 
 	// Sort provided routes to make sure we apply any more specific
 	// routes first which may be used as nexthops in wider routes
-	sort.Sort(route.ByMask(routes))
+	route.ByMask(routes).Sort()
 
 	for _, r := range routes {
 		logger.Debug(

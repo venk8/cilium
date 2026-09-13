@@ -5,6 +5,7 @@ package ip
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/binary"
 	"math/big"
 	"net"
@@ -59,14 +60,26 @@ func (s NetsByMask) Swap(i, j int) {
 func (s NetsByMask) Less(i, j int) bool {
 	iPrefixSize, _ := s[i].Mask.Size()
 	jPrefixSize, _ := s[j].Mask.Size()
-	if iPrefixSize == jPrefixSize {
-		return bytes.Compare(s[i].IP, s[j].IP) < 0
-	}
-	return iPrefixSize < jPrefixSize
+	return cmp.Or(
+		cmp.Compare(iPrefixSize, jPrefixSize),
+		bytes.Compare(s[i].IP, s[j].IP),
+	) < 0
 }
 
 func (s NetsByMask) Len() int {
 	return len(s)
+}
+
+// Sort sorts the networks in-place by mask size, then by IP.
+func (s NetsByMask) Sort() {
+	slices.SortFunc(s, func(a, b *net.IPNet) int {
+		aPrefixSize, _ := a.Mask.Size()
+		bPrefixSize, _ := b.Mask.Size()
+		return cmp.Or(
+			cmp.Compare(aPrefixSize, bPrefixSize),
+			bytes.Compare(a.IP, b.IP),
+		)
+	})
 }
 
 // Assert that NetsByMask implements sort.Interface.
@@ -83,29 +96,24 @@ func (s NetsByRange) Swap(i, j int) {
 }
 
 func (s NetsByRange) Less(i, j int) bool {
-	// First compare by last IP.
-	lastComparison := bytes.Compare(*s[i].Last, *s[j].Last)
-	if lastComparison < 0 {
-		return true
-	} else if lastComparison > 0 {
-		return false
-	}
-
-	// Then compare by first IP.
-	firstComparison := bytes.Compare(*s[i].First, *s[i].First)
-	if firstComparison < 0 {
-		return true
-	} else if firstComparison > 0 {
-		return false
-	}
-
-	// First and last IPs are the same, so thus are equal, and s[i]
-	// is not less than s[j].
-	return false
+	return cmp.Or(
+		bytes.Compare(*s[i].Last, *s[j].Last),
+		bytes.Compare(*s[i].First, *s[j].First),
+	) < 0
 }
 
 func (s NetsByRange) Len() int {
 	return len(s)
+}
+
+// Sort sorts the ranges in-place, first by last IP, then by first IP.
+func (s NetsByRange) Sort() {
+	slices.SortFunc(s, func(a, b *netWithRange) int {
+		return cmp.Or(
+			bytes.Compare(*a.Last, *b.Last),
+			bytes.Compare(*a.First, *b.First),
+		)
+	})
 }
 
 func ipNetToRange(ipNet net.IPNet) netWithRange {
@@ -297,7 +305,7 @@ type netWithRange struct {
 func mergeAdjacentCIDRs(ranges []*netWithRange) []*netWithRange {
 	// Sort the ranges. This sorts first by the last IP, then first IP, then by
 	// the IP network in the list itself
-	sort.Sort(NetsByRange(ranges))
+	NetsByRange(ranges).Sort()
 
 	// Merge adjacent CIDRs if possible.
 	for i := len(ranges) - 1; i > 0; i-- {

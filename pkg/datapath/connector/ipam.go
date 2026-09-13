@@ -6,6 +6,7 @@ package connector
 import (
 	"fmt"
 	"net"
+	"net/netip"
 
 	"github.com/cilium/cilium/api/v1/models"
 	"github.com/cilium/cilium/pkg/datapath/linux/route"
@@ -26,20 +27,21 @@ func IPv4Gateway(addr *models.NodeAddressing) string {
 
 // IPv6Routes returns IPv6 routes to be installed in endpoint's networking namespace.
 func IPv6Routes(addr *models.NodeAddressing, linkMTU int) ([]route.Route, error) {
-	ip := net.ParseIP(addr.IPv6.IP)
-	if ip == nil {
-		return []route.Route{}, fmt.Errorf("Invalid IP address: %s", addr.IPv6.IP)
+	ip, err := netip.ParseAddr(addr.IPv6.IP)
+	if err != nil {
+		return nil, fmt.Errorf("Invalid IP address: %s", addr.IPv6.IP)
 	}
+	stdIP := net.IP(ip.AsSlice())
 	return []route.Route{
 		{
 			Prefix: net.IPNet{
-				IP:   ip,
+				IP:   stdIP,
 				Mask: defaults.ContainerIPv6Mask,
 			},
 		},
 		{
 			Prefix:  defaults.IPv6DefaultRoute,
-			Nexthop: &ip,
+			Nexthop: &stdIP,
 			MTU:     linkMTU,
 		},
 	}, nil
@@ -47,20 +49,21 @@ func IPv6Routes(addr *models.NodeAddressing, linkMTU int) ([]route.Route, error)
 
 // IPv4Routes returns IPv4 routes to be installed in endpoint's networking namespace.
 func IPv4Routes(addr *models.NodeAddressing, linkMTU int) ([]route.Route, error) {
-	ip := net.ParseIP(addr.IPv4.IP)
-	if ip == nil {
-		return []route.Route{}, fmt.Errorf("Invalid IP address: %s", addr.IPv4.IP)
+	ip, err := netip.ParseAddr(addr.IPv4.IP)
+	if err != nil {
+		return nil, fmt.Errorf("Invalid IP address: %s", addr.IPv4.IP)
 	}
+	stdIP := net.IP(ip.AsSlice())
 	return []route.Route{
 		{
 			Prefix: net.IPNet{
-				IP:   ip,
+				IP:   stdIP,
 				Mask: defaults.ContainerIPv4Mask,
 			},
 		},
 		{
 			Prefix:  defaults.IPv4DefaultRoute,
-			Nexthop: &ip,
+			Nexthop: &stdIP,
 			MTU:     linkMTU,
 		},
 	}, nil
