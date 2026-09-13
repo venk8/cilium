@@ -1131,14 +1131,24 @@ func (a L3n4Addr) String() string {
 // format for IPv4 and "[IPv6]:Port/Protocol[/Scope]" format for IPv6.
 func (a L3n4Addr) StringWithProtocol() string {
 	rep := a.rep()
-	var scope string
+	var buf [64]byte
+	b := buf[:0]
+	is6 := a.IsIPv6()
+	if is6 {
+		b = append(b, '[')
+	}
+	b = rep.addrCluster.AppendTo(b)
+	if is6 {
+		b = append(b, ']')
+	}
+	b = append(b, ':')
+	b = strconv.AppendUint(b, uint64(rep.Port), 10)
+	b = append(b, '/')
+	b = append(b, rep.Protocol...)
 	if rep.scope == ScopeInternal {
-		scope = "/i"
+		b = append(b, "/i"...)
 	}
-	if a.IsIPv6() {
-		return "[" + rep.addrCluster.String() + "]:" + strconv.FormatUint(uint64(rep.Port), 10) + "/" + rep.Protocol + scope
-	}
-	return rep.addrCluster.String() + ":" + strconv.FormatUint(uint64(rep.Port), 10) + "/" + rep.Protocol + scope
+	return string(b)
 }
 
 // StringID returns the L3n4Addr as string to be used for unique identification
@@ -1153,7 +1163,11 @@ func (a L3n4Addr) IsIPv6() bool {
 
 func (l L3n4Addr) AddrString() string {
 	rep := l.rep()
-	return rep.addrCluster.Addr().String() + ":" + strconv.FormatUint(uint64(rep.Port), 10)
+	var buf [64]byte
+	b := rep.addrCluster.Addr().AppendTo(buf[:0])
+	b = append(b, ':')
+	b = strconv.AppendUint(b, uint64(rep.Port), 10)
+	return string(b)
 }
 
 type l3n4AddrCacheEntry struct {

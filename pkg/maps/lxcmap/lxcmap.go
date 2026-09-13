@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/netip"
+	"strconv"
 
 	"github.com/cilium/ebpf"
 	"golang.org/x/sys/unix"
@@ -215,22 +216,51 @@ func (v *EndpointInfo) IsHost() bool {
 	return v.Flags&EndpointFlagHost != 0
 }
 
+const hexUpper = "0123456789ABCDEF"
+
+func appendLeftPad(b []byte, n uint64, width int) []byte {
+	start := len(b)
+	b = strconv.AppendUint(b, n, 10)
+	written := len(b) - start
+	for i := written; i < width; i++ {
+		b = append(b, ' ')
+	}
+	return b
+}
+
+func appendHex4(b []byte, v uint32) []byte {
+	return append(b,
+		hexUpper[(v>>12)&0xf],
+		hexUpper[(v>>8)&0xf],
+		hexUpper[(v>>4)&0xf],
+		hexUpper[v&0xf],
+	)
+}
+
 // String returns the human readable representation of an EndpointInfo
 func (v *EndpointInfo) String() string {
 	if v.Flags&EndpointFlagHost != 0 {
 		return "(localhost)"
 	}
 
-	return fmt.Sprintf("id=%-5d sec_id=%-5d flags=0x%04X ifindex=%-3d mac=%s nodemac=%s parent_ifindex=%-3d rt_info:%d",
-		v.LxcID,
-		v.SecID,
-		v.Flags,
-		v.IfIndex,
-		v.MAC,
-		v.NodeMAC,
-		v.ParentIfIndex,
-		v.RTInfo,
-	)
+	var buf [160]byte
+	b := append(buf[:0], "id="...)
+	b = appendLeftPad(b, uint64(v.LxcID), 5)
+	b = append(b, " sec_id="...)
+	b = appendLeftPad(b, uint64(v.SecID), 5)
+	b = append(b, " flags=0x"...)
+	b = appendHex4(b, v.Flags)
+	b = append(b, " ifindex="...)
+	b = appendLeftPad(b, uint64(v.IfIndex), 3)
+	b = append(b, " mac="...)
+	b = v.MAC.AppendTo(b)
+	b = append(b, " nodemac="...)
+	b = v.NodeMAC.AppendTo(b)
+	b = append(b, " parent_ifindex="...)
+	b = appendLeftPad(b, uint64(v.ParentIfIndex), 3)
+	b = append(b, " rt_info:"...)
+	b = strconv.AppendUint(b, uint64(v.RTInfo), 10)
+	return string(b)
 }
 
 func (v *EndpointInfo) New() bpf.MapValue { return &EndpointInfo{} }
