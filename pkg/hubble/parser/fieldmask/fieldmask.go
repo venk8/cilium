@@ -6,6 +6,8 @@ package fieldmask
 import (
 	"fmt"
 	"strings"
+	"sync"
+	"unsafe"
 
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/known/fieldmaskpb"
@@ -14,6 +16,84 @@ import (
 )
 
 type FieldMask map[string]FieldMask
+
+type compiledField struct {
+	fd    protoreflect.FieldDescriptor
+	oneof protoreflect.OneofDescriptor
+	next  []compiledField
+}
+
+var (
+	compiledMu    sync.RWMutex
+	compiledCache = make(map[uintptr][]compiledField)
+)
+
+func maskKey(f FieldMask) uintptr {
+	return *(*uintptr)(unsafe.Pointer(&f))
+}
+
+func compileFields(f FieldMask, fds protoreflect.FieldDescriptors) []compiledField {
+	if len(f) == 0 {
+		return nil
+	}
+	out := make([]compiledField, 0, len(f))
+	for name, next := range f {
+		fd := fds.ByName(protoreflect.Name(name))
+		if fd == nil {
+			continue
+		}
+		cf := compiledField{
+			fd:    fd,
+			oneof: fd.ContainingOneof(),
+		}
+		if len(next) > 0 && fd.Message() != nil {
+			cf.next = compileFields(next, fd.Message().Fields())
+		}
+		out = append(out, cf)
+	}
+	return out
+}
+
+func copyCompiled(dst, src protoreflect.Message, fields []compiledField) {
+	for i := range fields {
+		cf := &fields[i]
+		if len(cf.next) == 0 {
+			// Leaf node - copy the field value directly.
+			if src.Has(cf.fd) {
+				dst.Set(cf.fd, src.Get(cf.fd))
+			} else {
+				dst.Clear(cf.fd)
+			}
+			continue
+		}
+
+		if cf.oneof != nil {
+			whichOneof := src.WhichOneof(cf.oneof)
+			if whichOneof != nil && whichOneof.Name() == cf.fd.Name() {
+				if sub := dst.Get(cf.fd); sub.Message().IsValid() {
+					copyCompiled(sub.Message(), src.Get(cf.fd).Message(), cf.next)
+				} else {
+					copyCompiled(dst.Mutable(cf.fd).Message(), src.Get(cf.fd).Message(), cf.next)
+				}
+			}
+		} else {
+			if sub := dst.Get(cf.fd); sub.Message().IsValid() {
+				copyCompiled(sub.Message(), src.Get(cf.fd).Message(), cf.next)
+			} else {
+				copyCompiled(dst.Mutable(cf.fd).Message(), src.Get(cf.fd).Message(), cf.next)
+			}
+		}
+	}
+}
+
+func allocCompiled(src protoreflect.Message, fields []compiledField) {
+	for i := range fields {
+		cf := &fields[i]
+		if len(cf.next) > 0 {
+			allocCompiled(src.Mutable(cf.fd).Message(), cf.next)
+		}
+	}
+}
 
 // New constructs a tree filter based on validated and normalized field
 // mask fm. Use Active() to check if applying a filter will have any effect.
@@ -51,59 +131,44 @@ func (f FieldMask) add(path string) {
 // Copy sets fields in dst to values from src based on filter.
 // It has no effect when called on an empty filter (dst remains unchanged).
 func (f FieldMask) Copy(dst, src protoreflect.Message) {
-	fds := dst.Descriptor().Fields()
-	for name, next := range f {
-		fd := fds.ByName(protoreflect.Name(name))
-		if len(next) == 0 {
-			// Leaf node - copy the field value directly.
-			if src.Has(fd) {
-				dst.Set(fd, src.Get(fd))
-			} else {
-				dst.Clear(fd)
-			}
-		} else {
-			// Has sub-fields - need to recursively copy.
-			// Recursion is bounded by the protobuf schema depth (typically 2-4 levels for Flow messages).
-			// Check if this field is part of a oneof (e.g., Layer4.Protocol can be TCP, UDP, SCTP, or ICMPv4/v6).
-			if fd.ContainingOneof() != nil {
-				// This field is part of a oneof group.
-				// Only copy if this variant is actually set in the source.
-				whichOneof := src.WhichOneof(fd.ContainingOneof())
-
-				if whichOneof != nil && whichOneof.Name() == fd.Name() {
-					// This is the active oneof variant in source - copy it.
-					if sub := dst.Get(fd); sub.Message().IsValid() {
-						next.Copy(sub.Message(), src.Get(fd).Message())
-					} else {
-						next.Copy(dst.Mutable(fd).Message(), src.Get(fd).Message())
-					}
-				}
-				// If not the active variant, skip it (don't create spurious structures).
-			} else {
-				// Not a oneof field - copy normally.
-				if sub := dst.Get(fd); sub.Message().IsValid() {
-					next.Copy(sub.Message(), src.Get(fd).Message())
-				} else {
-					next.Copy(dst.Mutable(fd).Message(), src.Get(fd).Message())
-				}
-			}
-		}
+	if len(f) == 0 {
+		return
 	}
+	key := maskKey(f)
+	compiledMu.RLock()
+	fields, ok := compiledCache[key]
+	compiledMu.RUnlock()
+	if !ok {
+		compiledMu.Lock()
+		fields, ok = compiledCache[key]
+		if !ok {
+			fields = compileFields(f, dst.Descriptor().Fields())
+			compiledCache[key] = fields
+		}
+		compiledMu.Unlock()
+	}
+	copyCompiled(dst, src, fields)
 }
 
 // Alloc creates all nested protoreflect.Message fields to avoid allocation later.
 func (f FieldMask) Alloc(src protoreflect.Message) {
-	fds := src.Descriptor().Fields()
-	for i := range fds.Len() {
-		fd := fds.Get(i)
-		if next, ok := f[string(fd.Name())]; ok {
-			if len(next) > 0 {
-				// Call to Mutable allocates a composite value - protoreflect.Message in this case.
-				// See: https://pkg.go.dev/google.golang.org/protobuf/reflect/protoreflect#Message
-				next.Alloc(src.Mutable(fd).Message())
-			}
-		}
+	if len(f) == 0 {
+		return
 	}
+	key := maskKey(f)
+	compiledMu.RLock()
+	fields, ok := compiledCache[key]
+	compiledMu.RUnlock()
+	if !ok {
+		compiledMu.Lock()
+		fields, ok = compiledCache[key]
+		if !ok {
+			fields = compileFields(f, src.Descriptor().Fields())
+			compiledCache[key] = fields
+		}
+		compiledMu.Unlock()
+	}
+	allocCompiled(src, fields)
 }
 
 // Active checks if applying a filter will have any effect.

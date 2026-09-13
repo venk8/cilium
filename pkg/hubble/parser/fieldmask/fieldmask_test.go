@@ -179,3 +179,34 @@ func TestFieldMask_nested_vs_parent_only(t *testing.T) {
 	// L4 is nil because "l4" was specified without nested properties.
 	assert.Nil(t, dstFlow.L4, "L4 should be nil when parent specified without nested properties")
 }
+
+func BenchmarkFieldMask_Copy(b *testing.B) {
+	fm, _ := New(&fieldmaskpb.FieldMask{Paths: []string{"source.identity", "source.pod_name", "destination"}})
+	flow := &flowpb.Flow{}
+	fm.Alloc(flow.ProtoReflect())
+
+	src := &flowpb.Flow{
+		NodeName:    "srcA",
+		Source:      &flowpb.Endpoint{ID: 1234, PodName: "podA", Namespace: "nsA"},
+		Destination: &flowpb.Endpoint{ID: 5678, PodName: "podB", Namespace: "nsB", Identity: 9123},
+	}
+	dstReflect := flow.ProtoReflect()
+	srcReflect := src.ProtoReflect()
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for b.Loop() {
+		fm.Copy(dstReflect, srcReflect)
+	}
+}
+
+func BenchmarkFieldMask_Alloc(b *testing.B) {
+	fm, _ := New(&fieldmaskpb.FieldMask{Paths: []string{"source.identity", "source.pod_name", "destination"}})
+	flow := &flowpb.Flow{}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for b.Loop() {
+		fm.Alloc(flow.ProtoReflect())
+	}
+}

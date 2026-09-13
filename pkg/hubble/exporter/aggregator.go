@@ -34,13 +34,16 @@ type Aggregator struct {
 	mu             lock.RWMutex
 	fieldAggregate fa.FieldAggregate
 	logger         *slog.Logger
+	scratchFlow    flowpb.Flow
+	scratchBuf     []byte
 }
 
 // NewAggregator creates a new aggregator without field aggregation.
 func NewAggregator(logger *slog.Logger) *Aggregator {
 	return &Aggregator{
-		m:      make(map[AggregateKey]*AggregateValue),
-		logger: logger.With(logfields.LogSubsys, "hubble-aggregator"),
+		m:          make(map[AggregateKey]*AggregateValue),
+		logger:     logger.With(logfields.LogSubsys, "hubble-aggregator"),
+		scratchBuf: make([]byte, 0, 256),
 	}
 }
 
@@ -50,6 +53,7 @@ func NewAggregatorWithFields(fieldAggregate fa.FieldAggregate, logger *slog.Logg
 		m:              make(map[AggregateKey]*AggregateValue),
 		fieldAggregate: fieldAggregate,
 		logger:         logger.With(logfields.LogSubsys, "hubble-aggregator"),
+		scratchBuf:     make([]byte, 0, 256),
 	}
 }
 
@@ -59,20 +63,23 @@ func (a *Aggregator) Add(ev *v1.Event) {
 		return
 	}
 
-	processedFlow := &flowpb.Flow{}
-	a.fieldAggregate.Copy(processedFlow.ProtoReflect(), f.ProtoReflect())
-
-	k := generateAggregationKey(processedFlow)
-
-	// Enrich the processed flow with timestamp after key generation.
-	// This ensures timestamp doesn't affect aggregation, but preserves temporal context.
-	processedFlow.Time = f.GetTime()
-
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	v, ok := a.m[k]
+	a.scratchFlow.Reset()
+	a.fieldAggregate.Copy(a.scratchFlow.ProtoReflect(), f.ProtoReflect())
+
+	a.scratchBuf = a.scratchBuf[:0]
+	var err error
+	a.scratchBuf, err = proto.MarshalOptions{}.MarshalAppend(a.scratchBuf, &a.scratchFlow)
+	if err != nil {
+		return
+	}
+
+	v, ok := a.m[AggregateKey(a.scratchBuf)]
 	if !ok {
+		processedFlow := proto.Clone(&a.scratchFlow).(*flowpb.Flow)
+		processedFlow.Time = f.GetTime()
 		switch f.GetTrafficDirection() {
 		case flowpb.TrafficDirection_INGRESS:
 			v = &AggregateValue{
@@ -90,7 +97,7 @@ func (a *Aggregator) Add(ev *v1.Event) {
 				ProcessedFlow:             processedFlow,
 			}
 		}
-		a.m[k] = v
+		a.m[AggregateKey(string(a.scratchBuf))] = v
 	} else {
 		switch f.GetTrafficDirection() {
 		case flowpb.TrafficDirection_INGRESS:
@@ -119,11 +126,11 @@ func (a *Aggregator) Export(encoder Encoder) {
 		}
 	}
 
-	a.m = make(map[AggregateKey]*AggregateValue)
+	clear(a.m)
 }
 
 func generateAggregationKey(processedFlow *flowpb.Flow) AggregateKey {
-	b, _ := proto.Marshal(processedFlow.ProtoReflect().Interface())
+	b, _ := proto.Marshal(processedFlow)
 	return AggregateKey(b)
 }
 
