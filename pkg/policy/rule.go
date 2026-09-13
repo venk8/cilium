@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log/slog"
 
+	"unique"
+
 	"github.com/cilium/cilium/pkg/identity"
 	ipcachetypes "github.com/cilium/cilium/pkg/ipcache/types"
 	"github.com/cilium/cilium/pkg/labels"
@@ -29,6 +31,8 @@ type rule struct {
 
 	// subjectSelector is the entry in the SelectorCache that selects subjects (endpoints or nodes).
 	subjectSelector CachedSelector
+
+	cachedOrigin ruleOrigin
 }
 
 // IdentitySelectionUpdated is called by the SelectorCache when a new identity is added;
@@ -59,7 +63,11 @@ func (r *rule) String() string {
 }
 
 func (r *rule) origin() ruleOrigin {
-	return makeSingleRuleOrigin(r.Labels.Sort(), r.Log.Value)
+	if unique.Handle[RuleMeta](r.cachedOrigin) != (unique.Handle[RuleMeta]{}) {
+		return r.cachedOrigin
+	}
+	r.cachedOrigin = makeSingleRuleOrigin(r.Labels.Sort(), r.Log.Value)
+	return r.cachedOrigin
 }
 
 func (epd *PerSelectorPolicy) appendL7WildcardRule(policyContext PolicyContext) api.L7Rules {
@@ -352,6 +360,12 @@ func (resMap *L4PolicyMap) addFilter(policyCtx PolicyContext, entry *types.Polic
 	return 1, err
 }
 
+var anyL4Protocols = [...]api.L4Proto{
+	api.ProtoTCP,
+	api.ProtoUDP,
+	api.ProtoSCTP,
+}
+
 func (resMap *L4PolicyMap) mergeL4Filter(policyCtx PolicyContext, rule *rule) (int, error) {
 	found := 0
 
@@ -392,16 +406,16 @@ func (resMap *L4PolicyMap) mergeL4Filter(policyCtx PolicyContext, rule *rule) (i
 		}
 
 		for _, p := range ports.GetPortProtocols() {
-			protocols := []api.L4Proto{p.Protocol}
 			if p.Protocol.IsAny() {
-				protocols = []api.L4Proto{
-					api.ProtoTCP,
-					api.ProtoUDP,
-					api.ProtoSCTP,
+				for _, protocol := range anyL4Protocols {
+					p.Protocol = protocol
+					cnt, err := resMap.addFilter(policyCtx, &rule.PolicyEntry, ports, p)
+					if err != nil {
+						return err
+					}
+					found += cnt
 				}
-			}
-			for _, protocol := range protocols {
-				p.Protocol = protocol
+			} else {
 				cnt, err := resMap.addFilter(policyCtx, &rule.PolicyEntry, ports, p)
 				if err != nil {
 					return err
