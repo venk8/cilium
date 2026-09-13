@@ -6,6 +6,7 @@ package nat
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/cilium/ebpf"
@@ -182,7 +183,7 @@ func DumpEntriesWithTimeDiff(m NatMap, clockSource *models.ClockSource) (string,
 
 	if clockSource == nil {
 		toDeltaSecs = func(t uint64) string {
-			return fmt.Sprintf("? (raw %d)", t)
+			return "? (raw " + strconv.FormatUint(t, 10) + ")"
 		}
 	} else {
 		now, err := timestamp.GetCTCurTime(clockSource)
@@ -195,9 +196,9 @@ func DumpEntriesWithTimeDiff(m NatMap, clockSource *models.ClockSource) (string,
 		}
 		tsecNow := tsConverter(now)
 		toDeltaSecs = func(t uint64) string {
-			tsec := tsConverter(uint64(t))
+			tsec := tsConverter(t)
 			diff := int64(tsecNow) - int64(tsec)
-			return fmt.Sprintf("%dsec ago", diff)
+			return strconv.FormatInt(diff, 10) + "sec ago"
 		}
 	}
 

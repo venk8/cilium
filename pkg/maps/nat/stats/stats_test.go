@@ -24,7 +24,7 @@ import (
 )
 
 func Test_topk(t *testing.T) {
-	top5 := newTopK(5)
+	top5 := newTopK[SNATTuple4](5)
 	for i := range byte(10) {
 		ip := types.IPv4{10, 0, 0, i}
 		k := SNATTuple4{
@@ -33,7 +33,7 @@ func Test_topk(t *testing.T) {
 		top5.Push(k, int(i))
 	}
 	out := []int{}
-	top5.popForEach(func(key SNATTupleAccessor, count, ith int) { out = append(out, count) })
+	top5.popForEach(func(key SNATTuple4, count, ith int) { out = append(out, count) })
 	assert.Equal(t, []int{5, 6, 7, 8, 9}, out)
 }
 
@@ -160,5 +160,30 @@ func BenchmarkProcessTuple4(b *testing.B) {
 			key.DestPort = 0
 			tupleToPortCount[SNATTuple4(key)]++
 		}
+	}
+}
+
+func BenchmarkTopK(b *testing.B) {
+	const numEntries = 10000
+	tuples := make([]SNATTuple4, numEntries)
+	for i := range numEntries {
+		tuples[i] = SNATTuple4{
+			SourceAddr: types.IPv4{10, 0, byte(i >> 8), byte(i)},
+			DestAddr:   types.IPv4{10, 1, byte(i >> 8), byte(i)},
+			SourcePort: uint16(1024 + (i % 50000)),
+			DestPort:   80,
+			NextHeader: u8proto.TCP,
+			Flags:      tuple.TUPLE_F_IN,
+		}
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		top10 := newTopK[SNATTuple4](10)
+		for i, t := range tuples {
+			top10.Push(t, i%100)
+		}
+		top10.popForEach(func(key SNATTuple4, count, ith int) {})
 	}
 }
