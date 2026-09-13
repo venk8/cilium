@@ -728,7 +728,7 @@ func (l Labels) LabelArray() LabelArray {
 // FindReserved locates all labels with reserved source in the labels and
 // returns a copy of them. If there are no reserved labels, returns nil.
 func (l Labels) FindReserved() LabelArray {
-	lbls := make(LabelArray, 0)
+	var lbls LabelArray
 
 	for _, lbl := range l {
 		if lbl.Source == LabelSourceReserved {
@@ -736,10 +736,7 @@ func (l Labels) FindReserved() LabelArray {
 		}
 	}
 
-	if len(lbls) > 0 {
-		return lbls
-	}
-	return nil
+	return lbls
 }
 
 // IsReserved returns true if any of the labels has a reserved source.
