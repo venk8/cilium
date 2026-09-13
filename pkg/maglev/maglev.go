@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unsafe"
 
 	"github.com/cilium/hive/cell"
 	"github.com/cilium/workerpool"
@@ -123,8 +124,12 @@ type Maglev struct {
 	// backendInfosBuffer is a reusable buffer for holding the backend infos.
 	backendInfosBuffer []BackendInfo
 
-	// permutations is (re)used during each GetLookupTable call to compute the table.
+	// permutations is (re)used during getPermutation.
 	permutations []uint64
+
+	cursBuffer   []uint64
+	skipsBuffer  []uint64
+	weightBuffer []float64
 }
 
 // New constructs a new Maglev computation object.
@@ -185,7 +190,8 @@ func (ml *Maglev) getPermutation(backends []BackendInfo, numCPU int) []uint64 {
 		}
 		ml.wp.Submit("", func(_ context.Context) error {
 			for i := from; i < to; i++ {
-				offset, skip := getOffsetAndSkip([]byte(backends[i].hashString), uint64(m), ml.SeedMurmur)
+				addrBytes := unsafe.Slice(unsafe.StringData(backends[i].hashString), len(backends[i].hashString))
+				offset, skip := getOffsetAndSkip(addrBytes, uint64(m), ml.SeedMurmur)
 				start := i * m
 				ml.permutations[start] = offset
 				for j := 1; j < m; j++ {
@@ -292,21 +298,38 @@ func (ml *Maglev) GetLookupTable(backends iter.Seq[BackendInfo]) []loadbalancer.
 func (ml *Maglev) computeLookupTable() []loadbalancer.BackendID {
 	backends := ml.backendInfosBuffer
 	m := uint64(ml.TableSize)
-
 	l := len(backends)
+	if l == 0 {
+		return nil
+	}
+
 	weightSum := uint64(0)
-	weightCntr := make([]float64, l)
-	for i, info := range backends {
+	for _, info := range backends {
 		weightSum += uint64(info.Weight)
-		weightCntr[i] = float64(info.Weight) / float64(l)
 	}
 	weightsUsed := weightSum/uint64(l) > 1
 
-	perm := ml.getPermutation(backends, runtime.NumCPU())
+	var weightCntr []float64
+	if weightsUsed {
+		ml.weightBuffer = slices.Grow(ml.weightBuffer[:0], l)[:l]
+		weightCntr = ml.weightBuffer
+		fl := float64(l)
+		for i, info := range backends {
+			weightCntr[i] = float64(info.Weight) / fl
+		}
+	}
 
-	next := make([]int, len(backends))
+	ml.cursBuffer = slices.Grow(ml.cursBuffer[:0], l)[:l]
+	ml.skipsBuffer = slices.Grow(ml.skipsBuffer[:0], l)[:l]
+	curs := ml.cursBuffer
+	skips := ml.skipsBuffer
+
+	for i := range backends {
+		addrBytes := unsafe.Slice(unsafe.StringData(backends[i].hashString), len(backends[i].hashString))
+		curs[i], skips[i] = getOffsetAndSkip(addrBytes, m, ml.SeedMurmur)
+	}
+
 	entry := make([]loadbalancer.BackendID, m)
-
 	const sentinel = 0xffff_ffff
 	for j := range m {
 		entry[j] = sentinel
@@ -324,13 +347,19 @@ func (ml *Maglev) computeLookupTable() []loadbalancer.BackendID {
 				}
 				weightCntr[i] += float64(weightSum)
 			}
-			c := perm[i*int(m)+next[i]]
+			c := curs[i]
 			for entry[c] != sentinel {
-				next[i] += 1
-				c = perm[i*int(m)+next[i]]
+				curs[i] += skips[i]
+				if curs[i] >= m {
+					curs[i] -= m
+				}
+				c = curs[i]
 			}
 			entry[c] = info.ID
-			next[i] += 1
+			curs[i] += skips[i]
+			if curs[i] >= m {
+				curs[i] -= m
+			}
 			break
 		}
 	}
