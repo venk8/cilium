@@ -28,9 +28,14 @@ type GlobalIdentity struct {
 
 // GetKey encodes an Identity as string
 func (gi *GlobalIdentity) GetKey() string {
-	var str strings.Builder
+	totalLen := 0
 	for _, l := range gi.LabelArray {
-		str.Write(l.FormatForKVStore())
+		totalLen += len(l.Source) + 1 + len(l.Key) + 1 + len(l.Value) + 1
+	}
+	var str strings.Builder
+	str.Grow(totalLen)
+	for _, l := range gi.LabelArray {
+		l.FormatForKVStoreIntoBuilder(&str)
 	}
 	return str.String()
 }
