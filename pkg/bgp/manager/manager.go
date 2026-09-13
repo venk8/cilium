@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"slices"
 	"strings"
 
@@ -952,7 +953,7 @@ func getRouterID(cfg *v2.CiliumBGPNodeInstance, ciliumNode *v2.CiliumNode, bgpCf
 			return "", fmt.Errorf("can't find the router-id in the CiliumBGPNodeInstance")
 		}
 		routerID := *cfg.RouterID
-		if net.ParseIP(routerID).To4() == nil {
+		if ip, err := netip.ParseAddr(routerID); err != nil || !ip.Is4() {
 			return "", fmt.Errorf("the router-id %s is not a valid IPv4 address", routerID)
 		}
 		return routerID, nil

@@ -165,9 +165,14 @@ func desiredSyncSecret(secretsNamespace string, original *corev1.Secret) *corev1
 	source := types.NamespacedName{Namespace: original.Namespace, Name: original.Name}
 	s.SetAnnotations(original.GetAnnotations())
 	setSourceAnnotations(s, SourceKindSecret, source)
-	s.SetLabels(original.GetLabels())
-	if s.Labels == nil {
-		s.Labels = map[string]string{}
+	labels := original.GetLabels()
+	if labels == nil {
+		s.Labels = make(map[string]string, 2)
+	} else {
+		s.Labels = make(map[string]string, len(labels)+2)
+		for k, v := range labels {
+			s.Labels[k] = v
+		}
 	}
 	s.Labels[OwningSecretNamespace] = original.Namespace
 	s.Labels[OwningSecretName] = original.Name

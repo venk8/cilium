@@ -158,16 +158,21 @@ func configMapToSyncSecret(secretsNamespace string, original *corev1.ConfigMap) 
 	source := types.NamespacedName{Namespace: original.Namespace, Name: original.Name}
 	s.SetAnnotations(original.GetAnnotations())
 	setSourceAnnotations(s, SourceKindConfigMap, source)
-	s.SetLabels(original.GetLabels())
-	if s.Labels == nil {
-		s.Labels = map[string]string{}
+	labels := original.GetLabels()
+	if labels == nil {
+		s.Labels = make(map[string]string, 2)
+	} else {
+		s.Labels = make(map[string]string, len(labels)+2)
+		for k, v := range labels {
+			s.Labels[k] = v
+		}
 	}
 	s.Labels[OwningConfigMapNamespace] = original.Namespace
 	s.Labels[OwningConfigMapName] = original.Name
 	s.Immutable = original.Immutable
 	// ConfigMap data is not base64 encoded, so we apply it to the
 	// Data field, not the StringData field.
-	s.Data = make(map[string][]byte)
+	s.Data = make(map[string][]byte, len(original.Data))
 	for key, value := range original.Data {
 		s.Data[key] = []byte(value)
 	}
