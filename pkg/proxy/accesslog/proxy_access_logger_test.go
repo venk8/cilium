@@ -133,6 +133,9 @@ func NewMockLogNotifier(monitor agent.Agent) *MockLogNotifier {
 
 // NewProxyLogRecord sends the event to the monitor agent to notify the listeners.
 func (n *MockLogNotifier) NewProxyLogRecord(l *LogRecord) error {
+	if !n.monitorAgent.HasSubscribers() {
+		return nil
+	}
 	return n.monitorAgent.SendEvent(api.MessageTypeAccessLog, *l)
 }
 

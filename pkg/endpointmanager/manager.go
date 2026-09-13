@@ -518,7 +518,7 @@ func (mgr *endpointManager) removeEndpoint(ep *endpoint.Endpoint, conf endpoint.
 		mgr.releaseID(ep)
 	}
 
-	if !option.Config.DryMode {
+	if !option.Config.DryMode && mgr.monitorAgent.HasSubscribers() {
 		_ = mgr.monitorAgent.SendEvent(monitorAPI.MessageTypeAgent, monitorAPI.EndpointDeleteMessage(ep))
 	}
 
@@ -806,7 +806,7 @@ func (mgr *endpointManager) AddEndpoint(ep *endpoint.Endpoint) (err error) {
 		return err
 	}
 
-	if !option.Config.DryMode {
+	if !option.Config.DryMode && mgr.monitorAgent.HasSubscribers() {
 		_ = mgr.monitorAgent.SendEvent(monitorAPI.MessageTypeAgent, monitorAPI.EndpointCreateMessage(ep))
 	}
 

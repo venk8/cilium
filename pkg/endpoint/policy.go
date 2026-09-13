@@ -1163,7 +1163,7 @@ func (e *Endpoint) startRegenerationFailureHandler() {
 }
 
 func (e *Endpoint) notifyEndpointRegeneration(err error) {
-	if !option.Config.DryMode {
+	if !option.Config.DryMode && e.monitorAgent.HasSubscribers() {
 		reprerr := e.monitorAgent.SendEvent(monitorAPI.MessageTypeAgent, monitorAPI.EndpointRegenMessage(e, err))
 		if reprerr != nil {
 			e.getLogger().Warn(
