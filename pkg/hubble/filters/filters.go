@@ -21,47 +21,72 @@ type FilterFuncs []FilterFunc
 // Apply filters the flow with the given white- and blacklist. Returns true
 // if the flow should be included in the result.
 func Apply(whitelist, blacklist FilterFuncs, ev *v1.Event) bool {
-	return whitelist.MatchOne(ev) && blacklist.MatchNone(ev)
+	if len(whitelist) > 0 && !whitelist.MatchOne(ev) {
+		return false
+	}
+	if len(blacklist) > 0 && !blacklist.MatchNone(ev) {
+		return false
+	}
+	return true
 }
 
 // MatchAll returns true if all the filters match the provided data, i.e. AND.
 func (fs FilterFuncs) MatchAll(ev *v1.Event) bool {
-	for _, f := range fs {
-		if !f(ev) {
-			return false
+	switch len(fs) {
+	case 0:
+		return true
+	case 1:
+		return fs[0](ev)
+	case 2:
+		return fs[0](ev) && fs[1](ev)
+	default:
+		for _, f := range fs {
+			if !f(ev) {
+				return false
+			}
 		}
+		return true
 	}
-	return true
 }
 
 // MatchOne returns true if at least one of the filters match the provided data or
 // if no filters are specified, i.e. OR.
 func (fs FilterFuncs) MatchOne(ev *v1.Event) bool {
-	if len(fs) == 0 {
+	switch len(fs) {
+	case 0:
 		return true
-	}
-
-	for _, f := range fs {
-		if f(ev) {
-			return true
+	case 1:
+		return fs[0](ev)
+	case 2:
+		return fs[0](ev) || fs[1](ev)
+	default:
+		for _, f := range fs {
+			if f(ev) {
+				return true
+			}
 		}
+		return false
 	}
-	return false
 }
 
 // MatchNone returns true if none of the filters match the provided data or
 // if no filters are specified, i.e. NOR
 func (fs FilterFuncs) MatchNone(ev *v1.Event) bool {
-	if len(fs) == 0 {
+	switch len(fs) {
+	case 0:
+		return true
+	case 1:
+		return !fs[0](ev)
+	case 2:
+		return !fs[0](ev) && !fs[1](ev)
+	default:
+		for _, f := range fs {
+			if f(ev) {
+				return false
+			}
+		}
 		return true
 	}
-
-	for _, f := range fs {
-		if f(ev) {
-			return false
-		}
-	}
-	return true
 }
 
 // OnBuildFilter is invoked while building a flow filter
@@ -113,11 +138,14 @@ func BuildFilterList(ctx context.Context, ff []*flowpb.FlowFilter, auxFilters []
 		}
 
 		// All filters representing a FlowFilter must match
-		filterFunc := func(ev *v1.Event) bool {
-			return tf.MatchAll(ev)
+		switch len(tf) {
+		case 0:
+			filterList = append(filterList, func(ev *v1.Event) bool { return true })
+		case 1:
+			filterList = append(filterList, tf[0])
+		default:
+			filterList = append(filterList, tf.MatchAll)
 		}
-
-		filterList = append(filterList, filterFunc)
 	}
 
 	return filterList, nil

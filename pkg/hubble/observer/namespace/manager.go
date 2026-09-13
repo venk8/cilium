@@ -17,6 +17,11 @@ type Manager interface {
 	AddNamespace(*observerpb.Namespace)
 }
 
+type namespaceKey struct {
+	cluster   string
+	namespace string
+}
+
 type namespaceRecord struct {
 	namespace *observerpb.Namespace
 	added     time.Time
@@ -24,7 +29,7 @@ type namespaceRecord struct {
 
 type namespaceManager struct {
 	mu         lock.RWMutex
-	namespaces map[string]namespaceRecord
+	namespaces map[namespaceKey]namespaceRecord
 	nowFunc    func() time.Time
 }
 
@@ -32,7 +37,7 @@ type namespaceManager struct {
 // functional ns manager outside of Hive/Cell, i.e. testing and Hubble Relay.
 func NewManager() *namespaceManager {
 	return &namespaceManager{
-		namespaces: make(map[string]namespaceRecord),
+		namespaces: make(map[namespaceKey]namespaceRecord),
 		nowFunc:    time.Now,
 	}
 }
@@ -66,9 +71,23 @@ func (m *namespaceManager) GetNamespaces() []*observerpb.Namespace {
 }
 
 func (m *namespaceManager) AddNamespace(ns *observerpb.Namespace) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	key := namespaceKey{cluster: ns.GetCluster(), namespace: ns.GetNamespace()}
+	now := m.nowFunc()
 
-	key := ns.GetCluster() + "/" + ns.GetNamespace()
-	m.namespaces[key] = namespaceRecord{namespace: ns, added: m.nowFunc()}
+	m.mu.RLock()
+	rec, exists := m.namespaces[key]
+	if exists && now.Sub(rec.added) < 5*time.Minute {
+		m.mu.RUnlock()
+		return
+	}
+	m.mu.RUnlock()
+
+	m.mu.Lock()
+	rec, exists = m.namespaces[key]
+	if exists && now.Sub(rec.added) < 5*time.Minute {
+		m.mu.Unlock()
+		return
+	}
+	m.namespaces[key] = namespaceRecord{namespace: ns, added: now}
+	m.mu.Unlock()
 }
