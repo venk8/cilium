@@ -1180,7 +1180,8 @@ func (bi *BatchIterator[KT, VT, KP, VP]) IterateAll(ctx context.Context, opts ..
 func (m *Map) Dump(hash map[string][]string) error {
 	callback := func(key MapKey, value MapValue) {
 		// No need to deep copy since we are creating strings.
-		hash[key.String()] = append(hash[key.String()], value.String())
+		k := key.String()
+		hash[k] = append(hash[k], value.String())
 	}
 
 	if err := m.DumpWithCallback(callback); err != nil {

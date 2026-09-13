@@ -272,3 +272,13 @@ func TestParsePrefixCluster(t *testing.T) {
 		return
 	}
 }
+
+func BenchmarkAddrClusterString(b *testing.B) {
+	ac := MustParseAddrCluster("10.0.0.1@42")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = ac.String()
+	}
+}
+
