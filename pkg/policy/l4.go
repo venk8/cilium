@@ -769,28 +769,10 @@ func (l4 *L4Filter) toMapState(logger *slog.Logger, tierPriority, nextTierPriori
 
 	// compute keys to insert, identities will be filled in later
 	key := KeyForDirection(direction).WithPortProto(proto, port)
+	isRange := !egressNamedPort && port != 0 && l4.EndPort > port
 	var keysToAdd []Key
-	// keysToAdd is only used if egress named port resolution is not needed
-	if !egressNamedPort {
+	if isRange {
 		keysToAdd = keysForRange(key, port, l4.EndPort)
-	}
-
-	logEntry := func(entry *mapStateEntry, cs CachedSelector, idents identity.NumericIdentitySlice) {
-		if entry.IsDeny() {
-			scopedLog.Debug(
-				"ToMapState: Denied remote IDs",
-				logfields.Version, p.selectors,
-				logfields.EndpointSelector, cs,
-				logfields.PolicyID, idents,
-			)
-		} else {
-			scopedLog.Debug(
-				"ToMapState: Allowed remote IDs",
-				logfields.Version, p.selectors,
-				logfields.EndpointSelector, cs,
-				logfields.PolicyID, idents,
-			)
-		}
 	}
 
 	for cs, currentRule := range l4.PerSelectorPolicies {
@@ -813,7 +795,21 @@ func (l4 *L4Filter) toMapState(logger *slog.Logger, tierPriority, nextTierPriori
 					continue // Skip unrealized redirects
 				}
 				if option.Config.Debug {
-					logEntry(&entry, cs, idents)
+					if entry.IsDeny() {
+						scopedLog.Debug(
+							"ToMapState: Denied remote IDs",
+							logfields.Version, p.selectors,
+							logfields.EndpointSelector, cs,
+							logfields.PolicyID, idents,
+						)
+					} else {
+						scopedLog.Debug(
+							"ToMapState: Allowed remote IDs",
+							logfields.Version, p.selectors,
+							logfields.EndpointSelector, cs,
+							logfields.PolicyID, idents,
+						)
+					}
 				}
 				keyToAdd := key.WithIdentity(id).WithPort(port)
 				p.policyMapState.insertWithChanges(tierMaxPrecedence, keyToAdd, entry, features, changes)
@@ -831,12 +827,33 @@ func (l4 *L4Filter) toMapState(logger *slog.Logger, tierPriority, nextTierPriori
 			continue // Skip unrealized redirects
 		}
 		if option.Config.Debug {
-			logEntry(&entry, cs, idents)
+			if entry.IsDeny() {
+				scopedLog.Debug(
+					"ToMapState: Denied remote IDs",
+					logfields.Version, p.selectors,
+					logfields.EndpointSelector, cs,
+					logfields.PolicyID, idents,
+				)
+			} else {
+				scopedLog.Debug(
+					"ToMapState: Allowed remote IDs",
+					logfields.Version, p.selectors,
+					logfields.EndpointSelector, cs,
+					logfields.PolicyID, idents,
+				)
+			}
 		}
-		for _, id := range idents {
-			for _, keyToAdd := range keysToAdd {
-				keyToAdd.Identity = id
-				p.policyMapState.insertWithChanges(tierMaxPrecedence, keyToAdd, entry, features, changes)
+		if isRange {
+			for _, id := range idents {
+				for _, keyToAdd := range keysToAdd {
+					keyToAdd.Identity = id
+					p.policyMapState.insertWithChanges(tierMaxPrecedence, keyToAdd, entry, features, changes)
+				}
+			}
+		} else {
+			for _, id := range idents {
+				key.Identity = id
+				p.policyMapState.insertWithChanges(tierMaxPrecedence, key, entry, features, changes)
 			}
 		}
 	}
@@ -1749,10 +1766,13 @@ func (l4Policy *L4Policy) AccumulateMapChanges(logger *slog.Logger, l4 *L4Filter
 	verdict := perSelectorPolicy.GetVerdict()
 	tier := l4.Tier
 	priority := perSelectorPolicy.GetPriority()
-	tierPriority := directionPolicy.tierBasePriority[tier]
+	var tierPriority types.Priority
 	nextTierPriority := types.LowestPriority
-	if len(directionPolicy.tierBasePriority) > int(tier)+1 {
-		nextTierPriority = directionPolicy.tierBasePriority[tier+1]
+	if len(directionPolicy.tierBasePriority) > int(tier) {
+		tierPriority = directionPolicy.tierBasePriority[tier]
+		if len(directionPolicy.tierBasePriority) > int(tier)+1 {
+			nextTierPriority = directionPolicy.tierBasePriority[tier+1]
+		}
 	}
 
 	// Can hold rlock here as neither named port lookup nor LookupRedirectPort()
@@ -1785,31 +1805,6 @@ func (l4Policy *L4Policy) AccumulateMapChanges(logger *slog.Logger, l4 *L4Filter
 		return proxyPort
 	}
 
-	debugLog := func(port uint16) {
-		if option.Config.Debug {
-			authString := "default"
-			if authReq.IsExplicit() {
-				authString = authReq.AuthType().String()
-			}
-			logger.Debug(
-				"AccumulateMapChanges",
-				logfields.EndpointSelector, cs,
-				logfields.AddedPolicyID, adds,
-				logfields.DeletedPolicyID, deletes,
-				logfields.Port, port,
-				logfields.Protocol, proto,
-				logfields.TrafficDirection, direction,
-				logfields.IsRedirect, redirect,
-				logfields.AuthType, authString,
-				logfields.Listener, listener,
-				logfields.ListenerPriority, listenerPriority,
-				logfields.Tier, tier,
-				logfields.TierBasePriority, tierPriority,
-				logfields.Priority, priority,
-			)
-		}
-	}
-
 	// Named ports are handled separately
 	if port == 0 && l4.PortName != "" {
 		for epPolicy := range l4Policy.users {
@@ -1836,7 +1831,28 @@ func (l4Policy *L4Policy) AccumulateMapChanges(logger *slog.Logger, l4 *L4Filter
 				}
 				key := KeyForDirection(direction).WithPortProto(proto, resolvedPort)
 				value := newMapStateEntry(priority, tierPriority, nextTierPriority, derivedFrom, proxyPort, listenerPriority, verdict, authReq)
-				debugLog(resolvedPort)
+				if option.Config.Debug {
+					authString := "default"
+					if authReq.IsExplicit() {
+						authString = authReq.AuthType().String()
+					}
+					logger.Debug(
+						"AccumulateMapChanges",
+						logfields.EndpointSelector, cs,
+						logfields.AddedPolicyID, adds,
+						logfields.DeletedPolicyID, deletes,
+						logfields.Port, resolvedPort,
+						logfields.Protocol, proto,
+						logfields.TrafficDirection, direction,
+						logfields.IsRedirect, redirect,
+						logfields.AuthType, authString,
+						logfields.Listener, listener,
+						logfields.ListenerPriority, listenerPriority,
+						logfields.Tier, tier,
+						logfields.TierBasePriority, tierPriority,
+						logfields.Priority, priority,
+					)
+				}
 				epPolicy.policyMapChanges.AccumulateMapChanges(tier, tierPriority, adds, nil, key, value)
 				continue
 			}
@@ -1851,22 +1867,46 @@ func (l4Policy *L4Policy) AccumulateMapChanges(logger *slog.Logger, l4 *L4Filter
 				}
 				key := KeyForDirection(direction).WithPortProto(proto, port)
 				value := newMapStateEntry(priority, tierPriority, nextTierPriority, derivedFrom, proxyPort, listenerPriority, verdict, authReq)
-				debugLog(port)
+				if option.Config.Debug {
+					authString := "default"
+					if authReq.IsExplicit() {
+						authString = authReq.AuthType().String()
+					}
+					logger.Debug(
+						"AccumulateMapChanges",
+						logfields.EndpointSelector, cs,
+						logfields.AddedPolicyID, adds,
+						logfields.DeletedPolicyID, deletes,
+						logfields.Port, port,
+						logfields.Protocol, proto,
+						logfields.TrafficDirection, direction,
+						logfields.IsRedirect, redirect,
+						logfields.AuthType, authString,
+						logfields.Listener, listener,
+						logfields.ListenerPriority, listenerPriority,
+						logfields.Tier, tier,
+						logfields.TierBasePriority, tierPriority,
+						logfields.Priority, priority,
+					)
+				}
 				epPolicy.policyMapChanges.AccumulateMapChanges(tier, tierPriority, identity.NumericIdentitySlice{nid}, nil, key, value)
 			}
 		}
 		return
 	}
 
+	isRange := port != 0 && l4.EndPort > port
 	var keysToAdd []Key
-	if port != 0 && l4.EndPort > port {
-		for _, mp := range PortRangeToMaskedPorts(port, l4.EndPort) {
+	var singleKey Key
+	if isRange {
+		maskedPorts := PortRangeToMaskedPorts(port, l4.EndPort)
+		keysToAdd = make([]Key, 0, len(maskedPorts))
+		for _, mp := range maskedPorts {
 			keysToAdd = append(keysToAdd,
 				KeyForDirection(direction).WithPortProtoPrefix(proto, mp.port, uint8(bits.LeadingZeros16(^mp.mask))))
 		}
 	} else {
-		// single key for singular (named) port
-		keysToAdd = []Key{KeyForDirection(direction).WithPortProto(proto, port)}
+		singleKey = KeyForDirection(direction).WithPortProto(proto, port)
 	}
 
 	for epPolicy := range l4Policy.users {
@@ -1880,10 +1920,35 @@ func (l4Policy *L4Policy) AccumulateMapChanges(logger *slog.Logger, l4 *L4Filter
 
 		value := newMapStateEntry(priority, tierPriority, nextTierPriority, derivedFrom, proxyPort, listenerPriority, verdict, authReq)
 
-		debugLog(port)
+		if option.Config.Debug {
+			authString := "default"
+			if authReq.IsExplicit() {
+				authString = authReq.AuthType().String()
+			}
+			logger.Debug(
+				"AccumulateMapChanges",
+				logfields.EndpointSelector, cs,
+				logfields.AddedPolicyID, adds,
+				logfields.DeletedPolicyID, deletes,
+				logfields.Port, port,
+				logfields.Protocol, proto,
+				logfields.TrafficDirection, direction,
+				logfields.IsRedirect, redirect,
+				logfields.AuthType, authString,
+				logfields.Listener, listener,
+				logfields.ListenerPriority, listenerPriority,
+				logfields.Tier, tier,
+				logfields.TierBasePriority, tierPriority,
+				logfields.Priority, priority,
+			)
+		}
 
-		for _, key := range keysToAdd {
-			epPolicy.policyMapChanges.AccumulateMapChanges(tier, tierPriority, adds, deletes, key, value)
+		if isRange {
+			for _, key := range keysToAdd {
+				epPolicy.policyMapChanges.AccumulateMapChanges(tier, tierPriority, adds, deletes, key, value)
+			}
+		} else {
+			epPolicy.policyMapChanges.AccumulateMapChanges(tier, tierPriority, adds, deletes, singleKey, value)
 		}
 	}
 }
