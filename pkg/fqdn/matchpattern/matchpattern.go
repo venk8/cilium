@@ -76,16 +76,50 @@ func prevalidate(pattern string) error {
 	if len(strings.TrimSpace(pattern)) > MaxFQDNLength {
 		return fmt.Errorf("Invalid MatchPattern: %q. Must be <= %d characters long.", pattern, MaxFQDNLength)
 	}
-	if len(pattern) > 0 && !allowedPatternChars.MatchString(pattern) {
+	if len(pattern) > 0 && !hasOnlyAllowedPatternChars(pattern) {
 		return fmt.Errorf("Invalid characters in MatchPattern: \"%s\". Only 0-9, a-z, A-Z and ., -, _ and * characters are allowed", pattern)
 	}
 
 	return nil
 }
 
+func isAllowedPatternChar(c byte) bool {
+	return (c >= 'a' && c <= 'z') ||
+		(c >= 'A' && c <= 'Z') ||
+		(c >= '0' && c <= '9') ||
+		c == '-' || c == '_' || c == '.' || c == '*'
+}
+
+func hasOnlyAllowedPatternChars(pattern string) bool {
+	for i := 0; i < len(pattern); i++ {
+		if !isAllowedPatternChar(pattern[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func isDNSWildcard(pattern string) bool {
+	if len(pattern) == 0 {
+		return false
+	}
+	if pattern[len(pattern)-1] == '.' {
+		pattern = pattern[:len(pattern)-1]
+		if len(pattern) == 0 {
+			return false
+		}
+	}
+	for i := 0; i < len(pattern); i++ {
+		if pattern[i] != '*' {
+			return false
+		}
+	}
+	return true
+}
+
 // Sanitize canonicalized the pattern for use by ToAnchoredRegexp
 func Sanitize(pattern string) string {
-	if dnsWildcardRegex.MatchString(pattern) {
+	if isDNSWildcard(pattern) {
 		return pattern
 	}
 
@@ -101,7 +135,7 @@ func ToAnchoredRegexp(pattern string) string {
 	pattern = strings.ToLower(pattern)
 
 	// handle the * match-all case. This will filter down to the end.
-	if dnsWildcardRegex.MatchString(pattern) {
+	if isDNSWildcard(pattern) {
 		return "(^(" + allowedDNSCharsREGroup + "+[.])+$)|(^[.]$)"
 	}
 
@@ -120,7 +154,7 @@ func ToUnAnchoredRegexp(pattern string) string {
 	pattern = strings.ToLower(pattern)
 
 	// handle the * match-all case. This will filter down to the end.
-	if dnsWildcardRegex.MatchString(pattern) {
+	if isDNSWildcard(pattern) {
 		return MatchAllUnAnchoredPattern
 	}
 
@@ -129,16 +163,33 @@ func ToUnAnchoredRegexp(pattern string) string {
 }
 
 func escapeRegexpCharacters(pattern string) string {
-	// Convert '.' in the match pattern as literal '.' for regex pattern.
-	pattern = strings.ReplaceAll(pattern, ".", "[.]")
+	var b strings.Builder
+	b.Grow(len(pattern)*3 + len(dnsWildcardREGroup))
 
-	// '**.' in match pattern prefix is a subdomain wildcard specifier which matches one ore more
-	// entire labels.
-	pattern = subdomainWildcardSpecifierPrefix.ReplaceAllString(pattern, dnsWildcardREGroup)
+	start := 0
+	leadingStars := 0
+	for leadingStars < len(pattern) && pattern[leadingStars] == '*' {
+		leadingStars++
+	}
+	if leadingStars >= 2 && leadingStars < len(pattern) && pattern[leadingStars] == '.' {
+		b.WriteString(dnsWildcardREGroup)
+		start = leadingStars + 1
+	}
 
-	// Base case: * becomes .*, but only for DNS valid characters
-	// `*` wildcard matches all DNS characters within the subdomain boundary(doesn't include '.' literal)
-	pattern = wildcardSpecifier.ReplaceAllString(pattern, allowedDNSCharsREGroup+"*")
-
-	return pattern
+	for i := start; i < len(pattern); i++ {
+		c := pattern[i]
+		switch c {
+		case '.':
+			b.WriteString("[.]")
+		case '*':
+			for i+1 < len(pattern) && pattern[i+1] == '*' {
+				i++
+			}
+			b.WriteString(allowedDNSCharsREGroup)
+			b.WriteByte('*')
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
 }
