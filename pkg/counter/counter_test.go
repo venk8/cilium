@@ -65,3 +65,25 @@ func TestCounter(t *testing.T) {
 	require.True(t, ac.Delete(netip.MustParseAddr("10.0.0.1")))
 	require.Len(t, ac, 3)
 }
+
+func TestIntCounter_ToBPFData(t *testing.T) {
+	ic := make(IntCounter)
+	ic.Add(10)
+	ic.Add(50)
+	ic.Add(20)
+	ic.Add(40)
+	ic.Add(30)
+	require.Equal(t, []int{50, 40, 30, 20, 10}, ic.ToBPFData())
+}
+
+func BenchmarkIntCounter_ToBPFData(b *testing.B) {
+	ic := make(IntCounter)
+	for i := 0; i < 64; i++ {
+		ic.Add(i * 7 % 100)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = ic.ToBPFData()
+	}
+}

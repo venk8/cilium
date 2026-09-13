@@ -4,7 +4,7 @@
 package counter
 
 import (
-	"sort"
+	"slices"
 )
 
 // IntCounter tracks references for integers with an optional limiter.
@@ -35,6 +35,7 @@ func (i IntCounter) ToBPFData() []int {
 	for key := range i {
 		result = append(result, key)
 	}
-	sort.Sort(sort.Reverse(sort.IntSlice(result)))
+	slices.Sort(result)
+	slices.Reverse(result)
 	return result
 }

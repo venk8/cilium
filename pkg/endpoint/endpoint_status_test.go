@@ -103,3 +103,16 @@ func TestGetCiliumEndpointStatusWithServiceAccount(t *testing.T) {
 	// ServiceAccount should match the pod's ServiceAccountName
 	require.Equal(t, "test-service-account", status.ServiceAccount)
 }
+
+func BenchmarkComponentStatus_SortByPriority(b *testing.B) {
+	cs := componentStatus{
+		BPF:    &statusLogMsg{Status: Status{Type: BPF, Msg: "bpf ok"}},
+		Policy: &statusLogMsg{Status: Status{Type: Policy, Msg: "policy ok"}},
+		Other:  &statusLogMsg{Status: Status{Type: Other, Msg: "other ok"}},
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = cs.sortByPriority()
+	}
+}
