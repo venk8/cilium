@@ -4,7 +4,8 @@
 package model
 
 import (
-	"sort"
+	"cmp"
+	goslices "slices"
 	"strconv"
 	"strings"
 	"time"
@@ -623,8 +624,8 @@ func (r *HTTPRoute) GetMatchKey() string {
 	sb.WriteString("|")
 
 	headers := append([]KeyValueMatch(nil), r.HeadersMatch...)
-	sort.Slice(headers, func(i, j int) bool {
-		return headers[i].String() < headers[j].String()
+	goslices.SortFunc(headers, func(a, b KeyValueMatch) int {
+		return a.Compare(b)
 	})
 	for _, hm := range headers {
 		sb.WriteString("header:")
@@ -633,8 +634,8 @@ func (r *HTTPRoute) GetMatchKey() string {
 	}
 
 	queryParams := append([]KeyValueMatch(nil), r.QueryParamsMatch...)
-	sort.Slice(queryParams, func(i, j int) bool {
-		return queryParams[i].String() < queryParams[j].String()
+	goslices.SortFunc(queryParams, func(a, b KeyValueMatch) int {
+		return a.Compare(b)
 	})
 	for _, qm := range queryParams {
 		sb.WriteString("query:")
@@ -728,6 +729,13 @@ func (kv KeyValueMatch) String() string {
 	sb.WriteString(":")
 	sb.WriteString(kv.Match.String())
 	return sb.String()
+}
+
+func (kv KeyValueMatch) Compare(other KeyValueMatch) int {
+	if c := cmp.Compare(kv.Key, other.Key); c != 0 {
+		return c
+	}
+	return cmp.Compare(kv.Match.String(), other.Match.String())
 }
 
 // Backend holds a Kubernetes Service that points to a backend for traffic.

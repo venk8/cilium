@@ -6,13 +6,13 @@
 package nodemanager
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/netip"
 	"slices"
-	"sort"
 
 	"golang.org/x/sync/semaphore"
 
@@ -476,15 +476,15 @@ func (n *NodeManager) GetNodesByIPWatermarkLocked() []*Node {
 		index++
 	}
 
-	sort.Slice(list, func(i, j int) bool {
-		valuei := list[i].GetNeededAddresses()
-		valuej := list[j].GetNeededAddresses()
+	slices.SortFunc(list, func(a, b *Node) int {
+		valuea := a.GetNeededAddresses()
+		valueb := b.GetNeededAddresses()
 		// Number of addresses to be released is negative value,
 		// nodes with more excess addresses are released earlier
-		if valuei < 0 && valuej < 0 {
-			return valuei < valuej
+		if valuea < 0 && valueb < 0 {
+			return cmp.Compare(valuea, valueb)
 		}
-		return valuei > valuej
+		return cmp.Compare(valueb, valuea)
 	})
 
 	return list

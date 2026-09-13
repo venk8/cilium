@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -786,8 +787,8 @@ func getRouteMatch(hostnames []string, hostNameSuffixMatch bool, pathMatch model
 
 func sortedKeyValueMatches(matches []model.KeyValueMatch) []model.KeyValueMatch {
 	sorted := append([]model.KeyValueMatch(nil), matches...)
-	sort.Slice(sorted, func(i, j int) bool {
-		return sorted[i].String() < sorted[j].String()
+	slices.SortFunc(sorted, func(a, b model.KeyValueMatch) int {
+		return a.Compare(b)
 	})
 	return sorted
 }

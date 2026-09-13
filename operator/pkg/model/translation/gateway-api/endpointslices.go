@@ -4,10 +4,11 @@
 package gateway_api
 
 import (
+	"cmp"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"sort"
+	"slices"
 	"strconv"
 
 	corev1 "k8s.io/api/core/v1"
@@ -125,8 +126,8 @@ func (t *gatewayAPITranslator) desiredL4EndpointSlices(listeners []model.L4Liste
 	for _, k := range order {
 		g := groups[k]
 		// Stable order so mergeEndpointPorts pairs existing/desired by index.
-		sort.SliceStable(g.ports, func(i, j int) bool {
-			return ptr.Deref(g.ports[i].Name, "") < ptr.Deref(g.ports[j].Name, "")
+		slices.SortStableFunc(g.ports, func(a, b discoveryv1.EndpointPort) int {
+			return cmp.Compare(ptr.Deref(a.Name, ""), ptr.Deref(b.Name, ""))
 		})
 		slicesOut = append(slicesOut, buildEndpointSlice(buildEPSArgs{
 			svcName:     svcName,
@@ -141,7 +142,7 @@ func (t *gatewayAPITranslator) desiredL4EndpointSlices(listeners []model.L4Liste
 		}))
 	}
 
-	sort.SliceStable(slicesOut, func(i, j int) bool { return slicesOut[i].Name < slicesOut[j].Name })
+	slices.SortStableFunc(slicesOut, func(a, b *discoveryv1.EndpointSlice) int { return cmp.Compare(a.Name, b.Name) })
 	return slicesOut
 }
 

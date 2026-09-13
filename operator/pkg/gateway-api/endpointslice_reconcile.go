@@ -7,7 +7,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -224,8 +224,8 @@ func (r *endpointSliceReconciler) resolveBackendEndpoints(ctx context.Context, n
 		}
 	}
 
-	sort.SliceStable(endpoints, func(i, j int) bool {
-		return strings.Join(endpoints[i].Addresses, ",") < strings.Join(endpoints[j].Addresses, ",")
+	slices.SortStableFunc(endpoints, func(a, b discoveryv1.Endpoint) int {
+		return slices.Compare(a.Addresses, b.Addresses)
 	})
 	return resolvedPort, endpoints, nil
 }
