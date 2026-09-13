@@ -7,7 +7,6 @@ import (
 	"net/netip"
 	"strconv"
 
-	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
 	"github.com/cilium/cilium/pkg/types"
 )
 
@@ -61,11 +60,15 @@ func (k EndpointKey) ToAddr() netip.Addr {
 // String provides a string representation of the EndpointKey.
 func (k EndpointKey) String() string {
 	if addr := k.ToAddr(); addr.IsValid() {
-		addrCluster := cmtypes.AddrClusterFrom(
-			addr,
-			uint32(k.ClusterID),
-		)
-		return addrCluster.String() + ":" + strconv.Itoa(int(k.Key))
+		b := make([]byte, 0, 16+1+5+1+3)
+		b = addr.AppendTo(b)
+		if k.ClusterID != 0 {
+			b = append(b, '@')
+			b = strconv.AppendUint(b, uint64(k.ClusterID), 10)
+		}
+		b = append(b, ':')
+		b = strconv.AppendUint(b, uint64(k.Key), 10)
+		return string(b)
 	}
 	return "nil"
 }

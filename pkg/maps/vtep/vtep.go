@@ -75,8 +75,7 @@ type VtepEndpointInfo struct {
 }
 
 func (v *VtepEndpointInfo) String() string {
-	return fmt.Sprintf("vtepmac=%s tunnelendpoint=%s",
-		v.VtepMAC, v.TunnelEndpoint)
+	return "vtepmac=" + v.VtepMAC.String() + " tunnelendpoint=" + v.TunnelEndpoint.String()
 }
 
 func (v *VtepEndpointInfo) New() bpf.MapValue { return &VtepEndpointInfo{} }
