@@ -7,7 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/go-openapi/strfmt"
@@ -372,18 +372,21 @@ func (d *statusCollector) getKubeProxyReplacementStatus(ctx context.Context) *mo
 		features.Nat46X64.Service = svc
 	}
 	if d.statusParams.KPRConfig.KubeProxyReplacement {
+		features.Annotations = make([]string, 0, 7)
 		if d.statusParams.LBConfig.AlgorithmAnnotation {
 			features.Annotations = append(features.Annotations, annotation.ServiceLoadBalancingAlgorithm)
 		}
 		if d.statusParams.LBConfig.LBModeAnnotation {
 			features.Annotations = append(features.Annotations, annotation.ServiceForwardingMode)
 		}
-		features.Annotations = append(features.Annotations, annotation.ServiceNodeExposure)
-		features.Annotations = append(features.Annotations, annotation.ServiceNodeSelectorExposure)
-		features.Annotations = append(features.Annotations, annotation.ServiceTypeExposure)
-		features.Annotations = append(features.Annotations, annotation.ServiceProxyDelegation)
-		features.Annotations = append(features.Annotations, annotation.ServiceSourceRangesPolicy)
-		sort.Strings(features.Annotations)
+		features.Annotations = append(features.Annotations,
+			annotation.ServiceNodeExposure,
+			annotation.ServiceNodeSelectorExposure,
+			annotation.ServiceTypeExposure,
+			annotation.ServiceProxyDelegation,
+			annotation.ServiceSourceRangesPolicy,
+		)
+		slices.Sort(features.Annotations)
 	}
 
 	var directRoutingDevice string

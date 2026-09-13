@@ -222,9 +222,9 @@ func canonicalPrefix(prefixCluster cmtypes.PrefixCluster) cmtypes.PrefixCluster 
 	return cmtypes.NewPrefixCluster(p, clusterID)
 }
 
-// upsertLocked inserts / updates the set of metadata associated with this resource for this prefix.
-// It returns the set of affected prefixes. It may return nil if the metadata change is a no-op.
-func (m *metadata) upsertLocked(prefix cmtypes.PrefixCluster, src source.Source, resource types.ResourceID, info ...IPMetadata) []cmtypes.PrefixCluster {
+// upsertLockedInto inserts / updates the set of metadata associated with this resource for this prefix,
+// appending the affected prefixes to dst. It returns the updated dst slice.
+func (m *metadata) upsertLockedInto(dst []cmtypes.PrefixCluster, prefix cmtypes.PrefixCluster, src source.Source, resource types.ResourceID, info ...IPMetadata) []cmtypes.PrefixCluster {
 	prefix = canonicalPrefix(prefix)
 	changed := false
 
@@ -246,13 +246,19 @@ func (m *metadata) upsertLocked(prefix cmtypes.PrefixCluster, src source.Source,
 	}
 
 	if !changed {
-		return nil
+		return dst
 	}
 
 	// Invalidated flattened metadata. Will be re-populated on next read.
 	m.m[prefix].flattened = nil
 
-	return m.findAffectedChildPrefixes(prefix)
+	return m.findAffectedChildPrefixesInto(dst, prefix)
+}
+
+// upsertLocked inserts / updates the set of metadata associated with this resource for this prefix.
+// It returns the set of affected prefixes. It may return nil if the metadata change is a no-op.
+func (m *metadata) upsertLocked(prefix cmtypes.PrefixCluster, src source.Source, resource types.ResourceID, info ...IPMetadata) []cmtypes.PrefixCluster {
+	return m.upsertLockedInto(nil, prefix, src, resource, info...)
 }
 
 // GetMetadataSourceByPrefix returns the highest precedence source which has
@@ -331,19 +337,25 @@ func (m *metadata) mergeLabels(lbls labels.Labels, prefixCluster cmtypes.PrefixC
 	}
 }
 
-// findAffectedChildPrefixes returns the list of all child prefixes which are
-// affected by an update to the parent prefix
-func (m *metadata) findAffectedChildPrefixes(parent cmtypes.PrefixCluster) (children []cmtypes.PrefixCluster) {
+// findAffectedChildPrefixesInto appends all child prefixes which are affected by
+// an update to the parent prefix into dst and returns the updated slice.
+func (m *metadata) findAffectedChildPrefixesInto(dst []cmtypes.PrefixCluster, parent cmtypes.PrefixCluster) []cmtypes.PrefixCluster {
 	if parent.IsSingleIP() {
-		return []cmtypes.PrefixCluster{parent} // no children
+		return append(dst, parent)
 	}
 
 	m.prefixes.Descendants(clusterID(parent.ClusterID()), parent.AsPrefix(), func(child netip.Prefix, _ struct{}) bool {
-		children = append(children, cmtypes.NewPrefixCluster(child, parent.ClusterID()))
+		dst = append(dst, cmtypes.NewPrefixCluster(child, parent.ClusterID()))
 		return true
 	})
 
-	return children
+	return dst
+}
+
+// findAffectedChildPrefixes returns the list of all child prefixes which are
+// affected by an update to the parent prefix
+func (m *metadata) findAffectedChildPrefixes(parent cmtypes.PrefixCluster) []cmtypes.PrefixCluster {
+	return m.findAffectedChildPrefixesInto(nil, parent)
 }
 
 // doInjectLabels injects labels from the ipcache metadata (IDMD) map into the
@@ -884,7 +896,7 @@ func (ipc *IPCache) RemoveLabelsExcluded(
 		if _, ok := toExclude[ip]; !ok {
 			prefixLabels := ipc.metadata.getLocked(ip).ToLabels()
 			lblsToRemove := appendAPIServerLabelsForDeletion(lbls, prefixLabels)
-			affectedPrefixes = append(affectedPrefixes, ipc.metadata.remove(ip, rid, lblsToRemove)...)
+			affectedPrefixes = ipc.metadata.removeInto(affectedPrefixes, ip, rid, lblsToRemove)
 		}
 	}
 	ipc.metadata.enqueuePrefixUpdates(affectedPrefixes...)
@@ -907,19 +919,19 @@ func (m *metadata) filterByLabels(filter labels.Labels) []cmtypes.PrefixCluster 
 	return matching
 }
 
-// remove asynchronously removes the labels association for a prefix.
+// removeInto asynchronously removes the labels association for a prefix.
 //
 // This function assumes that the ipcache metadata lock is held for writing.
-func (m *metadata) remove(prefix cmtypes.PrefixCluster, resource types.ResourceID, aux ...IPMetadata) []cmtypes.PrefixCluster {
+func (m *metadata) removeInto(dst []cmtypes.PrefixCluster, prefix cmtypes.PrefixCluster, resource types.ResourceID, aux ...IPMetadata) []cmtypes.PrefixCluster {
 	prefix = canonicalPrefix(prefix)
 	info, ok := m.m[prefix]
 	if !ok || info.byResource[resource] == nil {
-		return nil
+		return dst
 	}
 
 	// compute affected prefixes before deletion, to ensure the prefix matches
 	// its own entry before it is deleted
-	affected := m.findAffectedChildPrefixes(prefix)
+	dst = m.findAffectedChildPrefixesInto(dst, prefix)
 
 	for _, a := range aux {
 		info.byResource[resource].unmerge(m.logger, a)
@@ -935,7 +947,14 @@ func (m *metadata) remove(prefix cmtypes.PrefixCluster, resource types.ResourceI
 		info.flattened = nil
 	}
 
-	return affected
+	return dst
+}
+
+// remove asynchronously removes the labels association for a prefix.
+//
+// This function assumes that the ipcache metadata lock is held for writing.
+func (m *metadata) remove(prefix cmtypes.PrefixCluster, resource types.ResourceID, aux ...IPMetadata) []cmtypes.PrefixCluster {
+	return m.removeInto(nil, prefix, resource, aux...)
 }
 
 // TriggerLabelInjection triggers the label injection controller to iterate
