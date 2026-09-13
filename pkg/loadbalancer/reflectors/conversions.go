@@ -9,7 +9,6 @@ import (
 	"net/netip"
 	"slices"
 	"strings"
-	"sync"
 
 	corev1 "k8s.io/api/core/v1"
 
@@ -50,14 +49,27 @@ func isHeadless(svc *slim_corev1.Service) bool {
 	return headless
 }
 
+var (
+	singleExternalScope = []uint8{loadbalancer.ScopeExternal}
+	bothScopes          = []uint8{loadbalancer.ScopeExternal, loadbalancer.ScopeInternal}
+
+	ipv4Family      = []slim_corev1.IPFamily{slim_corev1.IPv4Protocol}
+	ipv6Family      = []slim_corev1.IPFamily{slim_corev1.IPv6Protocol}
+	dualStackFamily = []slim_corev1.IPFamily{slim_corev1.IPv4Protocol, slim_corev1.IPv6Protocol}
+)
+
 func convertService(cfg loadbalancer.Config, extCfg loadbalancer.ExternalConfig, rawlog *slog.Logger, localNode *node.LocalNode, svc *slim_corev1.Service, source source.Source) (s *loadbalancer.Service, fes []loadbalancer.FrontendParams) {
-	// Lazily construct the augmented logger as we very rarely log here. This improves throughput by 20% and avoids an allocation.
-	log := sync.OnceValue(func() *slog.Logger {
-		return rawlog.With(
-			logfields.Service, svc.GetName(),
-			logfields.K8sNamespace, svc.GetNamespace(),
-		)
-	})
+	// Lazily construct the augmented logger as we very rarely log here.
+	var log *slog.Logger
+	getLog := func() *slog.Logger {
+		if log == nil {
+			log = rawlog.With(
+				logfields.Service, svc.GetName(),
+				logfields.K8sNamespace, svc.GetNamespace(),
+			)
+		}
+		return log
+	}
 
 	name := loadbalancer.NewServiceName(svc.Namespace, svc.Name)
 	s = &loadbalancer.Service{
@@ -76,7 +88,7 @@ func convertService(cfg loadbalancer.Config, extCfg loadbalancer.ExternalConfig,
 		if err == nil {
 			s.ForwardingMode = fwdMode
 		} else {
-			log().Warn("Ignoring annotation",
+			getLog().Warn("Ignoring annotation",
 				logfields.Error, err,
 				logfields.Annotations, annotation.ServiceForwardingMode,
 			)
@@ -85,7 +97,7 @@ func convertService(cfg loadbalancer.Config, extCfg loadbalancer.ExternalConfig,
 
 	if localNode != nil {
 		if nodeMatches, err := CheckServiceNodeExposure(localNode, svc.Annotations); err != nil {
-			log().Warn("Ignoring node service exposure", logfields.Error, err)
+			getLog().Warn("Ignoring node service exposure", logfields.Error, err)
 		} else if !nodeMatches {
 			return nil, nil
 		}
@@ -93,14 +105,15 @@ func convertService(cfg loadbalancer.Config, extCfg loadbalancer.ExternalConfig,
 
 	expType, err := NewSvcExposureType(svc)
 	if err != nil {
-		log().Warn("Ignoring annotation",
+		getLog().Warn("Ignoring annotation",
 			logfields.Error, err,
 			logfields.Annotations, annotation.ServiceTypeExposure,
 		)
 	}
 
-	if len(svc.Spec.Ports) > 0 {
-		s.PortNames = map[string]uint16{}
+	numPorts := len(svc.Spec.Ports)
+	if numPorts > 0 {
+		s.PortNames = make(map[string]uint16, numPorts)
 		for _, port := range svc.Spec.Ports {
 			s.PortNames[port.Name] = uint16(port.Port)
 		}
@@ -109,7 +122,7 @@ func convertService(cfg loadbalancer.Config, extCfg loadbalancer.ExternalConfig,
 	for _, srcRange := range svc.Spec.LoadBalancerSourceRanges {
 		prefix, err := netip.ParsePrefix(srcRange)
 		if err != nil {
-			log().Debug("Failed to parse CIDR in LoadBalancerSourceRanges, Ignoring",
+			getLog().Debug("Failed to parse CIDR in LoadBalancerSourceRanges, Ignoring",
 				logfields.Error, err,
 				logfields.LoadBalancerSourceRanges, svc.Spec.LoadBalancerSourceRanges,
 			)
@@ -132,10 +145,9 @@ func convertService(cfg loadbalancer.Config, extCfg loadbalancer.ExternalConfig,
 	}
 	// Scopes for NodePort and LoadBalancer. Either just external (policies are the same), or
 	// both external and internal (when one policy is local)
-	scopes := []uint8{loadbalancer.ScopeExternal}
-	twoScopes := (s.ExtTrafficPolicy == loadbalancer.SVCTrafficPolicyLocal) != (s.IntTrafficPolicy == loadbalancer.SVCTrafficPolicyLocal)
-	if twoScopes {
-		scopes = append(scopes, loadbalancer.ScopeInternal)
+	scopes := singleExternalScope
+	if (s.ExtTrafficPolicy == loadbalancer.SVCTrafficPolicyLocal) != (s.IntTrafficPolicy == loadbalancer.SVCTrafficPolicyLocal) {
+		scopes = bothScopes
 	}
 
 	// SessionAffinity
@@ -161,23 +173,30 @@ func convertService(cfg loadbalancer.Config, extCfg loadbalancer.ExternalConfig,
 	// ClusterIP
 	if expType.CanExpose(slim_corev1.ServiceTypeClusterIP) {
 		var clusterIPs []string
-		if len(svc.Spec.ClusterIPs) > 0 {
-			clusterIPs = slices.Sorted(slices.Values(svc.Spec.ClusterIPs))
-		} else {
+		if len(svc.Spec.ClusterIPs) == 1 {
+			clusterIPs = svc.Spec.ClusterIPs
+		} else if len(svc.Spec.ClusterIPs) > 1 {
+			clusterIPs = slices.Clone(svc.Spec.ClusterIPs)
+			slices.Sort(clusterIPs)
+		} else if svc.Spec.ClusterIP != "" {
 			clusterIPs = []string{svc.Spec.ClusterIP}
+		}
+
+		if numPorts > 0 && len(clusterIPs) > 0 {
+			fes = make([]loadbalancer.FrontendParams, 0, len(clusterIPs)*numPorts)
 		}
 
 		for _, ip := range clusterIPs {
 			addr, err := cmtypes.ParseAddrCluster(ip)
 			if err != nil {
-				log().Debug("Failed to parse ClusterIP address",
+				getLog().Debug("Failed to parse ClusterIP address",
 					logfields.Error, err,
 					logfields.IPAddr, ip)
 				continue
 			}
 
 			if (!extCfg.EnableIPv6 && addr.Is6()) || (!extCfg.EnableIPv4 && addr.Is4()) {
-				log().Debug(
+				getLog().Debug(
 					"Skipping ClusterIP due to disabled IP family",
 					logfields.IPv4, extCfg.EnableIPv4,
 					logfields.IPv6, extCfg.EnableIPv6,
@@ -214,7 +233,7 @@ func convertService(cfg loadbalancer.Config, extCfg loadbalancer.ExternalConfig,
 				for _, family := range getIPFamilies(svc) {
 					if (!extCfg.EnableIPv6 && family == slim_corev1.IPv6Protocol) ||
 						(!extCfg.EnableIPv4 && family == slim_corev1.IPv4Protocol) {
-						log().Debug(
+						getLog().Debug(
 							"Skipping NodePort due to disabled IP family",
 							logfields.IPv4, extCfg.EnableIPv4,
 							logfields.IPv6, extCfg.EnableIPv6,
@@ -273,7 +292,7 @@ func convertService(cfg loadbalancer.Config, extCfg loadbalancer.ExternalConfig,
 				continue
 			}
 			if (!extCfg.EnableIPv6 && addr.Is6()) || (!extCfg.EnableIPv4 && addr.Is4()) {
-				log().Debug(
+				getLog().Debug(
 					"Skipping LoadBalancer due to disabled IP family",
 					logfields.IPv4, extCfg.EnableIPv4,
 					logfields.IPv6, extCfg.EnableIPv6,
@@ -311,7 +330,7 @@ func convertService(cfg loadbalancer.Config, extCfg loadbalancer.ExternalConfig,
 			continue
 		}
 		if (!extCfg.EnableIPv6 && addr.Is6()) || (!extCfg.EnableIPv4 && addr.Is4()) {
-			log().Debug(
+			getLog().Debug(
 				"Skipping ExternalIP due to disabled IP family",
 				logfields.IPv4, extCfg.EnableIPv4,
 				logfields.IPv6, extCfg.EnableIPv6,
@@ -370,14 +389,16 @@ func getIPFamilies(svc *slim_corev1.Service) []slim_corev1.IPFamily {
 			}
 		}
 	}
-	families := make([]slim_corev1.IPFamily, 0, 2)
+	if ipv4 && ipv6 {
+		return dualStackFamily
+	}
 	if ipv4 {
-		families = append(families, slim_corev1.IPv4Protocol)
+		return ipv4Family
 	}
 	if ipv6 {
-		families = append(families, slim_corev1.IPv6Protocol)
+		return ipv6Family
 	}
-	return families
+	return nil
 }
 
 func trafficDistribution(svc *slim_corev1.Service) loadbalancer.TrafficDistribution {
