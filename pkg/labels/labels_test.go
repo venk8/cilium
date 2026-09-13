@@ -487,11 +487,23 @@ func BenchmarkNewFrom(b *testing.B) {
 }
 
 func BenchmarkLabels_SortedList(b *testing.B) {
-	b.ReportAllocs()
-
-	for b.Loop() {
-		_ = lbls.SortedList()
+	single := Labels{
+		"foo": NewLabel("foo", "bar", LabelSourceUnspec),
 	}
+
+	b.Run("Multi", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			_ = lbls.SortedList()
+		}
+	})
+
+	b.Run("Single", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			_ = single.SortedList()
+		}
+	})
 }
 
 func BenchmarkLabel_FormatForKVStore(b *testing.B) {
