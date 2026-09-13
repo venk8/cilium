@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -129,7 +128,7 @@ func mapContent(logger *slog.Logger, file string) policymap.PolicyEntriesDump {
 	if err != nil {
 		Fatalf("Error while opening bpf Map: %s\n", err)
 	}
-	sort.Slice(statsMap, statsMap.Less)
+	statsMap.Sort()
 
 	return statsMap
 }

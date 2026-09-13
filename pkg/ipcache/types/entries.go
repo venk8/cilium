@@ -4,12 +4,29 @@
 package types
 
 import (
+	"cmp"
 	"net/netip"
+	"slices"
 
 	"github.com/cilium/cilium/api/v1/models"
 )
 
 type IPListEntrySlice []*models.IPListEntry
+
+// CompareIPListEntry compares two IPListEntry objects by CIDR prefix length then IP address.
+func CompareIPListEntry(a, b *models.IPListEntry) int {
+	aNet, _ := netip.ParsePrefix(*a.Cidr)
+	bNet, _ := netip.ParsePrefix(*b.Cidr)
+	if c := cmp.Compare(aNet.Bits(), bNet.Bits()); c != 0 {
+		return c
+	}
+	return aNet.Addr().Compare(bNet.Addr())
+}
+
+// Sort sorts the IPListEntry objects in-place using generic slices.SortFunc.
+func (s IPListEntrySlice) Sort() {
+	slices.SortFunc(s, CompareIPListEntry)
+}
 
 func (s IPListEntrySlice) Swap(i, j int) {
 	s[i], s[j] = s[j], s[i]

@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"net/netip"
 	"os"
-	"sort"
+	"slices"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
@@ -187,14 +187,14 @@ func outputGroups(groupAddrs []netip.Addr) error {
 }
 
 func printSubscriberList(subscribers []SubscriberData) {
-	sort.Slice(subscribers, func(i, j int) bool {
-		return subscribers[i].GroupAddr.Compare(subscribers[j].GroupAddr) < 0
+	slices.SortFunc(subscribers, func(a, b SubscriberData) int {
+		return a.GroupAddr.Compare(b.GroupAddr)
 	})
 
 	// sort subscribers in each group
 	for _, group := range subscribers {
-		sort.Slice(group.Subscribers, func(i, j int) bool {
-			return group.Subscribers[i].SAddr.Compare(group.Subscribers[j].SAddr) < 0
+		slices.SortFunc(group.Subscribers, func(a, b *maps_multicast.SubscriberV4) int {
+			return a.SAddr.Compare(b.SAddr)
 		})
 	}
 

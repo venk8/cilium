@@ -6,7 +6,6 @@ package cmd
 import (
 	"fmt"
 	"os"
-	"sort"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
@@ -48,7 +47,7 @@ func listIPs() {
 		Fatalf("Cannot get ipcache entries. err: %s", pkg.Hint(err))
 	}
 	im := ipcachetypes.IPListEntrySlice(ipcache.Payload)
-	sort.Slice(im, im.Less)
+	im.Sort()
 	printIPcacheEntries(ipcache.Payload)
 }
 

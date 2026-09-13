@@ -38,6 +38,27 @@ func TestIPListEntrySliceLen(t *testing.T) {
 	}
 }
 
+func TestIPListEntrySliceSort(t *testing.T) {
+	entries := IPListEntrySlice{
+		{Cidr: strPtr("192.168.1.1/32")},
+		{Cidr: strPtr("10.0.0.0/8")},
+		{Cidr: strPtr("172.16.0.0/16")},
+		{Cidr: strPtr("10.0.0.1/32")},
+	}
+	entries.Sort()
+	expected := []string{
+		"10.0.0.0/8",
+		"172.16.0.0/16",
+		"10.0.0.1/32",
+		"192.168.1.1/32",
+	}
+	for i, e := range entries {
+		if *e.Cidr != expected[i] {
+			t.Errorf("Index %d: expected %s, got %s", i, expected[i], *e.Cidr)
+		}
+	}
+}
+
 // Helper function to create *string from string
 func strPtr(s string) *string {
 	return &s
