@@ -6,6 +6,7 @@ package threefour
 import (
 	"fmt"
 	"log/slog"
+	"net"
 	"net/netip"
 	"strings"
 
@@ -88,6 +89,143 @@ type packetDecoder struct {
 		layers.VRRPv2
 		layers.IGMPv1or2
 	}
+}
+
+var (
+	tcpFlagsStrings   [512]string
+	tcpSummaryStrings [512]string
+	pbTCPFlagsTable   [512]*pb.TCPFlags
+
+	traceCiliumEventTypes [16]*pb.CiliumEventType
+
+	boolValueTrue  = &wrapperspb.BoolValue{Value: true}
+	boolValueFalse = &wrapperspb.BoolValue{Value: false}
+)
+
+func init() {
+	for m := 0; m < 512; m++ {
+		syn := (m & (1 << 0)) != 0
+		ack := (m & (1 << 1)) != 0
+		rst := (m & (1 << 2)) != 0
+		fin := (m & (1 << 3)) != 0
+		psh := (m & (1 << 4)) != 0
+		urg := (m & (1 << 5)) != 0
+		ece := (m & (1 << 6)) != 0
+		cwr := (m & (1 << 7)) != 0
+		ns := (m & (1 << 8)) != 0
+
+		pbTCPFlagsTable[m] = &pb.TCPFlags{
+			FIN: fin, SYN: syn, RST: rst,
+			PSH: psh, ACK: ack, URG: urg,
+			ECE: ece, CWR: cwr, NS: ns,
+		}
+
+		var info []string
+		if syn {
+			info = append(info, "SYN")
+		}
+		if ack {
+			info = append(info, "ACK")
+		}
+		if rst {
+			info = append(info, "RST")
+		}
+		if fin {
+			info = append(info, "FIN")
+		}
+		if psh {
+			info = append(info, "PSH")
+		}
+		if urg {
+			info = append(info, "URG")
+		}
+		if ece {
+			info = append(info, "ECE")
+		}
+		if cwr {
+			info = append(info, "CWR")
+		}
+		if ns {
+			info = append(info, "NS")
+		}
+
+		flagsStr := strings.Join(info, ", ")
+		tcpFlagsStrings[m] = flagsStr
+		tcpSummaryStrings[m] = "TCP Flags: " + flagsStr
+	}
+
+	for subType := 0; subType < len(traceCiliumEventTypes); subType++ {
+		traceCiliumEventTypes[subType] = &pb.CiliumEventType{
+			Type:    int32(monitorAPI.MessageTypeTrace),
+			SubType: int32(subType),
+		}
+	}
+}
+
+func tcpFlagsMask(tcp layers.TCP) int {
+	var m int
+	if tcp.SYN {
+		m |= 1 << 0
+	}
+	if tcp.ACK {
+		m |= 1 << 1
+	}
+	if tcp.RST {
+		m |= 1 << 2
+	}
+	if tcp.FIN {
+		m |= 1 << 3
+	}
+	if tcp.PSH {
+		m |= 1 << 4
+	}
+	if tcp.URG {
+		m |= 1 << 5
+	}
+	if tcp.ECE {
+		m |= 1 << 6
+	}
+	if tcp.CWR {
+		m |= 1 << 7
+	}
+	if tcp.NS {
+		m |= 1 << 8
+	}
+	return m
+}
+
+func boolValue(b bool) *wrapperspb.BoolValue {
+	if b {
+		return boolValueTrue
+	}
+	return boolValueFalse
+}
+
+const hexDigit = "0123456789abcdef"
+
+func formatMAC(mac net.HardwareAddr) string {
+	if len(mac) == 6 {
+		var buf [17]byte
+		buf[0] = hexDigit[mac[0]>>4]
+		buf[1] = hexDigit[mac[0]&0xf]
+		buf[2] = ':'
+		buf[3] = hexDigit[mac[1]>>4]
+		buf[4] = hexDigit[mac[1]&0xf]
+		buf[5] = ':'
+		buf[6] = hexDigit[mac[2]>>4]
+		buf[7] = hexDigit[mac[2]&0xf]
+		buf[8] = ':'
+		buf[9] = hexDigit[mac[3]>>4]
+		buf[10] = hexDigit[mac[3]&0xf]
+		buf[11] = ':'
+		buf[12] = hexDigit[mac[4]>>4]
+		buf[13] = hexDigit[mac[4]&0xf]
+		buf[14] = ':'
+		buf[15] = hexDigit[mac[5]>>4]
+		buf[16] = hexDigit[mac[5]&0xf]
+		return string(buf[:])
+	}
+	return mac.String()
 }
 
 // New returns a new L3/L4 parser
@@ -257,9 +395,10 @@ func (p *Parser) Decode(data []byte, decoded *pb.Flow) error {
 			// post translation IP. The check is here because sometimes we get
 			// trace notifications with OrigIP set to the header's IP
 			// (pre-translation events?)
-			if ip.GetSource() != srcIP.String() {
+			srcIPStr := srcIP.String()
+			if ip.GetSource() != srcIPStr {
 				ip.SourceXlated = ip.GetSource()
-				ip.Source = srcIP.String()
+				ip.Source = srcIPStr
 			}
 		}
 
@@ -365,7 +504,7 @@ func (d *packetDecoder) DecodePacket(payload []byte, decoded *pb.Flow, isL3Devic
 			decoded.IP, sourceIP, destinationIP = decodeIPv6(&d.IPv6)
 		case layers.LayerTypeTCP:
 			decoded.L4, sourcePort, destinationPort = decodeTCP(&d.TCP)
-			decoded.Summary = "TCP Flags: " + getTCPFlags(d.TCP)
+			decoded.Summary = getTCPSummary(d.TCP)
 		case layers.LayerTypeUDP:
 			decoded.L4, sourcePort, destinationPort = decodeUDP(&d.UDP)
 		case layers.LayerTypeSCTP:
@@ -439,7 +578,7 @@ func (d *packetDecoder) DecodePacket(payload []byte, decoded *pb.Flow, isL3Devic
 			decoded.IP, sourceIP, destinationIP = decodeIPv6(&d.overlay.IPv6)
 		case layers.LayerTypeTCP:
 			decoded.L4, sourcePort, destinationPort = decodeTCP(&d.overlay.TCP)
-			decoded.Summary = "TCP Flags: " + getTCPFlags(d.overlay.TCP)
+			decoded.Summary = getTCPSummary(d.overlay.TCP)
 		case layers.LayerTypeUDP:
 			decoded.L4, sourcePort, destinationPort = decodeUDP(&d.overlay.UDP)
 		case layers.LayerTypeSCTP:
@@ -532,27 +671,32 @@ func decodePolicyMatchType(pvn *monitor.PolicyVerdictNotify) uint32 {
 
 func decodeEthernet(ethernet *layers.Ethernet) *pb.Ethernet {
 	return &pb.Ethernet{
-		Source:      ethernet.SrcMAC.String(),
-		Destination: ethernet.DstMAC.String(),
+		Source:      formatMAC(ethernet.SrcMAC),
+		Destination: formatMAC(ethernet.DstMAC),
 	}
 }
 
 func decodeIPv4(ipv4 *layers.IPv4) (ip *pb.IP, src, dst netip.Addr) {
 	// Ignore invalid IPs - getters will handle invalid values.
 	// IPs can be empty for Ethernet-only packets.
+	var srcStr, dstStr string
 	if len(ipv4.SrcIP) == 4 {
 		src = netip.AddrFrom4([4]byte(ipv4.SrcIP))
+		srcStr = src.String()
 	} else {
 		src, _ = netipx.FromStdIP(ipv4.SrcIP)
+		srcStr = ipv4.SrcIP.String()
 	}
 	if len(ipv4.DstIP) == 4 {
 		dst = netip.AddrFrom4([4]byte(ipv4.DstIP))
+		dstStr = dst.String()
 	} else {
 		dst, _ = netipx.FromStdIP(ipv4.DstIP)
+		dstStr = ipv4.DstIP.String()
 	}
 	return &pb.IP{
-		Source:      ipv4.SrcIP.String(),
-		Destination: ipv4.DstIP.String(),
+		Source:      srcStr,
+		Destination: dstStr,
 		IpVersion:   pb.IPVersion_IPv4,
 	}, src, dst
 }
@@ -560,19 +704,24 @@ func decodeIPv4(ipv4 *layers.IPv4) (ip *pb.IP, src, dst netip.Addr) {
 func decodeIPv6(ipv6 *layers.IPv6) (ip *pb.IP, src, dst netip.Addr) {
 	// Ignore invalid IPs - getters will handle invalid values.
 	// IPs can be empty for Ethernet-only packets.
+	var srcStr, dstStr string
 	if len(ipv6.SrcIP) == 16 {
 		src = netip.AddrFrom16([16]byte(ipv6.SrcIP))
+		srcStr = src.String()
 	} else {
 		src, _ = netipx.FromStdIP(ipv6.SrcIP)
+		srcStr = ipv6.SrcIP.String()
 	}
 	if len(ipv6.DstIP) == 16 {
 		dst = netip.AddrFrom16([16]byte(ipv6.DstIP))
+		dstStr = dst.String()
 	} else {
 		dst, _ = netipx.FromStdIP(ipv6.DstIP)
+		dstStr = ipv6.DstIP.String()
 	}
 	return &pb.IP{
-		Source:      ipv6.SrcIP.String(),
-		Destination: ipv6.DstIP.String(),
+		Source:      srcStr,
+		Destination: dstStr,
 		IpVersion:   pb.IPVersion_IPv6,
 	}, src, dst
 }
@@ -583,11 +732,7 @@ func decodeTCP(tcp *layers.TCP) (l4 *pb.Layer4, src, dst uint16) {
 			TCP: &pb.TCP{
 				SourcePort:      uint32(tcp.SrcPort),
 				DestinationPort: uint32(tcp.DstPort),
-				Flags: &pb.TCPFlags{
-					FIN: tcp.FIN, SYN: tcp.SYN, RST: tcp.RST,
-					PSH: tcp.PSH, ACK: tcp.ACK, URG: tcp.URG,
-					ECE: tcp.ECE, CWR: tcp.CWR, NS: tcp.NS,
-				},
+				Flags:           pbTCPFlagsTable[tcpFlagsMask(*tcp)],
 			},
 		},
 	}, uint16(tcp.SrcPort), uint16(tcp.DstPort)
@@ -685,14 +830,12 @@ func decodeIsReply(tn *monitor.TraceNotify, pvn *monitor.PolicyVerdictNotify) *w
 			return nil
 		}
 		// Reason was specified by the datapath, just reuse it.
-		return &wrapperspb.BoolValue{
-			Value: tn.TraceReasonIsReply(),
-		}
+		return boolValue(tn.TraceReasonIsReply())
 	case pvn != nil && pvn.Verdict >= 0:
 		// Forwarded PolicyVerdictEvents are emitted for the first packet of
 		// connection, therefore we statically assume that they are not reply
 		// packets
-		return &wrapperspb.BoolValue{Value: false}
+		return boolValueFalse
 	default:
 		// For other events, such as drops, we simply do not know if they were
 		// replies or not.
@@ -701,6 +844,9 @@ func decodeIsReply(tn *monitor.TraceNotify, pvn *monitor.PolicyVerdictNotify) *w
 }
 
 func decodeCiliumEventType(eventType, eventSubType uint8) *pb.CiliumEventType {
+	if eventType == monitorAPI.MessageTypeTrace && int(eventSubType) < len(traceCiliumEventTypes) {
+		return traceCiliumEventTypes[eventSubType]
+	}
 	return &pb.CiliumEventType{
 		Type:    int32(eventType),
 		SubType: int32(eventSubType),
@@ -814,59 +960,11 @@ func decodeTrafficDirection(srcEP uint32, dn *monitor.DropNotify, tn *monitor.Tr
 }
 
 func getTCPFlags(tcp layers.TCP) string {
-	const (
-		syn         = "SYN"
-		ack         = "ACK"
-		rst         = "RST"
-		fin         = "FIN"
-		psh         = "PSH"
-		urg         = "URG"
-		ece         = "ECE"
-		cwr         = "CWR"
-		ns          = "NS"
-		maxTCPFlags = 9
-		comma       = ", "
-	)
+	return tcpFlagsStrings[tcpFlagsMask(tcp)]
+}
 
-	info := make([]string, 0, maxTCPFlags)
-
-	if tcp.SYN {
-		info = append(info, syn)
-	}
-
-	if tcp.ACK {
-		info = append(info, ack)
-	}
-
-	if tcp.RST {
-		info = append(info, rst)
-	}
-
-	if tcp.FIN {
-		info = append(info, fin)
-	}
-
-	if tcp.PSH {
-		info = append(info, psh)
-	}
-
-	if tcp.URG {
-		info = append(info, urg)
-	}
-
-	if tcp.ECE {
-		info = append(info, ece)
-	}
-
-	if tcp.CWR {
-		info = append(info, cwr)
-	}
-
-	if tcp.NS {
-		info = append(info, ns)
-	}
-
-	return strings.Join(info, comma)
+func getTCPSummary(tcp layers.TCP) string {
+	return tcpSummaryStrings[tcpFlagsMask(tcp)]
 }
 
 func decodeDebugCapturePoint(dbg *monitor.DebugCapture) pb.DebugCapturePoint {

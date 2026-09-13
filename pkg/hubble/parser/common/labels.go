@@ -5,7 +5,7 @@ package common
 
 import (
 	"log/slog"
-	"net"
+	"net/netip"
 	"slices"
 	"strings"
 
@@ -18,8 +18,22 @@ func FilterCIDRLabels(log *slog.Logger, labels []string) []string {
 	// but the longest prefix cidr label, which can be useful for troubleshooting. This also
 	// relies on the fact that when a Cilium security identity has multiple CIDR labels, longer
 	// prefix is always a subset of shorter prefix.
+	if len(labels) == 0 {
+		return nil
+	}
 	cidrPrefix := "cidr:"
-	var filteredLabels []string
+	hasCIDR := false
+	for _, label := range labels {
+		if strings.HasPrefix(label, cidrPrefix) {
+			hasCIDR = true
+			break
+		}
+	}
+	if !hasCIDR {
+		return labels
+	}
+
+	filteredLabels := make([]string, 0, len(labels))
 	var maxSize int
 	var maxStr string
 	for _, label := range labels {
@@ -31,8 +45,10 @@ func FilterCIDRLabels(log *slog.Logger, labels []string) []string {
 		// labels for IPv6 addresses are represented with - instead of : as
 		// : cannot be used in labels; make sure to convert it to a valid
 		// IPv6 representation
-		currLabel = strings.ReplaceAll(currLabel, "-", ":")
-		_, curr, err := net.ParseCIDR(currLabel)
+		if strings.ContainsRune(currLabel, '-') {
+			currLabel = strings.ReplaceAll(currLabel, "-", ":")
+		}
+		curr, err := netip.ParsePrefix(currLabel)
 		if err != nil {
 			log.Warn(
 				"got an invalid cidr label",
@@ -40,7 +56,7 @@ func FilterCIDRLabels(log *slog.Logger, labels []string) []string {
 			)
 			continue
 		}
-		if currMask, _ := curr.Mask.Size(); currMask > maxSize {
+		if currMask := curr.Bits(); currMask > maxSize {
 			maxSize, maxStr = currMask, label
 		}
 	}
@@ -54,6 +70,8 @@ func SortAndFilterLabels(log *slog.Logger, labels []string, securityIdentity ide
 	if securityIdentity.HasLocalScope() {
 		labels = FilterCIDRLabels(log, labels)
 	}
-	slices.Sort(labels)
+	if len(labels) > 1 {
+		slices.Sort(labels)
+	}
 	return labels
 }
