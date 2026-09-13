@@ -52,10 +52,15 @@ func ParseLabelArrayFromArray(base []string) LabelArray {
 // NewLabelArrayFromSortedList returns labels based on the output of SortedList()
 // Trailing ';' will result in an empty key that must be filtered out.
 func NewLabelArrayFromSortedList(list string) LabelArray {
-	base := strings.Split(list, ";")
-	array := make(LabelArray, 0, len(base))
-	for _, v := range base {
-		if lbl := ParseLabel(v); lbl.Key != "" {
+	if list == "" {
+		return nil
+	}
+	count := strings.Count(list, ";") + 1
+	array := make(LabelArray, 0, count)
+	for len(list) > 0 {
+		var token string
+		token, list, _ = strings.Cut(list, ";")
+		if lbl := ParseLabel(token); lbl.Key != "" {
 			array = append(array, lbl)
 		}
 	}
@@ -116,11 +121,11 @@ func (ls LabelArray) IntersectsLabel(target Label) bool {
 
 // Lacks is identical to Contains but returns all missing labels
 func (ls LabelArray) Lacks(needed LabelArray) LabelArray {
-	missing := LabelArray{}
+	var missing LabelArray
 nextLabel:
 	for i := range needed {
 		for l := range ls {
-			if ls[l].Has(&needed[l]) {
+			if ls[l].Has(&needed[i]) {
 				continue nextLabel
 			}
 		}
@@ -209,10 +214,14 @@ func LabelArrayFromString(str string) LabelArray {
 	// each LabelArray starts with '[' and ends with ']'
 	if len(str) > 2 && str[0] == '[' && str[len(str)-1] == ']' {
 		str = str[1 : len(str)-1] // remove brackets
-		labels := strings.Split(str, " ")
-		la := make(LabelArray, 0, len(labels))
-		for j := range labels {
-			la = append(la, ParseLabel(labels[j]))
+		count := strings.Count(str, " ") + 1
+		la := make(LabelArray, 0, count)
+		for len(str) > 0 {
+			var token string
+			token, str, _ = strings.Cut(str, " ")
+			if token != "" {
+				la = append(la, ParseLabel(token))
+			}
 		}
 		if len(la) > 0 {
 			return la

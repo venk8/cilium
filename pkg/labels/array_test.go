@@ -379,7 +379,13 @@ func TestLabelArray_Intersects(t *testing.T) {
 	la := GetCIDRLabelArray(netip.MustParsePrefix("11.11.11.11/32"))
 	lb := ParseLabelArray("cidr:110.0.0.0/8", "cidr:8.0.0.0/5")
 	assert.True(t, la.Intersects(lb))
+}
 
+func TestLabelArray_LacksBug(t *testing.T) {
+	la := ParseLabelArray("k8s:a=1", "k8s:b=2", "k8s:c=3", "k8s:d=4")
+	needed := ParseLabelArray("k8s:x=1", "k8s:y=2")
+	missing := la.Lacks(needed)
+	require.Len(t, missing, 2)
 }
 
 func BenchmarkLabelArray_Sort(b *testing.B) {
@@ -392,5 +398,41 @@ func BenchmarkLabelArray_Sort(b *testing.B) {
 			la[j] = ParseLabel(s)
 		}
 		la.Sort()
+	}
+}
+
+func BenchmarkNewLabelArrayFromSortedList(b *testing.B) {
+	list := "k8s:app=web;k8s:tier=frontend;k8s:env=prod;k8s:zone=us-east-1a;k8s:version=v1.2.3"
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		_ = NewLabelArrayFromSortedList(list)
+	}
+}
+
+func BenchmarkLabelArrayFromString(b *testing.B) {
+	str := "[k8s:app=web k8s:tier=frontend k8s:env=prod k8s:zone=us-east-1a k8s:version=v1.2.3]"
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		_ = LabelArrayFromString(str)
+	}
+}
+
+func BenchmarkLabelArray_Lacks(b *testing.B) {
+	la := ParseLabelArray("k8s:app=web", "k8s:tier=frontend", "k8s:env=prod", "k8s:zone=us-east-1a")
+	needed := ParseLabelArray("k8s:app=web", "k8s:tier=frontend")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		_ = la.Lacks(needed)
+	}
+}
+
+func BenchmarkNewSourceEncodedLabelKey(b *testing.B) {
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		_ = NewSourceEncodedLabelKey("k8s", "k8s:app")
 	}
 }

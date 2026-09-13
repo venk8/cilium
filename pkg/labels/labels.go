@@ -944,5 +944,8 @@ func NewSourceEncodedLabelKey(sourcePrefix, key string) string {
 	if len(src) == 0 {
 		return sourcePrefix + next
 	}
+	if len(key) > 0 && key[0] != '$' {
+		return key
+	}
 	return src + SourceDelimiter + next
 }
