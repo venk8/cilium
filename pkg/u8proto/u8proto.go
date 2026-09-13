@@ -45,6 +45,22 @@ var protoNames = map[U8proto]string{
 	132: "SCTP",
 }
 
+var protoNamesArray = [256]string{
+	0:   "ANY",
+	1:   "ICMP",
+	2:   "IGMP",
+	4:   "IPIP",
+	6:   "TCP",
+	17:  "UDP",
+	41:  "IPv6",
+	47:  "GRE",
+	50:  "ESP",
+	51:  "AH",
+	58:  "ICMPv6",
+	112: "VRRP",
+	132: "SCTP",
+}
+
 var ProtoIDs = map[string]U8proto{
 	"all":    0,
 	"any":    0,
@@ -66,23 +82,51 @@ var ProtoIDs = map[string]U8proto{
 type U8proto uint8
 
 func (p U8proto) String() string {
-	if _, ok := protoNames[p]; ok {
-		return protoNames[p]
+	if name := protoNamesArray[p]; name != "" {
+		return name
 	}
 	return strconv.Itoa(int(p))
 }
 
 func ParseProtocol(proto string) (U8proto, error) {
-	if u, ok := ProtoIDs[strings.ToLower(proto)]; ok {
-		return u, nil
+	switch proto {
+	case "all", "ALL", "any", "ANY", "none", "NONE":
+		return ANY, nil
+	case "icmp", "ICMP":
+		return ICMP, nil
+	case "igmp", "IGMP":
+		return IGMP, nil
+	case "ipip", "IPIP":
+		return IPIP, nil
+	case "tcp", "TCP":
+		return TCP, nil
+	case "udp", "UDP":
+		return UDP, nil
+	case "ipv6", "IPV6", "IPv6":
+		return IPv6, nil
+	case "gre", "GRE":
+		return GRE, nil
+	case "esp", "ESP":
+		return ESP, nil
+	case "ah", "AH":
+		return AH, nil
+	case "icmpv6", "ICMPv6", "ICMPV6":
+		return ICMPv6, nil
+	case "vrrp", "VRRP":
+		return VRRP, nil
+	case "sctp", "SCTP":
+		return SCTP, nil
+	default:
+		if u, ok := ProtoIDs[strings.ToLower(proto)]; ok {
+			return u, nil
+		}
+		return 0, fmt.Errorf("unknown protocol '%s'", proto)
 	}
-	return 0, fmt.Errorf("unknown protocol '%s'", proto)
 }
 
 func FromNumber(proto uint8) (U8proto, error) {
-	_, ok := protoNames[U8proto(proto)]
-	if !ok {
-		return 0, fmt.Errorf("unknown protocol %d", proto)
+	if protoNamesArray[proto] != "" {
+		return U8proto(proto), nil
 	}
-	return U8proto(proto), nil
+	return 0, fmt.Errorf("unknown protocol %d", proto)
 }

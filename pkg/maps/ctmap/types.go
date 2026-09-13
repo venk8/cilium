@@ -172,11 +172,11 @@ func (k *CtKey4Global) GetFlags() uint8 {
 
 func (k *CtKey4Global) String() string {
 	b := make([]byte, 0, 64)
-	b = append(b, k.SourceAddr.String()...)
+	b = k.SourceAddr.AppendTo(b)
 	b = append(b, ':')
 	b = strconv.AppendUint(b, uint64(k.SourcePort), 10)
 	b = append(b, " --> "...)
-	b = append(b, k.DestAddr.String()...)
+	b = k.DestAddr.AppendTo(b)
 	b = append(b, ':')
 	b = strconv.AppendUint(b, uint64(k.DestPort), 10)
 	b = append(b, ", "...)
@@ -197,45 +197,43 @@ func (k *CtKey4Global) Dump(sb *strings.Builder, reverse bool) bool {
 
 	sb.WriteString(k.NextHeader.String())
 
-	var addrSource, addrDest string
+	addrSource := k.SourceAddr
+	addrDest := k.DestAddr
 	// Addresses swapped, see issue #5848
 	if reverse {
-		addrSource = k.DestAddr.String()
-		addrDest = k.SourceAddr.String()
-	} else {
-		addrSource = k.SourceAddr.String()
-		addrDest = k.DestAddr.String()
+		addrSource, addrDest = addrDest, addrSource
 	}
 
+	var buf [32]byte
 	if k.Flags&TUPLE_F_SERVICE != 0 {
 		sb.WriteString(" SVC ")
-		sb.WriteString(k.SourceAddr.String())
+		sb.Write(k.SourceAddr.AppendTo(buf[:0]))
 		sb.WriteByte(':')
-		sb.WriteString(strconv.FormatUint(uint64(k.DestPort), 10))
+		sb.Write(strconv.AppendUint(buf[:0], uint64(k.DestPort), 10))
 		sb.WriteString(" -> ")
-		sb.WriteString(k.DestAddr.String())
+		sb.Write(k.DestAddr.AppendTo(buf[:0]))
 		sb.WriteByte(':')
-		sb.WriteString(strconv.FormatUint(uint64(k.SourcePort), 10))
+		sb.Write(strconv.AppendUint(buf[:0], uint64(k.SourcePort), 10))
 		sb.WriteByte(' ')
 	} else if k.Flags&TUPLE_F_IN != 0 {
 		sb.WriteString(" IN ")
-		sb.WriteString(addrSource)
+		sb.Write(addrSource.AppendTo(buf[:0]))
 		sb.WriteByte(':')
-		sb.WriteString(strconv.FormatUint(uint64(k.SourcePort), 10))
+		sb.Write(strconv.AppendUint(buf[:0], uint64(k.SourcePort), 10))
 		sb.WriteString(" -> ")
-		sb.WriteString(addrDest)
+		sb.Write(addrDest.AppendTo(buf[:0]))
 		sb.WriteByte(':')
-		sb.WriteString(strconv.FormatUint(uint64(k.DestPort), 10))
+		sb.Write(strconv.AppendUint(buf[:0], uint64(k.DestPort), 10))
 		sb.WriteByte(' ')
 	} else {
 		sb.WriteString(" OUT ")
-		sb.WriteString(addrSource)
+		sb.Write(addrSource.AppendTo(buf[:0]))
 		sb.WriteByte(':')
-		sb.WriteString(strconv.FormatUint(uint64(k.SourcePort), 10))
+		sb.Write(strconv.AppendUint(buf[:0], uint64(k.SourcePort), 10))
 		sb.WriteString(" -> ")
-		sb.WriteString(addrDest)
+		sb.Write(addrDest.AppendTo(buf[:0]))
 		sb.WriteByte(':')
-		sb.WriteString(strconv.FormatUint(uint64(k.DestPort), 10))
+		sb.Write(strconv.AppendUint(buf[:0], uint64(k.DestPort), 10))
 		sb.WriteByte(' ')
 	}
 
@@ -287,11 +285,11 @@ func (k *CtKey6Global) GetFlags() uint8 {
 func (k *CtKey6Global) String() string {
 	b := make([]byte, 0, 96)
 	b = append(b, '[')
-	b = append(b, k.SourceAddr.String()...)
+	b = k.SourceAddr.AppendTo(b)
 	b = append(b, "]:"...)
 	b = strconv.AppendUint(b, uint64(k.SourcePort), 10)
 	b = append(b, " --> ["...)
-	b = append(b, k.DestAddr.String()...)
+	b = k.DestAddr.AppendTo(b)
 	b = append(b, "]:"...)
 	b = strconv.AppendUint(b, uint64(k.DestPort), 10)
 	b = append(b, ", "...)
@@ -312,45 +310,43 @@ func (k *CtKey6Global) Dump(sb *strings.Builder, reverse bool) bool {
 
 	sb.WriteString(k.NextHeader.String())
 
-	var addrSource, addrDest string
+	addrSource := k.SourceAddr
+	addrDest := k.DestAddr
 	// Addresses swapped, see issue #5848
 	if reverse {
-		addrSource = k.DestAddr.String()
-		addrDest = k.SourceAddr.String()
-	} else {
-		addrSource = k.SourceAddr.String()
-		addrDest = k.DestAddr.String()
+		addrSource, addrDest = addrDest, addrSource
 	}
 
+	var buf [48]byte
 	if k.Flags&TUPLE_F_SERVICE != 0 {
 		sb.WriteString(" SVC [")
-		sb.WriteString(k.SourceAddr.String())
+		sb.Write(k.SourceAddr.AppendTo(buf[:0]))
 		sb.WriteString("]:")
-		sb.WriteString(strconv.FormatUint(uint64(k.DestPort), 10))
+		sb.Write(strconv.AppendUint(buf[:0], uint64(k.DestPort), 10))
 		sb.WriteString(" -> [")
-		sb.WriteString(k.DestAddr.String())
+		sb.Write(k.DestAddr.AppendTo(buf[:0]))
 		sb.WriteString("]:")
-		sb.WriteString(strconv.FormatUint(uint64(k.SourcePort), 10))
+		sb.Write(strconv.AppendUint(buf[:0], uint64(k.SourcePort), 10))
 		sb.WriteByte(' ')
 	} else if k.Flags&TUPLE_F_IN != 0 {
 		sb.WriteString(" IN [")
-		sb.WriteString(addrSource)
+		sb.Write(addrSource.AppendTo(buf[:0]))
 		sb.WriteString("]:")
-		sb.WriteString(strconv.FormatUint(uint64(k.SourcePort), 10))
+		sb.Write(strconv.AppendUint(buf[:0], uint64(k.SourcePort), 10))
 		sb.WriteString(" -> [")
-		sb.WriteString(addrDest)
+		sb.Write(addrDest.AppendTo(buf[:0]))
 		sb.WriteString("]:")
-		sb.WriteString(strconv.FormatUint(uint64(k.DestPort), 10))
+		sb.Write(strconv.AppendUint(buf[:0], uint64(k.DestPort), 10))
 		sb.WriteByte(' ')
 	} else {
 		sb.WriteString(" OUT [")
-		sb.WriteString(addrSource)
+		sb.Write(addrSource.AppendTo(buf[:0]))
 		sb.WriteString("]:")
-		sb.WriteString(strconv.FormatUint(uint64(k.SourcePort), 10))
+		sb.Write(strconv.AppendUint(buf[:0], uint64(k.SourcePort), 10))
 		sb.WriteString(" -> [")
-		sb.WriteString(addrDest)
+		sb.Write(addrDest.AppendTo(buf[:0]))
 		sb.WriteString("]:")
-		sb.WriteString(strconv.FormatUint(uint64(k.DestPort), 10))
+		sb.Write(strconv.AppendUint(buf[:0], uint64(k.DestPort), 10))
 		sb.WriteByte(' ')
 	}
 
@@ -409,64 +405,66 @@ func appendHex2(b []byte, v uint8) []byte {
 	return append(b, hex[(v>>4)&0xf], hex[v&0xf])
 }
 
-func (c *CtEntry) flagsString() string {
-	var sb strings.Builder
-	sb.Grow(64)
-
-	sb.WriteString("Flags=0x")
+func (c *CtEntry) appendFlags(b []byte) []byte {
+	b = append(b, "Flags=0x"...)
 	var buf [4]byte
 	const hex = "0123456789abcdef"
 	buf[0] = hex[(c.Flags>>12)&0xf]
 	buf[1] = hex[(c.Flags>>8)&0xf]
 	buf[2] = hex[(c.Flags>>4)&0xf]
 	buf[3] = hex[c.Flags&0xf]
-	sb.Write(buf[:])
-	sb.WriteString(" [ ")
+	b = append(b, buf[:]...)
+	b = append(b, " [ "...)
 
 	if (c.Flags & RxClosing) != 0 {
-		sb.WriteString("RxClosing ")
+		b = append(b, "RxClosing "...)
 	}
 	if (c.Flags & TxClosing) != 0 {
-		sb.WriteString("TxClosing ")
+		b = append(b, "TxClosing "...)
 	}
 	if (c.Flags & Nat64) != 0 {
-		sb.WriteString("Nat64 ")
+		b = append(b, "Nat64 "...)
 	}
 	if (c.Flags & LBLoopback) != 0 {
-		sb.WriteString("LBLoopback ")
+		b = append(b, "LBLoopback "...)
 	}
 	if (c.Flags & SeenNonSyn) != 0 {
-		sb.WriteString("SeenNonSyn ")
+		b = append(b, "SeenNonSyn "...)
 	}
 	if (c.Flags & NodePort) != 0 {
-		sb.WriteString("NodePort ")
+		b = append(b, "NodePort "...)
 	}
 	if (c.Flags & ProxyRedirect) != 0 {
-		sb.WriteString("ProxyRedirect ")
+		b = append(b, "ProxyRedirect "...)
 	}
 	if (c.Flags & DSRInternal) != 0 {
-		sb.WriteString("DSRInternal ")
+		b = append(b, "DSRInternal "...)
 	}
 	if (c.Flags & FromL7LB) != 0 {
-		sb.WriteString("FromL7LB ")
+		b = append(b, "FromL7LB "...)
 	}
 	if (c.Flags & FromTunnel) != 0 {
-		sb.WriteString("FromTunnel ")
+		b = append(b, "FromTunnel "...)
 	}
 
 	unknownFlags := c.Flags
 	unknownFlags &^= MaxFlags - 1
 	if unknownFlags != 0 {
-		sb.WriteString("Unknown=0x")
+		b = append(b, "Unknown=0x"...)
 		buf[0] = hex[(unknownFlags>>12)&0xf]
 		buf[1] = hex[(unknownFlags>>8)&0xf]
 		buf[2] = hex[(unknownFlags>>4)&0xf]
 		buf[3] = hex[unknownFlags&0xf]
-		sb.Write(buf[:])
-		sb.WriteByte(' ')
+		b = append(b, buf[:]...)
+		b = append(b, ' ')
 	}
-	sb.WriteString("]")
-	return sb.String()
+	b = append(b, ']')
+	return b
+}
+
+func (c *CtEntry) flagsString() string {
+	b := make([]byte, 0, 64)
+	return string(c.appendFlags(b))
 }
 
 func (c *CtEntry) StringWithTimeDiff(toRemSecs func(uint32) string) string {
@@ -491,7 +489,7 @@ func (c *CtEntry) StringWithTimeDiff(toRemSecs func(uint32) string) string {
 	b = append(b, " LastTxReport="...)
 	b = strconv.AppendUint(b, uint64(c.LastTxReport), 10)
 	b = append(b, ' ')
-	b = append(b, c.flagsString()...)
+	b = c.appendFlags(b)
 	b = append(b, " RevNAT="...)
 	b = strconv.AppendUint(b, uint64(byteorder.NetworkToHost16(c.RevNAT)), 10)
 	b = append(b, " SourceSecurityID="...)
