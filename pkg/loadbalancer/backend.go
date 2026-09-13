@@ -130,12 +130,13 @@ type BackendKey struct {
 
 func (k BackendKey) Key() index.Key {
 	const separator = 0x00
-	key := make([]byte, 0, len(k.ServiceName.Key())+1+len(k.Address.Bytes())+1+1)
-	key = append(key, k.ServiceName.Key()...)
+	sKey := k.ServiceName.Key()
+	addrBytes := k.Address.Bytes()
+	key := make([]byte, 0, len(sKey)+len(addrBytes)+3)
+	key = append(key, sKey...)
 	key = append(key, separator)
-	key = append(key, k.Address.Bytes()...)
-	key = append(key, separator)
-	key = append(key, k.SourcePriority)
+	key = append(key, addrBytes...)
+	key = append(key, separator, k.SourcePriority)
 	return key
 }
 

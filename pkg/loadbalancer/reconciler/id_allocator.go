@@ -4,10 +4,15 @@
 package reconciler
 
 import (
-	"fmt"
+	"errors"
 
 	"github.com/cilium/cilium/pkg/loadbalancer"
 	"github.com/cilium/cilium/pkg/metrics/metric"
+)
+
+var (
+	errNoIDAvailable = errors.New("no ID available")
+	errIDNotFound    = errors.New("ID not found")
 )
 
 type idConstraint interface {
@@ -114,7 +119,7 @@ func (alloc *idAllocator[ID]) acquireLocalID(svc loadbalancer.L3n4Addr) (ID, err
 	}
 
 	alloc.metrics.allocationFailures.Inc()
-	return 0, fmt.Errorf("no ID available")
+	return 0, errNoIDAvailable
 }
 
 func (alloc *idAllocator[ID]) deleteLocalID(id ID) {
@@ -134,5 +139,5 @@ func (alloc *idAllocator[ID]) lookupLocalID(addr loadbalancer.L3n4Addr) (ID, err
 		return id, nil
 	}
 
-	return 0, fmt.Errorf("ID not found")
+	return 0, errIDNotFound
 }

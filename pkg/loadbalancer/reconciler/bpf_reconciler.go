@@ -437,17 +437,22 @@ func (ops *BPFOps) deleteRestoredQuarantinedBackends(fe loadbalancer.L3n4Addr, b
 }
 
 func (ops *BPFOps) deleteFrontend(fe *loadbalancer.Frontend) error {
+	debug := ops.log.Enabled(context.Background(), slog.LevelDebug)
 	feID, err := ops.serviceIDAlloc.lookupLocalID(fe.Address)
 	if err != nil {
-		ops.log.Debug("Delete frontend: no ID found", logfields.Address, fe.Address)
+		if debug {
+			ops.log.Debug("Delete frontend: no ID found", logfields.Address, fe.Address)
+		}
 		// Since no ID was found we can assume this frontend was never reconciled.
 		return nil
 	}
 
-	ops.log.Debug("Delete frontend",
-		logfields.ID, feID,
-		logfields.Address, fe.Address,
-	)
+	if debug {
+		ops.log.Debug("Delete frontend",
+			logfields.ID, feID,
+			logfields.Address, fe.Address,
+		)
+	}
 
 	// Drop any restored quarantine state
 	ops.deleteRestoredQuarantinedBackends(fe.Address)
@@ -470,7 +475,9 @@ func (ops *BPFOps) deleteFrontend(fe *loadbalancer.Frontend) error {
 	}
 
 	for _, orphanState := range ops.orphanBackends(fe.Address, nil) {
-		ops.log.Debug("Delete orphan backend", logfields.Address, orphanState.addr)
+		if debug {
+			ops.log.Debug("Delete orphan backend", logfields.Address, orphanState.addr)
+		}
 		if err := ops.deleteBackend(orphanState.addr.IsIPv6(), orphanState.id); err != nil {
 			return fmt.Errorf("delete backend %d: %w", orphanState.id, err)
 		}
@@ -497,11 +504,13 @@ func (ops *BPFOps) deleteFrontend(fe *loadbalancer.Frontend) error {
 	numBackends := len(ops.backendReferences[fe.Address])
 	for i := 0; i <= numBackends; i++ {
 		svcKey.SetBackendSlot(i)
-		ops.log.Debug("Delete service slot",
-			logfields.ID, feID,
-			logfields.Address, fe.Address,
-			logfields.Slot, i,
-		)
+		if debug {
+			ops.log.Debug("Delete service slot",
+				logfields.ID, feID,
+				logfields.Address, fe.Address,
+				logfields.Slot, i,
+			)
+		}
 		err := ops.LBMaps.DeleteService(svcKey.ToNetwork())
 		if err != nil {
 			return fmt.Errorf("delete from services map: %w", err)
@@ -863,6 +872,7 @@ func (ops *BPFOps) updateFrontend(fe *loadbalancer.Frontend, isLocalAddr func(ne
 	// the operations that depend on the state have been performed. If this invariant is not
 	// followed then we may leak data due to not retrying a failed operation.
 
+	debug := ops.log.Enabled(context.Background(), slog.LevelDebug)
 	svc := fe.Service
 	proxyDelegation := svc.GetProxyDelegation()
 
@@ -945,13 +955,15 @@ func (ops *BPFOps) updateFrontend(fe *loadbalancer.Frontend, isLocalAddr func(ne
 	orderedBackends := ops.sortedBackends(fe)
 
 	// Clean up any orphan backends to make room for new backends
-	backendAddrs := sets.New[loadbalancer.L3n4Addr]()
+	backendAddrs := make(sets.Set[loadbalancer.L3n4Addr], len(orderedBackends))
 	for _, be := range orderedBackends {
 		backendAddrs.Insert(be.Address)
 	}
 
 	for _, orphanState := range ops.orphanBackends(fe.Address, backendAddrs) {
-		ops.log.Debug("Delete orphan backend", logfields.Address, orphanState.addr)
+		if debug {
+			ops.log.Debug("Delete orphan backend", logfields.Address, orphanState.addr)
+		}
 		ops.deleteRestoredQuarantinedBackends(fe.Address, orphanState.addr)
 		if err := ops.deleteBackend(orphanState.addr.IsIPv6(), orphanState.id); err != nil {
 			return fmt.Errorf("delete backend: %w", err)
@@ -986,11 +998,13 @@ func (ops *BPFOps) updateFrontend(fe *loadbalancer.Frontend, isLocalAddr func(ne
 		}
 
 		if ops.needsUpdate(be.Address, be.Revision) {
-			ops.log.Debug("Update backend",
-				logfields.Backend, be.Backend,
-				logfields.ID, beID,
-				logfields.Address, be.Address,
-			)
+			if debug {
+				ops.log.Debug("Update backend",
+					logfields.Backend, be.Backend,
+					logfields.ID, beID,
+					logfields.Address, be.Address,
+				)
+			}
 			if err := ops.upsertBackend(beID, be.Backend); err != nil {
 				return fmt.Errorf("upsert backend: %w", err)
 			}
@@ -1008,10 +1022,12 @@ func (ops *BPFOps) updateFrontend(fe *loadbalancer.Frontend, isLocalAddr func(ne
 		// changed.
 		// Since backends are iterated in the order of their state with active first
 		// the slot ids here are sequential.
-		ops.log.Debug("Update service slot",
-			logfields.ID, beID,
-			logfields.Slot, slotID,
-			logfields.BackendID, beID)
+		if debug {
+			ops.log.Debug("Update service slot",
+				logfields.ID, beID,
+				logfields.Slot, slotID,
+				logfields.BackendID, beID)
+		}
 
 		svcVal.SetBackendID(beID)
 		svcVal.SetRevNat(int(feID))
@@ -1025,9 +1041,11 @@ func (ops *BPFOps) updateFrontend(fe *loadbalancer.Frontend, isLocalAddr func(ne
 		// For now we update these regardless so that we handle properly the SessionAffinity being
 		// flipped on and then off.
 		if svc.SessionAffinity && be.State == loadbalancer.BackendStateActive {
-			ops.log.Debug("Update affinity",
-				logfields.ID, feID,
-				logfields.BackendID, beID)
+			if debug {
+				ops.log.Debug("Update affinity",
+					logfields.ID, feID,
+					logfields.BackendID, beID)
+			}
 			if err := ops.upsertAffinityMatch(feID, beID); err != nil {
 				return fmt.Errorf("upsert affinity match: %w", err)
 			}
@@ -1074,7 +1092,9 @@ func (ops *BPFOps) updateFrontend(fe *loadbalancer.Frontend, isLocalAddr func(ne
 
 	// Update Maglev
 	if ops.useMaglev(fe) {
-		ops.log.Debug("Update Maglev", logfields.FrontendID, feID)
+		if debug {
+			ops.log.Debug("Update Maglev", logfields.FrontendID, feID)
+		}
 		if err := ops.updateMaglev(fe, feID, orderedBackends[:activeCount]); err != nil {
 			return err
 		}
@@ -1122,22 +1142,26 @@ func (ops *BPFOps) updateFrontend(fe *loadbalancer.Frontend, isLocalAddr func(ne
 	}
 
 	// Update RevNat
-	ops.log.Debug("Update RevNat",
-		logfields.ID, feID,
-		logfields.Address, fe.Address)
+	if debug {
+		ops.log.Debug("Update RevNat",
+			logfields.ID, feID,
+			logfields.Address, fe.Address)
+	}
 	if err := ops.upsertRevNat(feID, svcKey, svcVal); err != nil {
 		return fmt.Errorf("upsert reverse nat: %w", err)
 	}
 
-	ops.log.Debug("Update master service",
-		logfields.ID, feID,
-		logfields.Type, fe.Type,
-		logfields.ProxyRedirect, fe.Service.ProxyRedirects,
-		logfields.Address, fe.Address,
-		logfields.Count, backendCount,
-		logfieldActiveCount, activeCount,
-		logfieldTerminatingCount, terminatingCount,
-		logfieldInactiveCount, inactiveCount)
+	if debug {
+		ops.log.Debug("Update master service",
+			logfields.ID, feID,
+			logfields.Type, fe.Type,
+			logfields.ProxyRedirect, fe.Service.ProxyRedirects,
+			logfields.Address, fe.Address,
+			logfields.Count, backendCount,
+			logfieldActiveCount, activeCount,
+			logfieldTerminatingCount, terminatingCount,
+			logfieldInactiveCount, inactiveCount)
+	}
 	if err := ops.upsertMaster(svcKey, svcVal, fe, activeCount, inactiveCount); err != nil {
 		return fmt.Errorf("upsert service master: %w", err)
 	}
@@ -1160,10 +1184,12 @@ func (ops *BPFOps) updateFrontend(fe *loadbalancer.Frontend, isLocalAddr func(ne
 	// has been a change.
 	numPreviousBackends := len(ops.backendReferences[fe.Address])
 	if backendCount != numPreviousBackends {
-		ops.log.Debug("Cleanup service slots",
-			logfields.ID, feID,
-			logfields.Count, backendCount,
-			logfields.Previous, numPreviousBackends)
+		if debug {
+			ops.log.Debug("Cleanup service slots",
+				logfields.ID, feID,
+				logfields.Count, backendCount,
+				logfields.Previous, numPreviousBackends)
+		}
 		if err := ops.cleanupSlots(svcKey, numPreviousBackends, activeCount+inactiveCount); err != nil {
 			return fmt.Errorf("cleanup service slots: %w", err)
 		}
@@ -1615,7 +1641,8 @@ func (ops *BPFOps) computeMaglevTable(bes []backendWithRevision) ([]loadbalancer
 func (ops *BPFOps) sortedBackends(fe *loadbalancer.Frontend) []backendWithRevision {
 	quarantined := ops.restoredQuarantinedBackends[fe.Address]
 
-	bes := []backendWithRevision{}
+	cap := len(ops.backendReferences[fe.Address])
+	bes := make([]backendWithRevision, 0, cap)
 	for be, rev := range fe.Backends {
 		if be.UnhealthyUpdatedAt == nil && quarantined.Has(be.Address) {
 			// Backend was previously quarantined and we have not health checked it
