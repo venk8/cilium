@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"net/netip"
 	"reflect"
@@ -527,13 +528,15 @@ func (m *Map) cleanup(filter GCFilter, natMap *nat.Map, stats *gcStats, next fun
 			err := m.purgeCtEntry(ctKey, entry, natMap, next, countFailedFn)
 			if err != nil {
 				if errors.Is(err, ebpf.ErrKeyNotExist) {
-					m.Logger.Debug("key is missing, likely due to lru eviction - skipping",
-						logfields.Error, err,
-						logfields.Key, ctKey.ToHost(),
-					)
+					if m.Logger.Enabled(context.Background(), slog.LevelDebug) {
+						m.Logger.Debug("key is missing, likely due to lru eviction - skipping",
+							logfields.Error, err,
+							logfields.Key, ctKey.ToHost(),
+						)
+					}
 					stats.skipped++
 				} else {
-					m.Logger.Error("key is missing, likely due to lru eviction - skipping",
+					m.Logger.Error("failed to delete key during conntrack GC",
 						logfields.Error, err,
 						logfields.Key, ctKey.ToHost(),
 					)

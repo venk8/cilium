@@ -348,8 +348,9 @@ func (c *CtEntry) isDsrInternalEntry() bool {
 
 func (c *CtEntry) flagsString() string {
 	var sb strings.Builder
+	sb.Grow(64)
 
-	sb.WriteString(fmt.Sprintf("Flags=%#04x [ ", c.Flags))
+	fmt.Fprintf(&sb, "Flags=%#04x [ ", c.Flags)
 	if (c.Flags & RxClosing) != 0 {
 		sb.WriteString("RxClosing ")
 	}
@@ -384,7 +385,7 @@ func (c *CtEntry) flagsString() string {
 	unknownFlags := c.Flags
 	unknownFlags &^= MaxFlags - 1
 	if unknownFlags != 0 {
-		sb.WriteString(fmt.Sprintf("Unknown=%#04x ", unknownFlags))
+		fmt.Fprintf(&sb, "Unknown=%#04x ", unknownFlags)
 	}
 	sb.WriteString("]")
 	return sb.String()

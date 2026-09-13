@@ -134,7 +134,7 @@ type EndpointFrontend interface {
 // getBPFKeys returns all keys which should represent this endpoint in the BPF
 // endpoints map
 func (m *lxcMap) getBPFKeys(e EndpointFrontend) []*EndpointKey {
-	keys := []*EndpointKey{}
+	keys := make([]*EndpointKey, 0, 2)
 	if e.IPv6Address().IsValid() {
 		keys = append(keys, newEndpointKey(e.IPv6Address()))
 	}
@@ -242,7 +242,7 @@ func (m *lxcMap) WriteEndpoint(f EndpointFrontend) error {
 	}
 
 	keys := m.getBPFKeys(f)
-	var writtenKeys []*EndpointKey
+	writtenKeys := make([]*EndpointKey, 0, len(keys))
 
 	for _, key := range keys {
 		if err := m.bpfMap.Update(key, info); err != nil {
