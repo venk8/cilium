@@ -58,3 +58,15 @@ func TestMaxEntries(t *testing.T) {
 		})
 	}
 }
+
+func BenchmarkCtEntryFlagsString(b *testing.B) {
+	e := &CtEntry{
+		Flags: RxClosing | SeenNonSyn | NodePort,
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = e.flagsString()
+	}
+}
