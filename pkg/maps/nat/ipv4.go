@@ -25,9 +25,9 @@ type NatEntry4 struct {
 
 // String returns the readable format.
 func (n *NatEntry4) String() string {
-	b := make([]byte, 0, 64)
+	b := make([]byte, 0, 96)
 	b = append(b, "Addr="...)
-	b = append(b, n.Addr.String()...)
+	b = n.Addr.AppendTo(b)
 	b = append(b, " Port="...)
 	b = strconv.AppendUint(b, uint64(n.Port), 10)
 	b = append(b, " Created="...)
@@ -46,10 +46,10 @@ func (n *NatEntry4) Dump(key NatKey, toDeltaSecs func(uint64) string) string {
 	} else {
 		which = "SRC "
 	}
-	b := make([]byte, 0, 64)
+	b := make([]byte, 0, 96)
 	b = append(b, "XLATE_"...)
 	b = append(b, which...)
-	b = append(b, n.Addr.String()...)
+	b = n.Addr.AppendTo(b)
 	b = append(b, ':')
 	b = strconv.AppendUint(b, uint64(n.Port), 10)
 	b = append(b, " Created="...)

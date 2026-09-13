@@ -6,11 +6,11 @@ package ctmap
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"math"
 	"net/netip"
 	"reflect"
+	"strconv"
 	"strings"
 
 	"github.com/cilium/ebpf"
@@ -263,7 +263,11 @@ func DumpEntriesWithTimeDiff(m CtMap, clockSource *models.ClockSource) (string, 
 		toRemSecs = func(t uint32) string {
 			tsec := tsConverter(uint64(t))
 			diff := int64(tsec) - int64(tsecNow)
-			return fmt.Sprintf("remaining: %d sec(s)", diff)
+			var b [32]byte
+			n := copy(b[:], "remaining: ")
+			b2 := strconv.AppendInt(b[:n], diff, 10)
+			b2 = append(b2, " sec(s)"...)
+			return string(b2)
 		}
 	}
 
