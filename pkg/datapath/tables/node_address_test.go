@@ -964,6 +964,22 @@ func BenchmarkSortedAddresses(b *testing.B) {
 	}
 }
 
+func BenchmarkPreferredIPv4Address(b *testing.B) {
+	addrs := []DeviceAddress{
+		{Addr: netip.MustParseAddr("10.0.0.1"), Scope: RT_SCOPE_SITE},
+		{Addr: netip.MustParseAddr("1.1.1.1"), Scope: RT_SCOPE_UNIVERSE, Secondary: true},
+		{Addr: netip.MustParseAddr("192.168.1.1"), Scope: RT_SCOPE_UNIVERSE},
+		{Addr: netip.MustParseAddr("200.0.0.1"), Scope: RT_SCOPE_UNIVERSE},
+		{Addr: netip.MustParseAddr("1002::1"), Scope: RT_SCOPE_SITE},
+		{Addr: netip.MustParseAddr("1001::1"), Scope: RT_SCOPE_UNIVERSE, Secondary: true},
+	}
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = PreferredIPv4Address(addrs)
+	}
+}
+
 func TestPreferredIPv6Address(t *testing.T) {
 	tests := []struct {
 		name  string

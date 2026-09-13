@@ -241,17 +241,24 @@ func (m *lxcMap) WriteEndpoint(f EndpointFrontend) error {
 		return err
 	}
 
-	keys := m.getBPFKeys(f)
-	writtenKeys := make([]*EndpointKey, 0, len(keys))
+	var keys [2]EndpointKey
+	var numKeys int
+	if v6 := f.IPv6Address(); v6.IsValid() {
+		keys[numKeys] = EndpointKey{EndpointKey: bpf.NewEndpointKey(v6, 0)}
+		numKeys++
+	}
+	if v4 := f.IPv4Address(); v4.IsValid() {
+		keys[numKeys] = EndpointKey{EndpointKey: bpf.NewEndpointKey(v4, 0)}
+		numKeys++
+	}
 
-	for _, key := range keys {
-		if err := m.bpfMap.Update(key, info); err != nil {
-			for _, k := range writtenKeys {
-				_ = m.bpfMap.Delete(k)
+	for i := 0; i < numKeys; i++ {
+		if err := m.bpfMap.Update(&keys[i], info); err != nil {
+			for j := 0; j < i; j++ {
+				_ = m.bpfMap.Delete(&keys[j])
 			}
-			return fmt.Errorf("failed to update key %v in LXC map: %w", key, err)
+			return fmt.Errorf("failed to update key %v in LXC map: %w", &keys[i], err)
 		}
-		writtenKeys = append(writtenKeys, key)
 	}
 
 	return nil
@@ -259,14 +266,14 @@ func (m *lxcMap) WriteEndpoint(f EndpointFrontend) error {
 
 // addHostEntry adds a special endpoint which represents the local host
 func (m *lxcMap) addHostEntry(addr netip.Addr) error {
-	key := newEndpointKey(addr)
+	key := EndpointKey{EndpointKey: bpf.NewEndpointKey(addr, 0)}
 	ep := &EndpointInfo{Flags: EndpointFlagHost}
-	return m.bpfMap.Update(key, ep)
+	return m.bpfMap.Update(&key, ep)
 }
 
 func (m *lxcMap) SyncHostEntry(addr netip.Addr) (bool, error) {
-	key := newEndpointKey(addr)
-	value, err := m.bpfMap.Lookup(key)
+	key := EndpointKey{EndpointKey: bpf.NewEndpointKey(addr, 0)}
+	value, err := m.bpfMap.Lookup(&key)
 	if err != nil || value.(*EndpointInfo).Flags&EndpointFlagHost == 0 {
 		err = m.addHostEntry(addr)
 		if err == nil {
@@ -277,14 +284,22 @@ func (m *lxcMap) SyncHostEntry(addr netip.Addr) (bool, error) {
 }
 
 func (m *lxcMap) DeleteEntry(addr netip.Addr) error {
-	return m.bpfMap.Delete(newEndpointKey(addr))
+	key := EndpointKey{EndpointKey: bpf.NewEndpointKey(addr, 0)}
+	return m.bpfMap.Delete(&key)
 }
 
 func (m *lxcMap) DeleteElement(logger *slog.Logger, f EndpointFrontend) []error {
 	var errors []error
-	for _, k := range m.getBPFKeys(f) {
-		if err := m.bpfMap.Delete(k); err != nil {
-			errors = append(errors, fmt.Errorf("unable to delete key %v from %s: %w", k, bpf.MapPath(logger, mapName), err))
+	if v6 := f.IPv6Address(); v6.IsValid() {
+		k := EndpointKey{EndpointKey: bpf.NewEndpointKey(v6, 0)}
+		if err := m.bpfMap.Delete(&k); err != nil {
+			errors = append(errors, fmt.Errorf("unable to delete key %v from %s: %w", &k, bpf.MapPath(logger, mapName), err))
+		}
+	}
+	if v4 := f.IPv4Address(); v4.IsValid() {
+		k := EndpointKey{EndpointKey: bpf.NewEndpointKey(v4, 0)}
+		if err := m.bpfMap.Delete(&k); err != nil {
+			errors = append(errors, fmt.Errorf("unable to delete key %v from %s: %w", &k, bpf.MapPath(logger, mapName), err))
 		}
 	}
 

@@ -149,7 +149,8 @@ func (*IPMasqBPFMap) Dump() ([]netip.Prefix, error) {
 func keyIPv4(cidr netip.Prefix) *Key4 {
 	ones := cidr.Bits()
 	key := &Key4{PrefixLen: uint32(ones)}
-	copy(key.Address[:], cidr.Masked().Addr().AsSlice())
+	a4 := cidr.Masked().Addr().As4()
+	copy(key.Address[:], a4[:])
 	return key
 }
 
@@ -160,7 +161,7 @@ func keyToIPNetIPv4(key *Key4) netip.Prefix {
 func keyIPv6(cidr netip.Prefix) *Key6 {
 	ones := cidr.Bits()
 	key := &Key6{PrefixLen: uint32(ones)}
-	copy(key.Address[:], cidr.Masked().Addr().AsSlice())
+	key.Address = types.IPv6(cidr.Masked().Addr().As16())
 	return key
 }
 

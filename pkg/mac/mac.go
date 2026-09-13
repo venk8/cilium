@@ -25,13 +25,33 @@ const EthHdrLen = 14
 // +kubebuilder:validation:Format=mac
 type MAC [6]byte
 
+const hexDigit = "0123456789abcdef"
+
 // String returns the string representation of m, or the empty string if m is
 // unset.
 func (m MAC) String() string {
 	if !m.IsValid() {
 		return ""
 	}
-	return m.HardwareAddr().String()
+	var buf [17]byte
+	buf[0] = hexDigit[m[0]>>4]
+	buf[1] = hexDigit[m[0]&0xf]
+	buf[2] = ':'
+	buf[3] = hexDigit[m[1]>>4]
+	buf[4] = hexDigit[m[1]&0xf]
+	buf[5] = ':'
+	buf[6] = hexDigit[m[2]>>4]
+	buf[7] = hexDigit[m[2]&0xf]
+	buf[8] = ':'
+	buf[9] = hexDigit[m[3]>>4]
+	buf[10] = hexDigit[m[3]&0xf]
+	buf[11] = ':'
+	buf[12] = hexDigit[m[4]>>4]
+	buf[13] = hexDigit[m[4]&0xf]
+	buf[14] = ':'
+	buf[15] = hexDigit[m[5]>>4]
+	buf[16] = hexDigit[m[5]&0xf]
+	return string(buf[:])
 }
 
 // IsValid reports whether m is set. Devices without a layer 2 address, such as

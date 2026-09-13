@@ -94,11 +94,13 @@ func NewKey(prefix netip.Prefix, clusterID uint16) Key {
 	}
 
 	addr := prefix.Addr()
-	copy(result.IP[:], addr.AsSlice())
 	if addr.Is4() {
 		result.Family = bpf.EndpointKeyIPv4
+		a4 := addr.As4()
+		copy(result.IP[:4], a4[:])
 	} else if addr.Is6() {
 		result.Family = bpf.EndpointKeyIPv6
+		result.IP = addr.As16()
 	}
 
 	return result
@@ -189,9 +191,12 @@ func NewValue(secID uint32, tunnelEndpoint netip.Addr, key uint8, flags RemoteEn
 	}
 
 	result.Flags |= FlagHasTunnelEndpoint
-	copy(result.TunnelEndpoint[:], tunnelEndpoint.AsSlice())
-	if tunnelEndpoint.Is6() {
+	if tunnelEndpoint.Is4() {
+		a4 := tunnelEndpoint.As4()
+		copy(result.TunnelEndpoint[:4], a4[:])
+	} else if tunnelEndpoint.Is6() {
 		result.Flags |= FlagIPv6TunnelEndpoint
+		result.TunnelEndpoint = tunnelEndpoint.As16()
 	}
 
 	return result
