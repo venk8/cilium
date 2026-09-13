@@ -271,10 +271,18 @@ func (mgr *endpointManager) InitMetrics(registry *metrics.Registry) {
 			Name:      "endpoint",
 			Help:      "Number of endpoints managed by this agent",
 		},
-			func() float64 { return float64(len(mgr.GetEndpoints())) },
+			func() float64 { return float64(mgr.EndpointsLen()) },
 		)
 		registry.MustRegister(metrics.Endpoint)
 	})
+}
+
+// EndpointsLen returns the number of endpoints currently managed by the endpoint manager.
+func (mgr *endpointManager) EndpointsLen() int {
+	mgr.mutex.RLock()
+	n := len(mgr.endpoints)
+	mgr.mutex.RUnlock()
+	return n
 }
 
 // allocateID checks if the ID can be reused. If it cannot, returns an error.
@@ -396,7 +404,7 @@ func (mgr *endpointManager) LookupCEPName(namespacedName string) *endpoint.Endpo
 func (mgr *endpointManager) GetEndpointsByPodName(namespacedName string) []*endpoint.Endpoint {
 	mgr.mutex.RLock()
 	defer mgr.mutex.RUnlock()
-	eps := make([]*endpoint.Endpoint, 0, 1)
+	var eps []*endpoint.Endpoint
 	for _, ep := range mgr.endpoints {
 		if ep.GetK8sNamespaceAndPodName() == namespacedName {
 			eps = append(eps, ep)
@@ -410,7 +418,7 @@ func (mgr *endpointManager) GetEndpointsByPodName(namespacedName string) []*endp
 func (mgr *endpointManager) GetEndpointsByNamespace(namespace string) []*endpoint.Endpoint {
 	mgr.mutex.RLock()
 	defer mgr.mutex.RUnlock()
-	eps := make([]*endpoint.Endpoint, 0, 1)
+	var eps []*endpoint.Endpoint
 	for _, ep := range mgr.endpoints {
 		if ep.GetK8sNamespace() == namespace {
 			eps = append(eps, ep)
@@ -425,7 +433,7 @@ func (mgr *endpointManager) GetEndpointsByContainerID(containerID string) []*end
 	mgr.mutex.RLock()
 	defer mgr.mutex.RUnlock()
 
-	eps := make([]*endpoint.Endpoint, 0, 1)
+	var eps []*endpoint.Endpoint
 	for _, ep := range mgr.endpoints {
 		if ep.GetContainerID() == containerID {
 			eps = append(eps, ep)
@@ -438,7 +446,7 @@ func (mgr *endpointManager) GetEndpointsByServiceAccount(namespace string, servi
 	mgr.mutex.RLock()
 	defer mgr.mutex.RUnlock()
 
-	eps := make([]*endpoint.Endpoint, 0, 1)
+	var eps []*endpoint.Endpoint
 	for _, ep := range mgr.endpoints {
 		podSA := ""
 

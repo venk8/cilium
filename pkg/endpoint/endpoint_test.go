@@ -1683,3 +1683,20 @@ func TestComputeCIDRLabelsAfterRestore(t *testing.T) {
 	require.Equal(t, podIP, restoredEP.IPv4)
 	require.Equal(t, expected, restoredEP.computeCIDRLabelsRLocked())
 }
+
+func BenchmarkGetNamedPortsModel(b *testing.B) {
+	ep := &Endpoint{}
+	ports := ciliumTypes.NamedPortMap{
+		"http":  {Port: 80, Proto: 6},
+		"https": {Port: 443, Proto: 6},
+		"dns":   {Port: 53, Proto: 17},
+		"admin": {Port: 8080, Proto: 6},
+	}
+	ep.SetK8sMetadata(ports)
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = ep.getNamedPortsModel()
+	}
+}
