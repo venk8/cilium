@@ -199,3 +199,46 @@ func BenchmarkPrefixLengthCounter_ToBPFData(b *testing.B) {
 		_, _ = c.ToBPFData()
 	}
 }
+
+func BenchmarkPrefixLengthCounter_Add_SingleSlice(b *testing.B) {
+	c := DefaultPrefixLengthCounter()
+	pfx := netip.MustParsePrefix("10.0.0.1/32")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = c.Add([]netip.Prefix{pfx})
+	}
+}
+
+func BenchmarkPrefixLengthCounter_Delete_SingleSlice(b *testing.B) {
+	c := DefaultPrefixLengthCounter()
+	pfx := netip.MustParsePrefix("10.0.0.1/32")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = c.Delete([]netip.Prefix{pfx})
+	}
+}
+
+func BenchmarkPrefixLengthCounter_AddPrefix(b *testing.B) {
+	c := DefaultPrefixLengthCounter()
+	pfx := netip.MustParsePrefix("10.0.0.1/32")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = c.AddPrefix(pfx)
+	}
+}
+
+func BenchmarkPrefixLengthCounter_DeletePrefix(b *testing.B) {
+	c := DefaultPrefixLengthCounter()
+	pfx := netip.MustParsePrefix("10.0.0.1/32")
+	_, _ = c.AddPrefix(pfx)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = c.DeletePrefix(pfx)
+	}
+}
+
+

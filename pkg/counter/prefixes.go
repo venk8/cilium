@@ -99,6 +99,10 @@ func (p *PrefixLengthCounter) Add(prefixes []netip.Prefix) (bool, error) {
 	p.Lock()
 	defer p.Unlock()
 
+	if len(prefixes) == 1 {
+		return p.addPrefixLocked(prefixes[0])
+	}
+
 	// Assemble a map of references that need to be added
 	newV4Counter := p.v4.DeepCopy()
 	newV6Counter := p.v6.DeepCopy()
@@ -146,6 +150,47 @@ func (p *PrefixLengthCounter) Add(prefixes []netip.Prefix) (bool, error) {
 	return newV4Prefixes || newV6Prefixes, nil
 }
 
+// AddPrefix increments references to a single prefix length for the specified netip.Prefix.
+// Returns true if adding this prefix results in a new unique prefix length.
+func (p *PrefixLengthCounter) AddPrefix(prefix netip.Prefix) (bool, error) {
+	p.Lock()
+	defer p.Unlock()
+
+	return p.addPrefixLocked(prefix)
+}
+
+func (p *PrefixLengthCounter) addPrefixLocked(prefix netip.Prefix) (bool, error) {
+	ones := prefix.Bits()
+	bits := prefix.Addr().BitLen()
+
+	switch bits {
+	case net.IPv4len * 8:
+		if p.v4.Has(ones) {
+			p.v4.Add(ones)
+			return false, nil
+		}
+		if err := checkLimits(len(p.v4), len(p.v4)+1, p.maxUniquePrefixes4); err != nil {
+			return false, err
+		}
+		p.v4.Add(ones)
+		p.s4 = p.v4.ToBPFData()
+		return true, nil
+	case net.IPv6len * 8:
+		if p.v6.Has(ones) {
+			p.v6.Add(ones)
+			return false, nil
+		}
+		if err := checkLimits(len(p.v6), len(p.v6)+1, p.maxUniquePrefixes6); err != nil {
+			return false, err
+		}
+		p.v6.Add(ones)
+		p.s6 = p.v6.ToBPFData()
+		return true, nil
+	default:
+		return false, fmt.Errorf("unsupported IPAddr bitlength %d", bits)
+	}
+}
+
 // Delete reduces references to prefix lengths in the specified IPNets from
 // the counter. Returns true if removing references to these prefix lengths
 // would result in a decrese in the total number of unique prefix lengths in
@@ -153,6 +198,10 @@ func (p *PrefixLengthCounter) Add(prefixes []netip.Prefix) (bool, error) {
 func (p *PrefixLengthCounter) Delete(prefixes []netip.Prefix) (changed bool) {
 	p.Lock()
 	defer p.Unlock()
+
+	if len(prefixes) == 1 {
+		return p.deletePrefixLocked(prefixes[0])
+	}
 
 	var v4Changed, v6Changed bool
 	for _, prefix := range prefixes {
@@ -178,6 +227,37 @@ func (p *PrefixLengthCounter) Delete(prefixes []netip.Prefix) (changed bool) {
 	}
 
 	return v4Changed || v6Changed
+}
+
+// DeletePrefix decrements references to a single prefix length for the specified netip.Prefix.
+// Returns true if removing references results in a decrease in the total number of unique prefix lengths.
+func (p *PrefixLengthCounter) DeletePrefix(prefix netip.Prefix) bool {
+	p.Lock()
+	defer p.Unlock()
+
+	return p.deletePrefixLocked(prefix)
+}
+
+func (p *PrefixLengthCounter) deletePrefixLocked(prefix netip.Prefix) bool {
+	ones := prefix.Bits()
+	bits := prefix.Addr().BitLen()
+
+	switch bits {
+	case net.IPv4len * 8:
+		if p.v4.Delete(ones) {
+			p.s4 = p.v4.ToBPFData()
+			return true
+		}
+		return false
+	case net.IPv6len * 8:
+		if p.v6.Delete(ones) {
+			p.s6 = p.v6.ToBPFData()
+			return true
+		}
+		return false
+	default:
+		return false
+	}
 }
 
 // ToBPFData converts the counter into a set of prefix lengths that the BPF

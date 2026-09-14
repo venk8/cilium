@@ -342,8 +342,9 @@ func (m *metadata) mergeLabels(lbls labels.Labels, prefixCluster cmtypes.PrefixC
 	// Merge all labels, preferring those from longer prefixes, but only merge a single "cidr:XXX" label at most.
 	prefix := prefixCluster.AsPrefix()
 	clusterID := prefixCluster.ClusterID()
+	addr := prefix.Addr().Unmap()
 	for bits := prefix.Bits(); bits >= 0; bits-- {
-		parent, _ := prefix.Addr().Unmap().Prefix(bits) // canonical
+		parent, _ := addr.Prefix(bits) // canonical
 		parentCluster := cmtypes.NewPrefixCluster(parent, clusterID)
 		if info := m.getLockedFlattened(parentCluster); info != nil {
 			for k, v := range info.labels {
