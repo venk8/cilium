@@ -72,8 +72,18 @@ func (s FQDNSelector) SelectorKey() string {
 func (s *FQDNSelector) String() string {
 	const m = "MatchName: "
 	const mm = ", MatchPattern: "
+	total := len(m) + len(mm) + len(s.MatchName) + len(s.MatchPattern)
+	if total <= 64 {
+		var buf [64]byte
+		copy(buf[:], m)
+		n := len(m)
+		n += copy(buf[n:], s.MatchName)
+		n += copy(buf[n:], mm)
+		n += copy(buf[n:], s.MatchPattern)
+		return string(buf[:n])
+	}
 	var str strings.Builder
-	str.Grow(len(m) + len(mm) + len(s.MatchName) + len(s.MatchPattern))
+	str.Grow(total)
 	str.WriteString(m)
 	str.WriteString(s.MatchName)
 	str.WriteString(mm)
@@ -117,8 +127,11 @@ func (s *FQDNSelector) Validate() error {
 	if len(s.MatchName) > 0 && len(s.MatchPattern) > 0 {
 		return fmt.Errorf("only one of MatchName or MatchPattern is allowed in an FQDNSelector")
 	}
-	if len(s.MatchName) > 0 && !hasOnlyAllowedMatchNameChars(s.MatchName) {
-		return fmt.Errorf("Invalid characters in MatchName: \"%s\". Only 0-9, a-z, A-Z and ., -, _ characters are allowed", s.MatchName)
+	if len(s.MatchName) > 0 {
+		if !hasOnlyAllowedMatchNameChars(s.MatchName) {
+			return fmt.Errorf("Invalid characters in MatchName: \"%s\". Only 0-9, a-z, A-Z and ., -, _ characters are allowed", s.MatchName)
+		}
+		return nil
 	}
 
 	_, err := matchpattern.Validate(s.MatchPattern)
@@ -152,8 +165,11 @@ type PortRulesDNS []PortRuleDNS
 // Validate checks that the matchName in the portRule can be compiled as a
 // regex. It does not check that a DNS name is a valid DNS name.
 func (r *PortRuleDNS) Validate() error {
-	if len(r.MatchName) > 0 && !hasOnlyAllowedMatchNameChars(r.MatchName) {
-		return fmt.Errorf("Invalid characters in MatchName: \"%s\". Only 0-9, a-z, A-Z and . and - characters are allowed", r.MatchName)
+	if len(r.MatchName) > 0 {
+		if !hasOnlyAllowedMatchNameChars(r.MatchName) {
+			return fmt.Errorf("Invalid characters in MatchName: \"%s\". Only 0-9, a-z, A-Z and . and - characters are allowed", r.MatchName)
+		}
+		return nil
 	}
 
 	_, err := matchpattern.Validate(r.MatchPattern)
