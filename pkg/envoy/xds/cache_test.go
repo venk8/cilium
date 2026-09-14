@@ -276,3 +276,42 @@ func TestCacheVersionStateDoesNotRotateOnNoopUpdate(t *testing.T) {
 		t.Fatal("version state channel unexpectedly changed on no-op update")
 	}
 }
+
+func BenchmarkCache_Lookup(b *testing.B) {
+	logger := hivetest.Logger(b)
+	c := NewCache(logger)
+	for i := 0; i < len(resources); i++ {
+		c.Upsert("testType", resources[i].Name, resources[i])
+	}
+
+	targetName := resources[1].Name
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		res := c.Lookup("testType", targetName)
+		if res == nil {
+			b.Fatal("expected resource")
+		}
+	}
+}
+
+func BenchmarkCache_GetResources_Unchanged(b *testing.B) {
+	logger := hivetest.Logger(b)
+	c := NewCache(logger)
+	for i := 0; i < len(resources); i++ {
+		c.Upsert("testType", resources[i].Name, resources[i])
+	}
+
+	version := c.version
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		res := c.GetResources("testType", version, nil)
+		if res != nil {
+			b.Fatal("expected nil for unchanged version")
+		}
+	}
+}
+
