@@ -68,9 +68,11 @@ func NewIPPrefixID(ip netip.Addr) string {
 		return ""
 	}
 	var buf [64]byte
-	b := append(buf[:0], IPv4Prefix...)
+	b := buf[:0]
 	if ip.Is6() {
-		b = append(buf[:0], IPv6Prefix...)
+		b = append(b, IPv6Prefix...)
+	} else {
+		b = append(b, IPv4Prefix...)
 	}
 	b = append(b, ':')
 	b = ip.AppendTo(b)
@@ -80,11 +82,16 @@ func NewIPPrefixID(ip netip.Addr) string {
 // NewCNIAttachmentID returns an identifier based on the CNI attachment ID. If
 // the containerIfName is empty, only the containerID will be used.
 func NewCNIAttachmentID(containerID, containerIfName string) string {
-	id := containerID
-	if containerIfName != "" {
-		id = containerID + ":" + containerIfName
+	if containerIfName == "" {
+		return NewID(CNIAttachmentIdPrefix, containerID)
 	}
-	return NewID(CNIAttachmentIdPrefix, id)
+	var buf [128]byte
+	b := append(buf[:0], CNIAttachmentIdPrefix...)
+	b = append(b, ':')
+	b = append(b, containerID...)
+	b = append(b, ':')
+	b = append(b, containerIfName...)
+	return string(b)
 }
 
 // splitID splits ID into prefix and id. No validation is performed on prefix.

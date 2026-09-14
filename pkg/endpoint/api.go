@@ -183,10 +183,7 @@ func (e *Endpoint) GetModelRLocked() *models.Endpoint {
 	// This returns the most recent log entry for this endpoint. It is backwards
 	// compatible with the json from before we added `cilium endpoint log` but it
 	// only returns 1 entry.
-	statusLog := e.status.GetModel()
-	if len(statusLog) > 0 {
-		statusLog = statusLog[:1]
-	}
+	statusLog := e.status.GetModelWithLimit(1)
 
 	lblMdl := model.NewModel(&e.labels)
 
@@ -309,13 +306,17 @@ func (e *Endpoint) getNamedPortsModel() models.NamedPorts {
 		return models.NamedPorts{}
 	}
 
-	np := make(models.NamedPorts, 0, len(k8sPorts))
+	ports := make([]models.Port, len(k8sPorts))
+	np := make(models.NamedPorts, len(k8sPorts))
+	i := 0
 	for name, value := range k8sPorts {
-		np = append(np, &models.Port{
+		ports[i] = models.Port{
 			Name:     name,
 			Port:     value.Port,
 			Protocol: u8proto.U8proto(value.Proto).String(),
-		})
+		}
+		np[i] = &ports[i]
+		i++
 	}
 	if len(np) > 1 {
 		// keep named ports ordered to avoid unnecessary updates to kube-apiserver

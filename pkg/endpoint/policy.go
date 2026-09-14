@@ -690,13 +690,7 @@ func (e *Endpoint) updateRegenerationStatistics(ctx *regenerationContext, err er
 		logAttrs = []any{
 			logfields.Reason, ctx.Reason,
 		}
-		for field, stat := range stats.GetMap() {
-			logAttrs = append(
-				logAttrs,
-				field, stat.Total(),
-			)
-		}
-		for field, stat := range stats.datapathRealization.GetMap() {
+		for field, stat := range stats.All() {
 			logAttrs = append(
 				logAttrs,
 				field, stat.Total(),
