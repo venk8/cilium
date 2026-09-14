@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/vishvananda/netlink"
 
+	"github.com/cilium/cilium/pkg/container/set"
 	"github.com/cilium/cilium/pkg/loadbalancer"
 	wgTypes "github.com/cilium/cilium/pkg/wireguard/types"
 )
@@ -1331,4 +1332,25 @@ func mustParseCIDR(s string) *net.IPNet {
 		panic(err)
 	}
 	return n
+}
+
+func BenchmarkInboundProxyRedirectRule(b *testing.B) {
+	mgr := &manager{}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		_ = mgr.inboundProxyRedirectRule("-A")
+	}
+}
+
+func BenchmarkNoTrackHostPorts_Flatten(b *testing.B) {
+	state := make(noTrackHostPortsByPod)
+	pod := podAndNameSpace{namespace: "default", podName: "pod-1"}
+	state[pod] = set.NewSet(loadbalancer.L4Addr{Protocol: loadbalancer.TCP, Port: 80}, loadbalancer.L4Addr{Protocol: loadbalancer.TCP, Port: 443})
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		_ = state.flatten()
+	}
 }

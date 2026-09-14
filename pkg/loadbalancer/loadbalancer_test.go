@@ -653,6 +653,33 @@ func TestL4AddrParsing(t *testing.T) {
 	}
 }
 
+func BenchmarkL4AddrFromString(b *testing.B) {
+	input := "443/tcp"
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		_, _ = L4AddrFromString(input)
+	}
+}
+
+func BenchmarkL4Addr_String(b *testing.B) {
+	addr := L4Addr{Protocol: TCP, Port: 443}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		_ = addr.String()
+	}
+}
+
+func BenchmarkNewL4Type(b *testing.B) {
+	proto := "TCP"
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		_, _ = NewL4Type(proto)
+	}
+}
+
 func TestGetSourceRangesEnabled(t *testing.T) {
 	prefix := netip.MustParsePrefix("10.0.0.0/8")
 
