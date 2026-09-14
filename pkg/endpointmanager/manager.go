@@ -12,6 +12,7 @@ import (
 	"net/netip"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/cilium/hive/cell"
@@ -403,11 +404,16 @@ func (mgr *endpointManager) LookupCEPName(namespacedName string) *endpoint.Endpo
 
 // GetEndpointsByPodName looks up endpoints by namespace + pod name
 func (mgr *endpointManager) GetEndpointsByPodName(namespacedName string) []*endpoint.Endpoint {
+	ns, podName, ok := strings.Cut(namespacedName, "/")
+	if !ok {
+		return nil
+	}
+
 	mgr.mutex.RLock()
 	defer mgr.mutex.RUnlock()
 	var eps []*endpoint.Endpoint
 	for _, ep := range mgr.endpoints {
-		if ep.GetK8sNamespaceAndPodName() == namespacedName {
+		if ep.GetK8sNamespace() == ns && ep.GetK8sPodName() == podName {
 			eps = append(eps, ep)
 		}
 	}
@@ -449,15 +455,16 @@ func (mgr *endpointManager) GetEndpointsByServiceAccount(namespace string, servi
 
 	var eps []*endpoint.Endpoint
 	for _, ep := range mgr.endpoints {
-		podSA := ""
-
-		if pod := ep.GetPod(); pod == nil {
+		if ep.K8sNamespace != namespace {
 			continue
-		} else {
-			podSA = pod.Spec.ServiceAccountName
 		}
 
-		if ep.K8sNamespace == namespace && serviceAccount == podSA {
+		pod := ep.GetPod()
+		if pod == nil {
+			continue
+		}
+
+		if pod.Spec.ServiceAccountName == serviceAccount {
 			eps = append(eps, ep)
 		}
 	}
