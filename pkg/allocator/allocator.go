@@ -479,6 +479,17 @@ func (a *Allocator) ForeachCache(cb RangeFunc) {
 	a.remoteCachesMutex.RUnlock()
 }
 
+// CacheLen returns the number of entries in the main allocator cache.
+func (a *Allocator) CacheLen() int {
+	if a == nil {
+		return 0
+	}
+	a.mainCache.mutex.RLock()
+	defer a.mainCache.mutex.RUnlock()
+	return len(a.mainCache.cache)
+}
+
+
 // selectAvailableID selects an available ID.
 // Returns a triple of the selected ID ORed with prefixMask, the ID string and
 // the originally selected ID.

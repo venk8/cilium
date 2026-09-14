@@ -5,6 +5,7 @@ package cache
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/cilium/hive/hivetest"
@@ -144,3 +145,65 @@ func TestLookupReservedIdentityByLabels(t *testing.T) {
 		}
 	}
 }
+
+func BenchmarkFromIdentityCache(b *testing.B) {
+	cache := make(identity.IdentityMap, 100)
+	for i := 0; i < 100; i++ {
+		cache[identity.NumericIdentity(1000+i)] = labels.Labels{
+			"key": labels.NewLabel("key", fmt.Sprintf("val-%d", i), labels.LabelSourceK8s),
+		}.LabelArray()
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		var s IdentitiesModel
+		res := s.FromIdentityCache(cache)
+		_ = res
+	}
+}
+
+func BenchmarkGetIdentityCache(b *testing.B) {
+	logger := hivetest.Logger(b)
+	mgr := NewCachingIdentityAllocator(logger, newDummyOwner(logger), NewTestAllocatorConfig())
+	for i := 0; i < 100; i++ {
+		lbl := fmt.Sprintf("10.%d.%d.0/24", i/256, i%256)
+		lbls := labels.Labels{
+			lbl: labels.NewLabel(lbl, "", labels.LabelSourceCIDR),
+		}
+		_, _, err := mgr.AllocateLocalIdentity(lbls, false, identity.InvalidIdentity)
+		if err != nil {
+			b.Fatalf("failed to allocate local identity: %v", err)
+		}
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		cache := mgr.GetIdentityCache()
+		_ = cache
+	}
+}
+
+func BenchmarkGetIdentities(b *testing.B) {
+	logger := hivetest.Logger(b)
+	mgr := NewCachingIdentityAllocator(logger, newDummyOwner(logger), NewTestAllocatorConfig())
+	for i := 0; i < 100; i++ {
+		lbl := fmt.Sprintf("10.%d.%d.0/24", i/256, i%256)
+		lbls := labels.Labels{
+			lbl: labels.NewLabel(lbl, "", labels.LabelSourceCIDR),
+		}
+		_, _, err := mgr.AllocateLocalIdentity(lbls, false, identity.InvalidIdentity)
+		if err != nil {
+			b.Fatalf("failed to allocate local identity: %v", err)
+		}
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		ids := mgr.GetIdentities()
+		_ = ids
+	}
+}
+
