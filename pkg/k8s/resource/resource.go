@@ -280,7 +280,7 @@ func (r *resource[T]) metricEventProcessed(eventKind EventKind, status bool) {
 	var action string
 	switch eventKind {
 	case Sync:
-		metrics.KubernetesResourceSyncDuration.WithLabelValues(r.opts.metricScope).Set(r.duration.End(status).Total().Seconds())
+		metrics.KubernetesResourceSyncDuration.WithLabelValues(r.opts.metricScope).Set(r.duration.EndTotal(status).Seconds())
 		return
 	case Upsert:
 		action = "update"

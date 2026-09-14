@@ -70,7 +70,7 @@ func (e emitter) emit(ctx context.Context, event KeyValueEvent) bool {
 	case e.events <- event:
 		ok = true
 	}
-	trackEventQueued(e.scope, event.Typ, queueStart.End(ok).Total())
+	trackEventQueued(e.scope, event.Typ, queueStart.EndTotal(ok))
 	return ok
 }
 

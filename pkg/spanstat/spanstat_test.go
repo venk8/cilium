@@ -170,3 +170,45 @@ func TestSpanStatRaceCondition(t *testing.T) {
 		})
 	}
 }
+
+func BenchmarkSpanStat_Start(b *testing.B) {
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		s := Start()
+		_ = s
+	}
+}
+
+func BenchmarkSpanStat_EndAndTotal(b *testing.B) {
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		s := Start()
+		_ = s.End(true).Total()
+	}
+}
+
+func BenchmarkSpanStat_EndTotal_Fused(b *testing.B) {
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		s := Start()
+		_ = s.EndTotal(true)
+	}
+}
+
+func BenchmarkSpanStat_EndErrorTotal(b *testing.B) {
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		s := Start()
+		_ = s.EndError(nil).Total()
+	}
+}
+
+func BenchmarkSpanStat_EndErrorTotal_Fused(b *testing.B) {
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		s := Start()
+		_ = s.EndErrorTotal(nil)
+	}
+}
+
+

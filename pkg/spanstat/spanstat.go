@@ -21,8 +21,9 @@ type SpanStat struct {
 
 // Start creates a new SpanStat and starts it
 func Start() *SpanStat {
-	s := &SpanStat{}
-	return s.Start()
+	return &SpanStat{
+		spanStart: time.Now(),
+	}
 }
 
 // Start starts a new span
@@ -51,6 +52,20 @@ func (s *SpanStat) End(success bool) *SpanStat {
 	return s
 }
 
+// EndTotal ends the current span and returns the total duration under a single lock acquisition.
+func (s *SpanStat) EndTotal(success bool) time.Duration {
+	s.mutex.Lock()
+	s.end(success)
+	d := s.successDuration + s.failureDuration
+	s.mutex.Unlock()
+	return d
+}
+
+// EndErrorTotal calls EndTotal based on the value of err.
+func (s *SpanStat) EndErrorTotal(err error) time.Duration {
+	return s.EndTotal(err == nil)
+}
+
 // must be called with Lock() held
 func (s *SpanStat) end(success bool) *SpanStat {
 	if !s.spanStart.IsZero() {
@@ -61,8 +76,8 @@ func (s *SpanStat) end(success bool) *SpanStat {
 		} else {
 			s.failureDuration += d
 		}
+		s.spanStart = time.Time{}
 	}
-	s.spanStart = time.Time{}
 	return s
 }
 

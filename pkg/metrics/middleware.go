@@ -62,7 +62,7 @@ func (m *APIEventTSHelper) ServeHTTP(r http.ResponseWriter, req *http.Request) {
 	rw := &ResponderWrapper{ResponseWriter: r}
 	m.Next.ServeHTTP(rw, req)
 	if reqOk {
-		took := float64(duration.End(true).Total().Seconds())
+		took := duration.EndTotal(true).Seconds()
 		m.Histogram.WithLabelValues(path, req.Method, strconv.Itoa(rw.code)).Observe(took)
 	}
 }
