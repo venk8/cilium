@@ -845,3 +845,24 @@ func TestSetRateBurst(t *testing.T) {
 	a.SetRateBurst(100)
 	require.Equal(t, 100, a.limiter.Burst())
 }
+
+func BenchmarkAPILimiter_WaitDone(b *testing.B) {
+	logger := hivetest.Logger(b)
+	a := NewAPILimiter(logger, "bench", APILimiterParameters{
+		RateLimit:        1000000.0,
+		RateBurst:        1000000,
+		ParallelRequests: 1000,
+	}, nil)
+
+	ctx := context.Background()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		req, err := a.Wait(ctx)
+		if err != nil {
+			b.Fatal(err)
+		}
+		req.Done()
+	}
+}
+
