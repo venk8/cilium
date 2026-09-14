@@ -437,3 +437,15 @@ func BenchmarkMatchesInvalid1000Parallel(b *testing.B) {
 		}
 	})
 }
+
+func BenchmarkCIDRSelectorMatches(b *testing.B) {
+	sel := NewCIDRSelector("test", api.CIDR("192.168.1.0/24"), []api.CIDR{"192.168.1.10/32"})
+	lbls := labels.NewLabelArrayFromSortedList("cidr:192.168.1.5/32;reserved:world")
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		sel.Matches(lbls)
+	}
+}
+
