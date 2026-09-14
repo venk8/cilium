@@ -564,3 +564,53 @@ func BenchmarkPolicyKey_PortProtoString(b *testing.B) {
 		_ = key.PortProtoString()
 	}
 }
+
+func BenchmarkPolicyEntry_String(b *testing.B) {
+	entry := &PolicyEntry{
+		ProxyPortNetwork: byteorder.HostToNetwork16(8080),
+		Flags:            policyFlagDeny | policyEntryFlags(24<<policyFlagLPMShift),
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = entry.String()
+	}
+}
+
+func BenchmarkStatsValue_String(b *testing.B) {
+	stats := &StatsValue{
+		Packets: 1234567,
+		Bytes:   987654321,
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = stats.String()
+	}
+}
+
+func BenchmarkPolicyEntriesDump_String(b *testing.B) {
+	dump := make(PolicyEntriesDump, 100)
+	for i := 0; i < 100; i++ {
+		dump[i] = PolicyEntryDump{
+			Key: PolicyKey{
+				Prefixlen:        uint32(FullPrefixBits),
+				Identity:         uint32(1000 + i),
+				TrafficDirection: uint8(i % 2),
+				Nexthdr:          6,
+				DestPortNetwork:  byteorder.HostToNetwork16(uint16(80 + i)),
+			},
+			PolicyEntry: PolicyEntry{
+				ProxyPortNetwork: byteorder.HostToNetwork16(uint16(8080 + i)),
+				Flags:            policyEntryFlags(24 << policyFlagLPMShift),
+			},
+			StatsValue: StatsValue{
+				Packets: uint64(10000 + i*10),
+				Bytes:   uint64(500000 + i*100),
+			},
+		}
+	}
+	b.ResetTimer()
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = dump.String()
+	}
+}
