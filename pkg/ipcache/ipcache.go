@@ -585,6 +585,9 @@ func (ipc *IPCache) UpsertMetadata(prefix cmtypes.PrefixCluster, src source.Sour
 //
 // Returns a revision number that can be passed to WaitForRevision().
 func (ipc *IPCache) UpsertMetadataBatch(updates ...MU) (revision uint64) {
+	if len(updates) == 0 {
+		return 0
+	}
 	prefixes := make([]cmtypes.PrefixCluster, 0, len(updates))
 	ipc.metadata.Lock()
 	for _, upd := range updates {
@@ -621,6 +624,9 @@ func (ipc *IPCache) RemoveMetadata(prefix cmtypes.PrefixCluster, resource ipcach
 // RemoveMetadataBatch is a batched version of RemoveMetadata.
 // Returns a revision number that can be passed to WaitForRevision().
 func (ipc *IPCache) RemoveMetadataBatch(updates ...MU) (revision uint64) {
+	if len(updates) == 0 {
+		return 0
+	}
 	prefixes := make([]cmtypes.PrefixCluster, 0, len(updates))
 	ipc.metadata.Lock()
 	for _, upd := range updates {

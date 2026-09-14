@@ -476,13 +476,24 @@ func (m *manager) nodeIdentityLabels(n nodeTypes.Node) labels.Labels {
 	return nodeLabels
 }
 
+var (
+	labelsWorldV4 = labels.Labels{labels.WorldLabelV4.Key: labels.WorldLabelV4}
+	labelsWorldV6 = labels.Labels{labels.WorldLabelV6.Key: labels.WorldLabelV6}
+	labelsWorld   = labels.Labels{labels.WorldLabel.Key: labels.WorldLabel}
+)
+
 // worldLabelForPrefix returns the labels which will resolve to
 // reserved:world identity given the provided prefix and the
 // current cluster configuration in terms of dual-stack.
 func worldLabelForPrefix(prefix netip.Prefix) labels.Labels {
-	lbls := make(labels.Labels, 1)
-	lbls.AddWorldLabel(prefix.Addr())
-	return lbls
+	addr := prefix.Addr()
+	switch {
+	case addr.Is4() && option.Config.EnableIPv6:
+		return labelsWorldV4
+	case addr.Is6() && option.Config.EnableIPv4:
+		return labelsWorldV6
+	}
+	return labelsWorld
 }
 
 // NodeUpdated is called after the information of a node has been updated. The
@@ -815,20 +826,26 @@ func (m *manager) removeNodeFromIPCache(oldNode nodeTypes.Node, resource ipcache
 		oldIPv4PodCIDRs := oldNode.GetIPv4AllocCIDRs()
 		oldIPv6PodCIDRs := oldNode.GetIPv6AllocCIDRs()
 
-		mu := make([]ipcache.MU, 0, len(oldIPv4PodCIDRs)+len(oldIPv6PodCIDRs))
-		for entry := range m.podCIDREntries(oldNode.Source, resource, m.cidrsToPrefixesCluster(&oldNode, oldIPv4PodCIDRs...), oldNodeIP, oldNode.EncryptionKey) {
-			if slices.Contains(podCIDRsAdded, entry.Prefix.AsPrefix()) {
+		var mu []ipcache.MU
+		for _, cidr := range oldIPv4PodCIDRs {
+			if slices.Contains(podCIDRsAdded, cidr) {
 				continue
 			}
-			mu = append(mu, entry)
+			for entry := range m.podCIDREntries(oldNode.Source, resource, m.cidrsToPrefixesCluster(&oldNode, cidr), oldNodeIP, oldNode.EncryptionKey) {
+				mu = append(mu, entry)
+			}
 		}
-		for entry := range m.podCIDREntries(oldNode.Source, resource, m.cidrsToPrefixesCluster(&oldNode, oldIPv6PodCIDRs...), oldNodeIP, oldNode.EncryptionKey) {
-			if slices.Contains(podCIDRsAdded, entry.Prefix.AsPrefix()) {
+		for _, cidr := range oldIPv6PodCIDRs {
+			if slices.Contains(podCIDRsAdded, cidr) {
 				continue
 			}
-			mu = append(mu, entry)
+			for entry := range m.podCIDREntries(oldNode.Source, resource, m.cidrsToPrefixesCluster(&oldNode, cidr), oldNodeIP, oldNode.EncryptionKey) {
+				mu = append(mu, entry)
+			}
 		}
-		m.ipcache.RemoveMetadataBatch(mu...)
+		if len(mu) > 0 {
+			m.ipcache.RemoveMetadataBatch(mu...)
+		}
 	}
 
 	// Delete the old health IP addresses if they have changed in this node.
