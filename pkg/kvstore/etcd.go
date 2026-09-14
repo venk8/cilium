@@ -354,7 +354,7 @@ type etcdMutex struct {
 func (e *etcdMutex) Unlock(ctx context.Context) (err error) {
 	e.onUnlock()
 	defer func(duration *spanstat.SpanStat) {
-		increaseMetric(e.path, metricDelete, "Unlock", duration.EndError(err).Total(), err)
+		increaseMetric(e.path, metricDelete, "Unlock", duration.EndErrorTotal(err), err)
 	}(spanstat.Start())
 	return e.mutex.Unlock(ctx)
 }
@@ -623,7 +623,7 @@ func (e *etcdClient) LockPath(ctx context.Context, path string) (locker KVLocker
 	}
 
 	defer func(duration *spanstat.SpanStat) {
-		increaseMetric(path, metricSet, "Lock", duration.EndError(err).Total(), err)
+		increaseMetric(path, metricSet, "Lock", duration.EndErrorTotal(err), err)
 	}(spanstat.Start())
 	mu := concurrency.NewMutex(session, path)
 	err = mu.Lock(ctx)
@@ -649,7 +649,7 @@ func (e *etcdClient) DeletePrefix(ctx context.Context, path string) (err error) 
 	}
 
 	defer func(duration *spanstat.SpanStat) {
-		increaseMetric(path, metricDelete, "DeletePrefix", duration.EndError(err).Total(), err)
+		increaseMetric(path, metricDelete, "DeletePrefix", duration.EndErrorTotal(err), err)
 	}(spanstat.Start())
 
 	_, err = e.client.Delete(ctx, path, client.WithPrefix())
@@ -810,7 +810,7 @@ reList:
 		}
 		etcdWatch := e.client.Watch(client.WithRequireLeader(ctx), prefix, watchOpts...)
 		// This does not measure the actual time a watcher is open, but just the fact that it was opened
-		increaseMetric(prefix, metricRead, "WatchStart", watcherDuration.EndError(nil).Total(), nil)
+		increaseMetric(prefix, metricRead, "WatchStart", watcherDuration.EndErrorTotal(nil), nil)
 		lr.Done()
 
 		for {
@@ -903,7 +903,7 @@ func (e *etcdClient) getForWatch(
 ) (kvs []*mvccpb.KeyValue, revision int64, err error) {
 	duration := spanstat.Start()
 	res, err := e.client.Get(ctx, key)
-	increaseMetric(key, metricRead, "Get", duration.EndError(err).Total(), err)
+	increaseMetric(key, metricRead, "Get", duration.EndErrorTotal(err), err)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -921,7 +921,7 @@ func (e *etcdClient) paginatedList(ctx context.Context, log *slog.Logger, prefix
 			client.WithSort(client.SortByKey, client.SortAscend),
 			client.WithRev(revision), client.WithLimit(int64(e.listBatchSize)),
 		)
-		increaseMetric(prefix, metricRead, "ListPrefixPaginated", duration.EndError(err).Total(), err)
+		increaseMetric(prefix, metricRead, "ListPrefixPaginated", duration.EndErrorTotal(err), err)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -1111,7 +1111,7 @@ func (e *etcdClient) GetIfLocked(ctx context.Context, key string, lock KVLocker)
 		return nil, Hint(err)
 	}
 	defer func(duration *spanstat.SpanStat) {
-		increaseMetric(key, metricRead, "GetLocked", duration.EndError(err).Total(), err)
+		increaseMetric(key, metricRead, "GetLocked", duration.EndErrorTotal(err), err)
 	}(spanstat.Start())
 
 	opGet := client.OpGet(key)
@@ -1151,7 +1151,7 @@ func (e *etcdClient) Get(ctx context.Context, key string) (bv []byte, err error)
 		return nil, Hint(err)
 	}
 	defer func(duration *spanstat.SpanStat) {
-		increaseMetric(key, metricRead, "Get", duration.EndError(err).Total(), err)
+		increaseMetric(key, metricRead, "Get", duration.EndErrorTotal(err), err)
 	}(spanstat.Start())
 
 	getR, err := e.client.Get(ctx, key)
@@ -1182,7 +1182,7 @@ func (e *etcdClient) DeleteIfLocked(ctx context.Context, key string, lock KVLock
 		return Hint(err)
 	}
 	defer func(duration *spanstat.SpanStat) {
-		increaseMetric(key, metricDelete, "DeleteLocked", duration.EndError(err).Total(), err)
+		increaseMetric(key, metricDelete, "DeleteLocked", duration.EndErrorTotal(err), err)
 	}(spanstat.Start())
 
 	opDel := client.OpDelete(key)
@@ -1215,7 +1215,7 @@ func (e *etcdClient) Delete(ctx context.Context, key string) (err error) {
 		return Hint(err)
 	}
 	defer func(duration *spanstat.SpanStat) {
-		increaseMetric(key, metricDelete, "Delete", duration.EndError(err).Total(), err)
+		increaseMetric(key, metricDelete, "Delete", duration.EndErrorTotal(err), err)
 	}(spanstat.Start())
 
 	_, err = e.client.Delete(ctx, key)
@@ -1253,7 +1253,7 @@ func (e *etcdClient) UpdateIfLocked(ctx context.Context, key string, value []byt
 		return Hint(err)
 	}
 	defer func(duration *spanstat.SpanStat) {
-		increaseMetric(key, metricSet, "UpdateIfLocked", duration.EndError(err).Total(), err)
+		increaseMetric(key, metricSet, "UpdateIfLocked", duration.EndErrorTotal(err), err)
 	}(spanstat.Start())
 
 	var txnReply *client.TxnResponse
@@ -1295,7 +1295,7 @@ func (e *etcdClient) Update(ctx context.Context, key string, value []byte, lease
 		return Hint(err)
 	}
 	defer func(duration *spanstat.SpanStat) {
-		increaseMetric(key, metricSet, "Update", duration.EndError(err).Total(), err)
+		increaseMetric(key, metricSet, "Update", duration.EndErrorTotal(err), err)
 	}(spanstat.Start())
 
 	_, err = e.client.Put(ctx, key, string(value), client.WithLease(leaseID))
@@ -1329,7 +1329,7 @@ func (e *etcdClient) UpdateIfDifferentIfLocked(ctx context.Context, key string, 
 	txnresp, err := e.client.Txn(ctx).If(cnds).Then(client.OpGet(key)).Commit()
 	// Using lr.Error for convenience, as it matches lr.Done() when err is nil
 	lr.Error(err, -1)
-	increaseMetric(key, metricRead, "Get", duration.EndError(err).Total(), err)
+	increaseMetric(key, metricRead, "Get", duration.EndErrorTotal(err), err)
 
 	// On error, attempt update blindly
 	if err != nil {
@@ -1378,7 +1378,7 @@ func (e *etcdClient) UpdateIfDifferent(ctx context.Context, key string, value []
 	getR, err := e.client.Get(ctx, key)
 	// Using lr.Error for convenience, as it matches lr.Done() when err is nil
 	lr.Error(err, -1)
-	increaseMetric(key, metricRead, "Get", duration.EndError(err).Total(), err)
+	increaseMetric(key, metricRead, "Get", duration.EndErrorTotal(err), err)
 	// On error, attempt update blindly
 	if err != nil || getR.Count == 0 {
 		return true, e.Update(ctx, key, value, lease)
@@ -1432,7 +1432,7 @@ func (e *etcdClient) CreateOnlyIfLocked(ctx context.Context, key string, value [
 		client.OpGet(key),
 	}
 	txnresp, err := e.client.Txn(ctx).If(cnds...).Then(req).Else(opGets...).Commit()
-	increaseMetric(key, metricSet, "CreateOnlyLocked", duration.EndError(err).Total(), err)
+	increaseMetric(key, metricSet, "CreateOnlyLocked", duration.EndErrorTotal(err), err)
 	if err != nil {
 		lr.Error(err, -1)
 		e.leaseManager.CancelIfExpired(err, leaseID)
@@ -1492,7 +1492,7 @@ func (e *etcdClient) CreateOnly(ctx context.Context, key string, value []byte, l
 		return false, Hint(err)
 	}
 	defer func(duration *spanstat.SpanStat) {
-		increaseMetric(key, metricSet, "CreateOnly", duration.EndError(err).Total(), err)
+		increaseMetric(key, metricSet, "CreateOnly", duration.EndErrorTotal(err), err)
 	}(spanstat.Start())
 
 	req := client.OpPut(key, string(value), client.WithLease(leaseID))
@@ -1526,7 +1526,7 @@ func (e *etcdClient) ListPrefixIfLocked(ctx context.Context, prefix string, lock
 		return nil, Hint(err)
 	}
 	defer func(duration *spanstat.SpanStat) {
-		increaseMetric(prefix, metricRead, "ListPrefixLocked", duration.EndError(err).Total(), err)
+		increaseMetric(prefix, metricRead, "ListPrefixLocked", duration.EndErrorTotal(err), err)
 	}(spanstat.Start())
 
 	opGet := client.OpGet(prefix, client.WithPrefix())
@@ -1570,7 +1570,7 @@ func (e *etcdClient) ListPrefix(ctx context.Context, prefix string) (v KeyValueP
 		return nil, Hint(err)
 	}
 	defer func(duration *spanstat.SpanStat) {
-		increaseMetric(prefix, metricRead, "ListPrefix", duration.EndError(err).Total(), err)
+		increaseMetric(prefix, metricRead, "ListPrefix", duration.EndErrorTotal(err), err)
 	}(spanstat.Start())
 
 	getR, err := e.client.Get(ctx, prefix, client.WithPrefix())

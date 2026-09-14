@@ -717,7 +717,7 @@ func (m *Map) NextKey(key, nextKeyOut any) error {
 	err := m.m.NextKey(key, nextKeyOut)
 
 	if metrics.BPFSyscallDuration.IsEnabled() {
-		metrics.BPFSyscallDuration.WithLabelValues(metricOpGetNextKey, metrics.Error2Outcome(err)).Observe(duration.End(err == nil).Total().Seconds())
+		metrics.BPFSyscallDuration.WithLabelValues(metricOpGetNextKey, metrics.Error2Outcome(err)).Observe(duration.EndTotal(err == nil).Seconds())
 	}
 
 	return err
@@ -1243,7 +1243,7 @@ func (m *Map) Lookup(key MapKey) (MapValue, error) {
 	err := m.m.Lookup(key, value)
 
 	if metrics.BPFSyscallDuration.IsEnabled() {
-		metrics.BPFSyscallDuration.WithLabelValues(metricOpLookup, metrics.Error2Outcome(err)).Observe(duration.End(err == nil).Total().Seconds())
+		metrics.BPFSyscallDuration.WithLabelValues(metricOpLookup, metrics.Error2Outcome(err)).Observe(duration.EndTotal(err == nil).Seconds())
 	}
 
 	if err != nil {
@@ -1394,7 +1394,7 @@ func (m *Map) delete(key MapKey, ignoreMissing bool) (_ bool, err error) {
 	err = m.m.Delete(key)
 
 	if metrics.BPFSyscallDuration.IsEnabled() {
-		metrics.BPFSyscallDuration.WithLabelValues(metricOpDelete, metrics.Error2Outcome(err)).Observe(duration.End(err == nil).Total().Seconds())
+		metrics.BPFSyscallDuration.WithLabelValues(metricOpDelete, metrics.Error2Outcome(err)).Observe(duration.EndTotal(err == nil).Seconds())
 	}
 
 	if errors.Is(err, ebpf.ErrKeyNotExist) && ignoreMissing {
