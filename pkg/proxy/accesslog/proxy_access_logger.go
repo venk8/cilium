@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync/atomic"
 
 	"github.com/cilium/cilium/pkg/flowdebug"
 	"github.com/cilium/cilium/pkg/node"
@@ -28,10 +29,11 @@ type ProxyAccessLogger interface {
 type proxyAccessLogger struct {
 	logger *slog.Logger
 
-	notifier             LogRecordNotifier
-	endpointInfoRegistry EndpointInfoRegistry
-	localNodeStore       *node.LocalNodeStore
-	metadata             []string
+	notifier              LogRecordNotifier
+	endpointInfoRegistry  EndpointInfoRegistry
+	localNodeStore        *node.LocalNodeStore
+	metadata              []string
+	cachedNodeAddressInfo atomic.Pointer[NodeAddressInfo]
 }
 
 // LogRecordNotifier is the interface to implement LogRecord notifications.
@@ -70,19 +72,24 @@ func (r *proxyAccessLogger) NewLogRecord(ctx context.Context, t FlowType, ingres
 		NodeAddressInfo:   NodeAddressInfo{},
 	}
 
-	if r.localNodeStore != nil {
+	if cached := r.cachedNodeAddressInfo.Load(); cached != nil {
+		lr.NodeAddressInfo = *cached
+	} else if r.localNodeStore != nil {
 		ln, err := r.localNodeStore.Get(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get local node: %w", err)
 		}
 
+		var info NodeAddressInfo
 		if ip := ln.GetNodeIP(false); ip != nil {
-			lr.NodeAddressInfo.IPv4 = ip.String()
+			info.IPv4 = ip.String()
 		}
 
 		if ip := ln.GetNodeIP(true); ip != nil {
-			lr.NodeAddressInfo.IPv6 = ip.String()
+			info.IPv6 = ip.String()
 		}
+		r.cachedNodeAddressInfo.Store(&info)
+		lr.NodeAddressInfo = info
 	}
 
 	for _, tagFn := range tags {
@@ -90,7 +97,8 @@ func (r *proxyAccessLogger) NewLogRecord(ctx context.Context, t FlowType, ingres
 	}
 
 	if lr.Timestamp == "" {
-		lr.Timestamp = time.Now().UTC().Format(time.RFC3339Nano)
+		var buf [35]byte
+		lr.Timestamp = string(time.Now().UTC().AppendFormat(buf[:0], time.RFC3339Nano))
 	}
 
 	return &lr, nil
