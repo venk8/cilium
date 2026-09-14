@@ -123,10 +123,13 @@ func (s Selectors) WithRequirements(requirements []slim_metav1.LabelSelectorRequ
 	for _, sel := range s {
 		if ls, ok := sel.(*LabelSelector); ok {
 			// replace with LabelSelector with requirements added
+			matchExpressions := make([]slim_metav1.LabelSelectorRequirement, len(ls.ls.MatchExpressions), len(ls.ls.MatchExpressions)+len(requirements))
+			copy(matchExpressions, ls.ls.MatchExpressions)
+			matchExpressions = append(matchExpressions, requirements...)
 			sel = NewLabelSelector(api.EndpointSelector{
 				LabelSelector: &slim_metav1.LabelSelector{
 					MatchLabels:      ls.ls.MatchLabels,
-					MatchExpressions: append(slices.Clone(ls.ls.MatchExpressions), requirements...),
+					MatchExpressions: matchExpressions,
 				},
 			})
 		}
@@ -507,9 +510,9 @@ func (p *CIDRSelector) SelectedNamespaces() []string {
 }
 
 // hasCIDRLabel returns true if the labels contain an IPv4 (ip4==true) or IPv6 CIDR label.
-func hasCIDRLabel(lbls labels.Labels, is4 bool) bool {
-	for _, l := range lbls {
-		if pfx := l.GetCIDRPrefix(); pfx != nil {
+func hasCIDRLabel(ls labels.LabelArray, is4 bool) bool {
+	for i := range ls {
+		if pfx := ls[i].GetCIDRPrefix(); pfx != nil {
 			if pfx.IsValid() && pfx.Addr().Is4() == is4 {
 				return true
 			}
@@ -519,9 +522,18 @@ func hasCIDRLabel(lbls labels.Labels, is4 bool) bool {
 }
 
 func (p *CIDRSelector) Matches(ls labels.LabelArray) bool {
-	lbls := ls.Labels()
-	isWorld := lbls.HasWorldLabel()
-	isNode := lbls.HasHostLabel() || lbls.HasRemoteNodeLabel()
+	var isWorld, isNode bool
+	for i := range ls {
+		switch ls[i].Key {
+		case labels.IDNameWorld, labels.IDNameWorldIPv4, labels.IDNameWorldIPv6:
+			isWorld = true
+		case labels.IDNameHost, labels.IDNameRemoteNode:
+			isNode = true
+		}
+		if isWorld && isNode {
+			break
+		}
+	}
 	allowed := isWorld ||
 		(isNode && option.Config.PolicyCIDRMatchesNodes()) ||
 		(!isWorld && !isNode && option.Config.PolicyCIDRMatchesPods())
@@ -536,7 +548,7 @@ func (p *CIDRSelector) Matches(ls labels.LabelArray) bool {
 
 	for i := range p.requirements {
 		req := &p.requirements[i]
-		if matchesCIDRWildcard(req, lbls) {
+		if matchesCIDRWildcard(req, ls) {
 			continue // Wildcard requirement satisfied.
 		}
 		if !MatchesRequirement(req, ls) {
@@ -549,7 +561,7 @@ func (p *CIDRSelector) Matches(ls labels.LabelArray) bool {
 
 // matchesCIDRWildcard returns true if the requirement is a wildcard and matches
 // the target under the PolicyCIDRMatchesPods configuration.
-func matchesCIDRWildcard(req *Requirement, lbls labels.Labels) bool {
+func matchesCIDRWildcard(req *Requirement, ls labels.LabelArray) bool {
 	if !option.Config.PolicyCIDRMatchesPods() || req.key.Source != labels.LabelSourceReserved {
 		return false
 	}
@@ -557,10 +569,10 @@ func matchesCIDRWildcard(req *Requirement, lbls labels.Labels) bool {
 	isIPv4Req := (req.key.Key == labels.IDNameWorldIPv4 || req.key.Key == labels.IDNameWorld)
 	isIPv6Req := (req.key.Key == labels.IDNameWorldIPv6 || req.key.Key == labels.IDNameWorld)
 
-	if option.Config.IPv4Enabled() && isIPv4Req && hasCIDRLabel(lbls, true /* ip4 */) {
+	if option.Config.IPv4Enabled() && isIPv4Req && hasCIDRLabel(ls, true /* ip4 */) {
 		return true
 	}
-	if option.Config.IPv6Enabled() && isIPv6Req && hasCIDRLabel(lbls, false /* ip4 */) {
+	if option.Config.IPv6Enabled() && isIPv6Req && hasCIDRLabel(ls, false /* ip4 */) {
 		return true
 	}
 
@@ -573,6 +585,10 @@ func (p *CIDRSelector) GetFQDNSelector() (*api.FQDNSelector, bool) {
 
 // Includes prefixes referenced solely by "ExceptCIDRs" entries.
 func (p *CIDRSelector) GetCIDRPrefixes() (prefixes []netip.Prefix) {
+	if len(p.requirements) == 0 {
+		return nil
+	}
+	prefixes = make([]netip.Prefix, 0, len(p.requirements))
 	for idx := range p.requirements {
 		pfx := p.requirements[idx].GetKeyPrefix()
 		if pfx != nil {
