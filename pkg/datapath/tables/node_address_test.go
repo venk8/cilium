@@ -980,6 +980,34 @@ func BenchmarkPreferredIPv4Address(b *testing.B) {
 	}
 }
 
+func BenchmarkShowAddresses(b *testing.B) {
+	addrs := []NodeAddress{
+		{Addr: netip.MustParseAddr("10.0.0.1"), Primary: true, NodePort: true, DeviceName: "eth0"},
+		{Addr: netip.MustParseAddr("192.168.1.1"), Primary: false, NodePort: true, DeviceName: "eth0"},
+		{Addr: netip.MustParseAddr("172.16.0.1"), Primary: false, NodePort: false, DeviceName: "eth0"},
+		{Addr: netip.MustParseAddr("fe80::1"), Primary: true, NodePort: false, DeviceName: "eth0"},
+	}
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = showAddresses(addrs)
+	}
+}
+
+func BenchmarkNodeAddress_TableRow(b *testing.B) {
+	na := NodeAddress{
+		Addr:       netip.MustParseAddr("10.0.0.1"),
+		NodePort:   true,
+		Primary:    true,
+		DeviceName: "eth0",
+	}
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = na.TableRow()
+	}
+}
+
 func TestPreferredIPv6Address(t *testing.T) {
 	tests := []struct {
 		name  string
