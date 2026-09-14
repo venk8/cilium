@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/netip"
 
+	"go4.org/netipx"
 	"k8s.io/apimachinery/pkg/util/sets"
 
 	"github.com/cilium/cilium/api/v1/models"
@@ -67,11 +68,19 @@ func (n *linuxNodeHandler) getNodeIDForIP(nodeIP netip.Addr) (uint16, bool) {
 		logging.Fatal(n.log, "failed to retrieve local node")
 	}
 
-	if ip.AddrFromIP(ln.GetNodeIP(false)) == nodeIP || ip.AddrFromIP(ln.GetNodeIP(true)) == nodeIP {
-		return 0, true
+	if nodeIP.Is4() {
+		if ip.AddrFromIP(ln.GetNodeIP(false)) == nodeIP {
+			return 0, true
+		}
+	} else if nodeIP.Is6() {
+		if ip.AddrFromIP(ln.GetNodeIP(true)) == nodeIP {
+			return 0, true
+		}
 	}
 
-	if nodeID, exists := n.nodeIDsByIPs[nodeIP.String()]; exists {
+	var buf [64]byte
+	b := nodeIP.AppendTo(buf[:0])
+	if nodeID, exists := n.nodeIDsByIPs[string(b)]; exists {
 		return nodeID, true
 	}
 
@@ -82,9 +91,17 @@ func (n *linuxNodeHandler) getNodeIDForIP(nodeIP netip.Addr) (uint16, bool) {
 // for any of the node IP addresses. If none is found, 0 is returned.
 func (n *linuxNodeHandler) getNodeIDForNode(node *nodeTypes.Node) uint16 {
 	nodeID := uint16(0)
+	var buf [64]byte
 	for _, addr := range node.IPAddresses {
-		if id, exists := n.nodeIDsByIPs[addr.IP.String()]; exists {
-			nodeID = id
+		if netIP, ok := netipx.FromStdIP(addr.IP); ok {
+			b := netIP.AppendTo(buf[:0])
+			if id, exists := n.nodeIDsByIPs[string(b)]; exists {
+				nodeID = id
+			}
+		} else {
+			if id, exists := n.nodeIDsByIPs[addr.IP.String()]; exists {
+				nodeID = id
+			}
 		}
 	}
 	return nodeID
@@ -253,8 +270,8 @@ func (n *linuxNodeHandler) mapNodeID(ip string, id uint16, SPI uint8) error {
 // and the corresponding BPF map. If the BPF update fails, the indexes remain
 // unchanged.
 func (n *linuxNodeHandler) unmapNodeID(ip string) error {
-	// Check error cases first, to avoid having to cancel anything.
-	if _, exists := n.nodeIDsByIPs[ip]; !exists {
+	id, exists := n.nodeIDsByIPs[ip]
+	if !exists {
 		return fmt.Errorf("cannot remove IP %s from node ID map as it doesn't exist", ip)
 	}
 	nodeIP, err := netip.ParseAddr(ip)
@@ -265,11 +282,11 @@ func (n *linuxNodeHandler) unmapNodeID(ip string) error {
 	if err := n.nodeMap.Delete(nodeIP); err != nil {
 		return err
 	}
-	if id, exists := n.nodeIDsByIPs[ip]; exists {
-		delete(n.nodeIDsByIPs, ip)
+	delete(n.nodeIDsByIPs, ip)
 
-		n.nodeIPsByIDs[id].Delete(ip)
-		if n.nodeIPsByIDs[id].Len() == 0 {
+	if ipSet, ok := n.nodeIPsByIDs[id]; ok {
+		ipSet.Delete(ip)
+		if ipSet.Len() == 0 {
 			delete(n.nodeIPsByIDs, id)
 		}
 	}
@@ -302,23 +319,13 @@ func (n *linuxNodeHandler) DumpNodeIDs() []*models.NodeID {
 	n.mutex.Lock()
 	defer n.mutex.Unlock()
 
-	nodeIDs := map[uint16]*models.NodeID{}
-	for ip, id := range n.nodeIDsByIPs {
-		if nodeID, exists := nodeIDs[id]; exists {
-			nodeID.Ips = append(nodeID.Ips, ip)
-			nodeIDs[id] = nodeID
-		} else {
-			i := int64(id)
-			nodeIDs[id] = &models.NodeID{
-				ID:  &i,
-				Ips: []string{ip},
-			}
-		}
-	}
-
-	dump := make([]*models.NodeID, 0, len(nodeIDs))
-	for _, nodeID := range nodeIDs {
-		dump = append(dump, nodeID)
+	dump := make([]*models.NodeID, 0, len(n.nodeIPsByIDs))
+	for id, ips := range n.nodeIPsByIDs {
+		i := int64(id)
+		dump = append(dump, &models.NodeID{
+			ID:  &i,
+			Ips: ips.UnsortedList(),
+		})
 	}
 	return dump
 }
