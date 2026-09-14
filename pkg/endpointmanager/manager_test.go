@@ -5,6 +5,7 @@ package endpointmanager
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/netip"
 	"sync"
@@ -1117,4 +1118,28 @@ func TestUpdateCIDRLabelsPrefixScan(t *testing.T) {
 		}
 	}
 	assert.False(t, foundEP2Ctrl, "ep2 should not have triggered identity resolver")
+}
+
+func BenchmarkGetEndpointsByPodName(b *testing.B) {
+	s := setupEndpointManagerSuite(b)
+	logger := hivetest.Logger(b)
+	mgr := New(logger, nil, &dummyEpSyncher{}, nil, nil, nil, defaultEndpointManagerConfig)
+
+	for i := uint16(1); i <= 50; i++ {
+		model := newTestEndpointModel(int(i), endpoint.StateReady)
+		model.K8sNamespace = fmt.Sprintf("namespace-%d", i%5)
+		model.K8sPodName = fmt.Sprintf("pod-%d", i)
+		ep, err := endpoint.NewEndpointFromChangeModel(makeTestEndpointParams(logger, s), nil, &endpoint.FakeEndpointProxy{}, model, nil)
+		if err != nil {
+			b.Fatalf("failed to create endpoint: %v", err)
+		}
+		mgr.endpoints[i] = ep
+	}
+
+	target := "namespace-2/pod-22"
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		_ = mgr.GetEndpointsByPodName(target)
+	}
 }

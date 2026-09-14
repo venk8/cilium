@@ -672,3 +672,43 @@ func BenchmarkValidIPs_DualStack(b *testing.B) {
 		_ = ValidIPs(status)
 	}
 }
+
+func BenchmarkStripPodSpecialLabels(b *testing.B) {
+	testedLabels := map[string]string{
+		"app":                                "my-workload",
+		"tier":                               "backend",
+		k8sconst.PodNamespaceLabel:           "default",
+		"io.cilium.k8s.namespace.labels.env": "prod",
+		k8sconst.PolicyLabelServiceAccount:   "my-sa",
+		k8sconst.PolicyLabelCluster:          "cluster-1",
+		k8sconst.PodNameLabel:                "pod-12345",
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		_ = StripPodSpecialLabels(testedLabels)
+	}
+}
+
+func BenchmarkSanitizePodLabels(b *testing.B) {
+	testedLabels := map[string]string{
+		"app":                              "my-workload",
+		"tier":                             "backend",
+		k8sconst.PodNamespaceLabel:         "default",
+		k8sconst.PolicyLabelServiceAccount: "my-sa",
+		k8sconst.PolicyLabelCluster:        "cluster-1",
+		k8sconst.PodNameLabel:              "pod-12345",
+	}
+	fakeNs := &FakeNamespace{
+		Name: "default",
+		Labels: map[string]string{
+			"env":  "prod",
+			"zone": "us-west1-a",
+		},
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		_ = SanitizePodLabels(testedLabels, fakeNs, "my-sa", "cluster-1")
+	}
+}
