@@ -453,3 +453,43 @@ func TestParseCiliumNode(t *testing.T) {
 		IPv6IngressIP:           iputil.AddrFrom(netip.MustParseAddr("c0de::2")),
 	}, n)
 }
+
+func BenchmarkParseCiliumNode(b *testing.B) {
+	nodeResource := &ciliumv2.CiliumNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "foo", Namespace: "default"},
+		Spec: ciliumv2.NodeSpec{
+			Addresses: []ciliumv2.NodeAddress{
+				{Type: addressing.NodeInternalIP, IP: "2.2.2.2"},
+				{Type: addressing.NodeExternalIP, IP: "3.3.3.3"},
+				{Type: addressing.NodeInternalIP, IP: "c0de::1"},
+				{Type: addressing.NodeExternalIP, IP: "c0de::2"},
+			},
+			Encryption: ciliumv2.EncryptionSpec{
+				Key: 10,
+			},
+			IPAM: ipamTypes.IPAMSpec{
+				PodCIDRs: []iputil.Prefix{
+					iputil.PrefixFrom(netip.MustParsePrefix("10.10.0.0/16")),
+					iputil.PrefixFrom(netip.MustParsePrefix("c0de::/96")),
+					iputil.PrefixFrom(netip.MustParsePrefix("10.20.0.0/16")),
+					iputil.PrefixFrom(netip.MustParsePrefix("c0fe::/96")),
+				},
+			},
+			HealthAddressing: ciliumv2.HealthAddressingSpec{
+				IPv4: "1.1.1.1",
+				IPv6: "c0de::1",
+			},
+			IngressAddressing: ciliumv2.AddressPair{
+				IPV4: "1.1.1.2",
+				IPV6: "c0de::2",
+			},
+		},
+	}
+	clusterInfo := cmtypes.ClusterInfo{ID: 42, Name: "remote"}
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = ParseCiliumNode(nodeResource, clusterInfo)
+	}
+}
+

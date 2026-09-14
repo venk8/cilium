@@ -313,26 +313,26 @@ func ParseNode(logger *slog.Logger, k8sNode *slim_corev1.Node, source source.Sou
 	return newNode
 }
 
+func appendAllocCIDR(node *nodeTypes.Node, podCIDR netip.Prefix) {
+	prefix := nodeTypes.PrefixFrom(podCIDR)
+	if podCIDR.Addr().Is4() {
+		if !node.IPv4AllocCIDR.IsValid() {
+			node.IPv4AllocCIDR = prefix
+		} else {
+			node.IPv4SecondaryAllocCIDRs = append(node.IPv4SecondaryAllocCIDRs, prefix)
+		}
+	} else {
+		if !node.IPv6AllocCIDR.IsValid() {
+			node.IPv6AllocCIDR = prefix
+		} else {
+			node.IPv6SecondaryAllocCIDRs = append(node.IPv6SecondaryAllocCIDRs, prefix)
+		}
+	}
+}
+
 // ParseCiliumNode parses a CiliumNode custom resource and returns a Node
 // instance. Invalid IP and CIDRs are silently ignored
 func ParseCiliumNode(n *ciliumv2.CiliumNode, clusterInfo cmtypes.ClusterInfo) (node nodeTypes.Node) {
-	var appendAllocCIDR = func(node *nodeTypes.Node, podCIDR netip.Prefix) {
-		prefix := nodeTypes.PrefixFrom(podCIDR)
-		if podCIDR.Addr().Is4() {
-			if !node.IPv4AllocCIDR.IsValid() {
-				node.IPv4AllocCIDR = prefix
-			} else {
-				node.IPv4SecondaryAllocCIDRs = append(node.IPv4SecondaryAllocCIDRs, prefix)
-			}
-		} else {
-			if !node.IPv6AllocCIDR.IsValid() {
-				node.IPv6AllocCIDR = prefix
-			} else {
-				node.IPv6SecondaryAllocCIDRs = append(node.IPv6SecondaryAllocCIDRs, prefix)
-			}
-		}
-	}
-
 	wireguardPubKey, _ := annotation.Get(n, annotation.WireguardPubKey, annotation.WireguardPubKeyAlias)
 	node = nodeTypes.Node{
 		Name:            n.Name,
@@ -362,19 +362,34 @@ func ParseCiliumNode(n *ciliumv2.CiliumNode, clusterInfo cmtypes.ClusterInfo) (n
 		}
 	}
 
-	v4HealthIP, _ := netip.ParseAddr(n.Spec.HealthAddressing.IPv4)
-	v6HealthIP, _ := netip.ParseAddr(n.Spec.HealthAddressing.IPv6)
-	node.IPv4HealthIP = iputil.AddrFrom(v4HealthIP)
-	node.IPv6HealthIP = iputil.AddrFrom(v6HealthIP)
+	if n.Spec.HealthAddressing.IPv4 != "" {
+		if v4HealthIP, err := netip.ParseAddr(n.Spec.HealthAddressing.IPv4); err == nil {
+			node.IPv4HealthIP = iputil.AddrFrom(v4HealthIP)
+		}
+	}
+	if n.Spec.HealthAddressing.IPv6 != "" {
+		if v6HealthIP, err := netip.ParseAddr(n.Spec.HealthAddressing.IPv6); err == nil {
+			node.IPv6HealthIP = iputil.AddrFrom(v6HealthIP)
+		}
+	}
 
-	v4IngressIP, _ := netip.ParseAddr(n.Spec.IngressAddressing.IPV4)
-	v6IngressIP, _ := netip.ParseAddr(n.Spec.IngressAddressing.IPV6)
-	node.IPv4IngressIP = iputil.AddrFrom(v4IngressIP)
-	node.IPv6IngressIP = iputil.AddrFrom(v6IngressIP)
+	if n.Spec.IngressAddressing.IPV4 != "" {
+		if v4IngressIP, err := netip.ParseAddr(n.Spec.IngressAddressing.IPV4); err == nil {
+			node.IPv4IngressIP = iputil.AddrFrom(v4IngressIP)
+		}
+	}
+	if n.Spec.IngressAddressing.IPV6 != "" {
+		if v6IngressIP, err := netip.ParseAddr(n.Spec.IngressAddressing.IPV6); err == nil {
+			node.IPv6IngressIP = iputil.AddrFrom(v6IngressIP)
+		}
+	}
 
-	for _, address := range n.Spec.Addresses {
-		if ip := net.ParseIP(address.IP); ip != nil {
-			node.IPAddresses = append(node.IPAddresses, nodeTypes.Address{Type: address.Type, IP: ip})
+	if len(n.Spec.Addresses) > 0 {
+		node.IPAddresses = make([]nodeTypes.Address, 0, len(n.Spec.Addresses))
+		for _, address := range n.Spec.Addresses {
+			if ip := net.ParseIP(address.IP); ip != nil {
+				node.IPAddresses = append(node.IPAddresses, nodeTypes.Address{Type: address.Type, IP: ip})
+			}
 		}
 	}
 

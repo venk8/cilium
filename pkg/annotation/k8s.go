@@ -302,9 +302,14 @@ type annotatedObject interface {
 // Get returns the annotation value associated with the given key, or any of
 // the additional aliases if not found.
 func Get(obj annotatedObject, key string, aliases ...string) (value string, ok bool) {
-	keys := append([]string{key}, aliases...)
 	annotations := obj.GetAnnotations()
-	for _, k := range keys {
+	if annotations == nil {
+		return "", false
+	}
+	if value, ok = annotations[key]; ok {
+		return value, ok
+	}
+	for _, k := range aliases {
 		if value, ok = annotations[k]; ok {
 			return value, ok
 		}
