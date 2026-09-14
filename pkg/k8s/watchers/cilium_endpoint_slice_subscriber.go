@@ -94,24 +94,10 @@ func (cs *cesSubscriber) OnUpdate(oldCES, newCES *cilium_v2a1.CiliumEndpointSlic
 		oldMap[oldCES.Endpoints[i].Name] = &oldCES.Endpoints[i]
 	}
 
-	newMap := getCESIndexMap()
-	defer putCESIndexMap(newMap)
 	for i := range newCES.Endpoints {
-		newMap[newCES.Endpoints[i].Name] = &newCES.Endpoints[i]
-	}
-
-	// Handle, removed CEPs from the CES.
-	// old CES would have one or more stale cep entries, remove stale CEPs from oldCES.
-	for name, oldEP := range oldMap {
-		if _, exists := newMap[name]; !exists {
-			oldCEP := k8s.ConvertCoreCiliumEndpointToTypesCiliumEndpoint(oldEP, oldCES.Namespace)
-			cs.onDelete(newCES, oldCEP)
-		}
-	}
-
-	// Handle any new CEPs inserted in the CES.
-	for name, newEP := range newMap {
-		if _, exists := oldMap[name]; !exists {
+		newEP := &newCES.Endpoints[i]
+		oldEP, exists := oldMap[newEP.Name]
+		if !exists {
 			newCEP := k8s.ConvertCoreCiliumEndpointToTypesCiliumEndpoint(newEP, newCES.Namespace)
 			CEPName := newCEP.Namespace + "/" + newCEP.Name
 			cs.logger.Debug(
@@ -124,24 +110,26 @@ func (cs *cesSubscriber) OnUpdate(oldCES, newCES *cilium_v2a1.CiliumEndpointSlic
 				metrics.EndpointPropagationDelay.WithLabelValues().Observe(timeSinceCepCreated.Seconds())
 			}
 			cs.addCEPwithCES(CEPName, newCES.GetName(), newCEP)
+		} else {
+			delete(oldMap, newEP.Name)
+			if !oldEP.DeepEqual(newEP) {
+				newCEP := k8s.ConvertCoreCiliumEndpointToTypesCiliumEndpoint(newEP, newCES.Namespace)
+				CEPName := newCEP.Namespace + "/" + newCEP.Name
+				cs.logger.Debug(
+					"CES updated, calling endpointUpdated",
+					logfields.CESName, newCES.GetName(),
+					logfields.CEPName, CEPName,
+				)
+				cs.addCEPwithCES(CEPName, newCES.GetName(), newCEP)
+			}
 		}
 	}
 
-	// process if any CEP value changed from old to new
-	for name, newEP := range newMap {
-		if oldEP, exists := oldMap[name]; exists {
-			if oldEP.DeepEqual(newEP) {
-				continue
-			}
-			newCEP := k8s.ConvertCoreCiliumEndpointToTypesCiliumEndpoint(newEP, newCES.Namespace)
-			CEPName := newCEP.Namespace + "/" + newCEP.Name
-			cs.logger.Debug(
-				"CES updated, calling endpointUpdated",
-				logfields.CESName, newCES.GetName(),
-				logfields.CEPName, CEPName,
-			)
-			cs.addCEPwithCES(CEPName, newCES.GetName(), newCEP)
-		}
+	// Handle removed CEPs from the CES.
+	// Any remaining entries in oldMap were removed from newCES.
+	for _, oldEP := range oldMap {
+		oldCEP := k8s.ConvertCoreCiliumEndpointToTypesCiliumEndpoint(oldEP, oldCES.Namespace)
+		cs.onDelete(newCES, oldCEP)
 	}
 }
 
@@ -200,10 +188,7 @@ func (cs *cesSubscriber) deleteCEPfromCES(CEPName, CESName string, c *types.Cili
 func (cs *cesSubscriber) addCEPwithCES(CEPName, CESName string, newCep *types.CiliumEndpoint) {
 	cs.cepMap.cesMutex.Lock()
 	defer cs.cepMap.cesMutex.Unlock()
-	// Not checking if exists because it's fine and WAI if oldCep is nil.
-	// When there is no previous endpoint the endpointUpdated should be called with nil.
-	oldCep, _ := cs.cepMap.getCEPLocked(CEPName)
-	cs.cepMap.insertCEPLocked(CEPName, CESName, newCep)
+	oldCep := cs.cepMap.insertCEPLocked(CEPName, CESName, newCep)
 	cs.epWatcher.endpointUpdated(oldCep, newCep)
 }
 
@@ -236,12 +221,17 @@ func newCEPToCESMap() *cepToCESmap {
 	}
 }
 
-func (c *cepToCESmap) insertCEPLocked(cepName, cesName string, cep *types.CiliumEndpoint) {
-	if _, exists := c.cepMap[cepName]; !exists {
-		c.cepMap[cepName] = make(map[string]*types.CiliumEndpoint)
+func (c *cepToCESmap) insertCEPLocked(cepName, cesName string, cep *types.CiliumEndpoint) (oldCep *types.CiliumEndpoint) {
+	cesToCEPMap, exists := c.cepMap[cepName]
+	if !exists {
+		cesToCEPMap = make(map[string]*types.CiliumEndpoint, 1)
+		c.cepMap[cepName] = cesToCEPMap
+	} else if prevCES, ok := c.currentCES[cepName]; ok {
+		oldCep = cesToCEPMap[prevCES]
 	}
-	c.cepMap[cepName][cesName] = cep
+	cesToCEPMap[cesName] = cep
 	c.currentCES[cepName] = cesName
+	return oldCep
 }
 
 func (c *cepToCESmap) deleteCEPLocked(cepName, cesName string) {

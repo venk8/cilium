@@ -7,6 +7,7 @@ import (
 	"context"
 	"log/slog"
 	"net"
+	"slices"
 	"sync/atomic"
 
 	"github.com/cilium/hive/cell"
@@ -149,26 +150,22 @@ func (k *K8sCiliumEndpointsWatcher) endpointUpdated(oldEndpoint, endpoint *types
 		}
 	}()
 	var ipsAdded []string
+	if endpoint.Networking != nil {
+		ipsAdded = make([]string, 0, len(endpoint.Networking.Addressing)*2)
+	}
 	if oldEndpoint != nil && oldEndpoint.Networking != nil {
 		// Delete the old IP addresses from the IP cache
 		defer func() {
 			for _, oldPair := range oldEndpoint.Networking.Addressing {
-				v4Added, v6Added := false, false
-				for _, ipAdded := range ipsAdded {
-					if ipAdded == oldPair.IPV4 {
-						v4Added = true
-					}
-					if ipAdded == oldPair.IPV6 {
-						v6Added = true
-					}
-				}
-				if !v4Added {
+				v4Added := oldPair.IPV4 != "" && slices.Contains(ipsAdded, oldPair.IPV4)
+				v6Added := oldPair.IPV6 != "" && slices.Contains(ipsAdded, oldPair.IPV6)
+				if oldPair.IPV4 != "" && !v4Added {
 					portsChanged := k.ipcache.DeleteOnMetadataMatch(oldPair.IPV4, source.CustomResource, oldEndpoint.Namespace, oldEndpoint.Name, oldEndpoint.GetPodUID())
 					if portsChanged {
 						namedPortsChanged = true
 					}
 				}
-				if !v6Added {
+				if oldPair.IPV6 != "" && !v6Added {
 					portsChanged := k.ipcache.DeleteOnMetadataMatch(oldPair.IPV6, source.CustomResource, oldEndpoint.Namespace, oldEndpoint.Name, oldEndpoint.GetPodUID())
 					if portsChanged {
 						namedPortsChanged = true
