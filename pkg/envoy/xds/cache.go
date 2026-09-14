@@ -4,6 +4,8 @@
 package xds
 
 import (
+	"cmp"
+	"context"
 	"log/slog"
 	"slices"
 
@@ -248,27 +250,24 @@ func (c *Cache) HasAny(typeURL string) bool {
 }
 
 func compareVersionedResource(a, b VersionedResource) int {
-	if a.Name < b.Name {
-		return -1
-	}
-	if a.Name > b.Name {
-		return 1
-	}
-	return 0
+	return cmp.Compare(a.Name, b.Name)
 }
 
 func (c *Cache) GetResources(typeURL string, lastVersion uint64, resourceNames []string) *VersionedResources {
 	c.locker.RLock()
 	defer c.locker.RUnlock()
 
-	scopedLog := c.logger.With(
-		logfields.XDSAckedVersion, lastVersion,
-		logfields.XDSTypeURL, typeURL,
-	)
-
 	if lastVersion > 0 && c.version <= lastVersion {
 		// nothing has changed in the cache
 		return nil
+	}
+
+	var scopedLog *slog.Logger
+	if c.logger.Enabled(context.Background(), slog.LevelDebug) {
+		scopedLog = c.logger.With(
+			logfields.XDSAckedVersion, lastVersion,
+			logfields.XDSTypeURL, typeURL,
+		)
 	}
 
 	res := &VersionedResources{
@@ -285,10 +284,12 @@ func (c *Cache) GetResources(typeURL string, lastVersion uint64, resourceNames [
 			}
 			res.appendResource(k.resourceName, v.lastModifiedVersion, v.resource)
 		}
-		scopedLog.Debug(
-			"no resource names requested",
-			logfields.Resources, len(res.VersionedResources),
-		)
+		if scopedLog != nil {
+			scopedLog.Debug(
+				"no resource names requested",
+				logfields.Resources, len(res.VersionedResources),
+			)
+		}
 		return res
 	}
 
@@ -307,44 +308,54 @@ func (c *Cache) GetResources(typeURL string, lastVersion uint64, resourceNames [
 	allResourcesFound := true
 	updatedSinceLastVersion := false
 
-	scopedLog.Debug(
-		"resource names requested, filtering resources",
-		logfields.Resources, len(resourceNames),
-	)
+	if scopedLog != nil {
+		scopedLog.Debug(
+			"resource names requested, filtering resources",
+			logfields.Resources, len(resourceNames),
+		)
+	}
 
 	for _, name := range resourceNames {
 		k.resourceName = name
 		v, found := c.resources[k]
 		if found {
-			scopedLog.Debug(
-				"resource found, last modified in version",
-				logfields.LastModifiedVersion, v.lastModifiedVersion,
-				logfields.XDSResourceName, name,
-			)
+			if scopedLog != nil {
+				scopedLog.Debug(
+					"resource found, last modified in version",
+					logfields.LastModifiedVersion, v.lastModifiedVersion,
+					logfields.XDSResourceName, name,
+				)
+			}
 			if lastVersion == 0 || (lastVersion < v.lastModifiedVersion) {
 				updatedSinceLastVersion = true
 			}
 			res.appendResource(name, v.lastModifiedVersion, v.resource)
 		} else {
-			scopedLog.Debug(
-				"resource not found",
-				logfields.XDSResourceName, name,
-			)
+			if scopedLog != nil {
+				scopedLog.Debug(
+					"resource not found",
+					logfields.XDSResourceName, name,
+				)
+			}
 			allResourcesFound = false
 		}
 	}
 	if allResourcesFound && !updatedSinceLastVersion {
-		scopedLog.Debug("all requested resources found but not updated since last version, returning no response")
+		if scopedLog != nil {
+			scopedLog.Debug("all requested resources found but not updated since last version, returning no response")
+		}
 		return nil
 	}
 
 	slices.SortFunc(res.VersionedResources, compareVersionedResource)
 
-	scopedLog.Debug(
-		"returning resources",
-		logfields.ReturningResources, len(res.VersionedResources),
-		logfields.RequestedResources, len(resourceNames),
-	)
+	if scopedLog != nil {
+		scopedLog.Debug(
+			"returning resources",
+			logfields.ReturningResources, len(res.VersionedResources),
+			logfields.RequestedResources, len(resourceNames),
+		)
+	}
 	return res
 }
 
@@ -472,9 +483,15 @@ func (c *Cache) EnsureVersion(typeURL string, version uint64) {
 // Lookup finds the resource corresponding to the specified typeURL and resourceName,
 // if available, and returns it. Otherwise, returns nil.
 func (c *Cache) Lookup(typeURL string, resourceName string) proto.Message {
-	res := c.GetResources(typeURL, 0, []string{resourceName})
-	if res == nil || len(res.VersionedResources) == 0 {
-		return nil
+	c.locker.RLock()
+	defer c.locker.RUnlock()
+
+	k := cacheKey{
+		typeURL:      typeURL,
+		resourceName: resourceName,
 	}
-	return res.VersionedResources[0].Resource
+	if v, found := c.resources[k]; found {
+		return v.resource
+	}
+	return nil
 }

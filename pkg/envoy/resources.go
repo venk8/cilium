@@ -210,16 +210,8 @@ func (cache *NPHDSCache) OnIPIdentityCacheChange(modType ipcache.CacheModificati
 	oldHostIP, newHostIP net.IP, oldID *ipcache.Identity, newID ipcache.Identity,
 	encryptKey uint8, k8sMeta *ipcache.K8sMetadata, endpointFlags uint8,
 ) {
-	cidr := cidrCluster.AsIPNet()
-
-	cidrStr := cidr.String()
+	cidrStr := cidrCluster.AsPrefix().String()
 	resourceName := newID.ID.StringID()
-
-	scopedLog := cache.logger.With(
-		logfields.IPAddr, cidrStr,
-		logfields.Identity, resourceName,
-		logfields.Modification, modType,
-	)
 
 	// Look up the current resources for the specified Identity.
 	msg := cache.Lookup(NetworkPolicyHostsTypeURL, resourceName)
@@ -237,16 +229,20 @@ func (cache *NPHDSCache) OnIPIdentityCacheChange(modType ipcache.CacheModificati
 			// Recursive call to delete the 'cidr' from the 'oldID'
 			cache.OnIPIdentityCacheChange(ipcache.Delete, cidrCluster, nil, nil, nil, *oldID, encryptKey, k8sMeta, endpointFlags)
 		}
-		err := cache.handleIPUpsert(npHost, resourceName, cidrStr, newID.ID)
-		if err != nil {
-			scopedLog.Warn("NPHSD upsert failed",
+		if err := cache.handleIPUpsert(npHost, resourceName, cidrStr, newID.ID); err != nil {
+			cache.logger.Warn("NPHSD upsert failed",
+				logfields.IPAddr, cidrStr,
+				logfields.Identity, resourceName,
+				logfields.Modification, modType,
 				logfields.Error, err,
 			)
 		}
 	case ipcache.Delete:
-		err := cache.handleIPDelete(npHost, resourceName, cidrStr)
-		if err != nil {
-			scopedLog.Warn("NPHDS delete failed",
+		if err := cache.handleIPDelete(npHost, resourceName, cidrStr); err != nil {
+			cache.logger.Warn("NPHDS delete failed",
+				logfields.IPAddr, cidrStr,
+				logfields.Identity, resourceName,
+				logfields.Modification, modType,
 				logfields.Error, err,
 			)
 		}
@@ -257,19 +253,18 @@ func (cache *NPHDSCache) OnIPIdentityCacheChange(modType ipcache.CacheModificati
 func (cache *NPHDSCache) handleIPUpsert(npHost *envoyAPI.NetworkPolicyHosts, identityStr, cidrStr string, newID identity.NumericIdentity) error {
 	var hostAddresses []string
 	if npHost == nil {
-		hostAddresses = make([]string, 0, 1)
-		hostAddresses = append(hostAddresses, cidrStr)
+		hostAddresses = []string{cidrStr}
 	} else {
-		// Resource already exists, create a copy of it and insert
-		// the new IP address into its HostAddresses list, if not already there.
-		if slices.Contains(npHost.HostAddresses, cidrStr) {
+		// Resource already exists, insert the new IP address in sorted order, if not already there.
+		idx, found := slices.BinarySearch(npHost.HostAddresses, cidrStr)
+		if found {
 			// IP already exists, nothing to add
 			return nil
 		}
-		hostAddresses = make([]string, 0, len(npHost.HostAddresses)+1)
-		hostAddresses = append(hostAddresses, npHost.HostAddresses...)
-		hostAddresses = append(hostAddresses, cidrStr)
-		slices.Sort(hostAddresses)
+		hostAddresses = make([]string, len(npHost.HostAddresses)+1)
+		copy(hostAddresses[:idx], npHost.HostAddresses[:idx])
+		hostAddresses[idx] = cidrStr
+		copy(hostAddresses[idx+1:], npHost.HostAddresses[idx:])
 	}
 
 	newNpHost := envoyAPI.NetworkPolicyHosts{
@@ -286,22 +281,15 @@ func (cache *NPHDSCache) handleIPUpsert(npHost *envoyAPI.NetworkPolicyHosts, ide
 	return nil
 }
 
-// handleIPUpsert deletes elements from the NPHDS cache with the specified peer IP->ID mapping.
+// handleIPDelete deletes elements from the NPHDS cache with the specified peer IP->ID mapping.
 func (cache *NPHDSCache) handleIPDelete(npHost *envoyAPI.NetworkPolicyHosts, identityStr, cidrStr string) error {
 	if npHost == nil {
 		// Doesn't exist; already deleted.
 		return nil
 	}
 
-	targetIndex := -1
-
-	for i, endpointIP := range npHost.HostAddresses {
-		if endpointIP == cidrStr {
-			targetIndex = i
-			break
-		}
-	}
-	if targetIndex < 0 {
+	idx, found := slices.BinarySearch(npHost.HostAddresses, cidrStr)
+	if !found {
 		return errors.New("Can't find IP in NPHDS cache")
 	}
 
@@ -312,13 +300,9 @@ func (cache *NPHDSCache) handleIPDelete(npHost *envoyAPI.NetworkPolicyHosts, ide
 	} else {
 		// If the resource is to be updated, create a copy of it before
 		// removing the IP address from its HostAddresses list.
-		hostAddresses := make([]string, 0, len(npHost.HostAddresses)-1)
-		if len(npHost.HostAddresses) == targetIndex {
-			hostAddresses = append(hostAddresses, npHost.HostAddresses[0:targetIndex]...)
-		} else {
-			hostAddresses = append(hostAddresses, npHost.HostAddresses[0:targetIndex]...)
-			hostAddresses = append(hostAddresses, npHost.HostAddresses[targetIndex+1:]...)
-		}
+		hostAddresses := make([]string, len(npHost.HostAddresses)-1)
+		copy(hostAddresses[:idx], npHost.HostAddresses[:idx])
+		copy(hostAddresses[idx:], npHost.HostAddresses[idx+1:])
 
 		newNpHost := envoyAPI.NetworkPolicyHosts{
 			Policy:        uint64(npHost.Policy),
