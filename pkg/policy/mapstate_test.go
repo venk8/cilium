@@ -3468,3 +3468,30 @@ func permutations(arr []int) [][]int {
 	helper(arr, len(arr))
 	return res
 }
+
+func BenchmarkMapStateEntryPasses(b *testing.B) {
+	entry := newAllowEntryWithLabels(nil)
+	b.ResetTimer()
+	b.ReportAllocs()
+	for b.Loop() {
+		for pass := range entry.Passes() {
+			_ = pass
+		}
+	}
+}
+
+func BenchmarkKeySliceAll(b *testing.B) {
+	k1 := KeyForDirection(trafficdirection.Egress).WithPortProto(6, 80)
+	k2 := KeyForDirection(trafficdirection.Egress).WithPortProto(6, 443)
+	k3 := KeyForDirection(trafficdirection.Egress).WithPortProto(6, 8080)
+	b.ResetTimer()
+	b.ReportAllocs()
+	for b.Loop() {
+		var keys keySlice
+		keys = append(keys, k1, k2, k3)
+		for k := range keys.All() {
+			_ = k
+		}
+	}
+}
+
