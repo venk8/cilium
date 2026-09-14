@@ -230,3 +230,22 @@ func TestForcefulDraining(t *testing.T) {
 		t.Fail()
 	}
 }
+
+func BenchmarkEventQueue_EnqueueDequeue(b *testing.B) {
+	logger := hivetest.Logger(b)
+	q := NewEventQueueBuffered(logger, "bench-queue", 1024)
+	q.Run()
+	defer q.Stop()
+
+	dummy := &DummyEvent{}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		ev := NewEvent(dummy)
+		ch, err := q.Enqueue(ev)
+		if err != nil {
+			b.Fatalf("enqueue error: %v", err)
+		}
+		<-ch
+	}
+}
