@@ -922,14 +922,14 @@ func (a *Agent) Status(withPeers bool) (*models.WireguardStatus, error) {
 
 	var peers []*models.WireguardPeer
 	if withPeers {
-		peers = make([]*models.WireguardPeer, 0, len(dev.Peers))
-		for _, p := range dev.Peers {
-			allowedIPs := make([]string, 0, len(p.AllowedIPs))
-			for _, ip := range p.AllowedIPs {
-				allowedIPs = append(allowedIPs, ip.String())
+		peers = make([]*models.WireguardPeer, len(dev.Peers))
+		for i, p := range dev.Peers {
+			allowedIPs := make([]string, len(p.AllowedIPs))
+			for j, ip := range p.AllowedIPs {
+				allowedIPs[j] = ip.String()
 			}
 
-			peer := &models.WireguardPeer{
+			peers[i] = &models.WireguardPeer{
 				PublicKey:         p.PublicKey.String(),
 				Endpoint:          p.Endpoint.String(),
 				LastHandshakeTime: strfmt.DateTime(p.LastHandshakeTime),
@@ -937,7 +937,6 @@ func (a *Agent) Status(withPeers bool) (*models.WireguardStatus, error) {
 				TransferTx:        p.TransmitBytes,
 				TransferRx:        p.ReceiveBytes,
 			}
-			peers = append(peers, peer)
 		}
 	}
 
@@ -1028,12 +1027,18 @@ func (p *peerConfig) queueAllowedIPsRemove(ips ...net.IPNet) {
 // that are currently pending. If enableAllowedIPRemovals has not yet been
 // called, this method will not return any removals.
 func (p *peerConfig) queuedAllowedIPUpdates() (insert []net.IPNet, remove []net.IPNet) {
-	for _, ip := range p.needsInsert {
-		insert = append(insert, ip)
+	if len(p.needsInsert) > 0 {
+		insert = make([]net.IPNet, 0, len(p.needsInsert))
+		for _, ip := range p.needsInsert {
+			insert = append(insert, ip)
+		}
 	}
 
-	for _, ip := range p.needsRemove {
-		remove = append(remove, ip)
+	if len(p.needsRemove) > 0 {
+		remove = make([]net.IPNet, 0, len(p.needsRemove))
+		for _, ip := range p.needsRemove {
+			remove = append(remove, ip)
+		}
 	}
 
 	return

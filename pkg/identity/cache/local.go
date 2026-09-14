@@ -246,6 +246,14 @@ func (l *localIdentityCache) GetIdentities() map[identity.NumericIdentity]*ident
 	return maps.Clone(l.identitiesByID)
 }
 
+func (l *localIdentityCache) foreach(fn func(identity.NumericIdentity, *identity.Identity)) {
+	l.mutex.RLock()
+	defer l.mutex.RUnlock()
+	for nid, id := range l.identitiesByID {
+		fn(nid, id)
+	}
+}
+
 func (l *localIdentityCache) checkpoint(dst []*identity.Identity) []*identity.Identity {
 	l.mutex.RLock()
 	defer l.mutex.RUnlock()
