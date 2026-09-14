@@ -448,3 +448,40 @@ func TestTriggerControllerContext(t *testing.T) {
 		require.EqualValues(t, 2, cnt[1], "The controller without CancelDoFuncOnUpdate should have been retriggered by the queued trigger")
 	})
 }
+
+func BenchmarkManagerGetStatusModel(b *testing.B) {
+	mngr := NewManager()
+	for i := range 50 {
+		mngr.CreateController(fmt.Sprintf("ctrl-%d", i), ControllerParams{
+			DoFunc: NoopFunc,
+		})
+	}
+	defer mngr.RemoveAllAndWait()
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		statuses := mngr.GetStatusModel()
+		_ = statuses
+	}
+}
+
+func BenchmarkUpdateExistingController(b *testing.B) {
+	mngr := NewManager()
+	mngr.UpdateController("test", ControllerParams{
+		Group:  NewGroup("test"),
+		DoFunc: NoopFunc,
+	})
+	defer mngr.RemoveAllAndWait()
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		mngr.UpdateController("test", ControllerParams{
+			Group:  NewGroup("test"),
+			DoFunc: NoopFunc,
+		})
+	}
+}
+
+

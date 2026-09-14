@@ -358,7 +358,9 @@ func (c *controller) runController() {
 
 		c.mutex.Lock()
 		c.lastDuration = duration
-		c.logger.Debug("Controller func executed", logfields.Duration, c.lastDuration)
+		if c.logger.Enabled(context.Background(), slog.LevelDebug) {
+			c.logger.Debug("Controller func executed", logfields.Duration, c.lastDuration)
+		}
 
 		if err != nil {
 			if params.Context.Err() != nil {
