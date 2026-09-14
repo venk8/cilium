@@ -256,8 +256,12 @@ func (k *K8sPodWatcher) addK8sPodV1(ctx context.Context, pod *slim_corev1.Pod) e
 	}
 
 	if pod.Spec.HostNetwork {
-		hostPorts = strings.ReplaceAll(hostPorts, " ", "")
-		k.hostNetworkManager.AddNoTrackHostPorts(pod.Namespace, pod.Name, strings.Split(hostPorts, ","))
+		if hostPorts != "" {
+			hostPorts = strings.ReplaceAll(hostPorts, " ", "")
+			k.hostNetworkManager.AddNoTrackHostPorts(pod.Namespace, pod.Name, strings.Split(hostPorts, ","))
+		} else {
+			k.hostNetworkManager.AddNoTrackHostPorts(pod.Namespace, pod.Name, nil)
+		}
 	}
 
 	if shouldSkipHostNetworkPod(pod) {
@@ -332,8 +336,11 @@ func (k *K8sPodWatcher) replaceHostNetworkState(oldPod, newPod *slim_corev1.Pod)
 
 	switch {
 	case newPod.Spec.HostNetwork:
-		hostPorts = strings.ReplaceAll(hostPorts, " ", "")
-		ports := strings.Split(hostPorts, ",")
+		var ports []string
+		if hostPorts != "" {
+			hostPorts = strings.ReplaceAll(hostPorts, " ", "")
+			ports = strings.Split(hostPorts, ",")
+		}
 		if oldPod.Spec.HostNetwork && !validNoTrackHostPorts(ports) {
 			// The host-network manager leaves its existing desired state in place
 			// when parsing fails. A replacement must not retain rules owned by the
@@ -393,8 +400,12 @@ func (k *K8sPodWatcher) updateExistingK8sPodV1(ctx context.Context, oldK8sPod, n
 	}
 
 	if newK8sPod.Spec.HostNetwork {
-		hostPorts = strings.ReplaceAll(hostPorts, " ", "")
-		k.hostNetworkManager.AddNoTrackHostPorts(newK8sPod.Namespace, newK8sPod.Name, strings.Split(hostPorts, ","))
+		if hostPorts != "" {
+			hostPorts = strings.ReplaceAll(hostPorts, " ", "")
+			k.hostNetworkManager.AddNoTrackHostPorts(newK8sPod.Namespace, newK8sPod.Name, strings.Split(hostPorts, ","))
+		} else {
+			k.hostNetworkManager.AddNoTrackHostPorts(newK8sPod.Namespace, newK8sPod.Name, nil)
+		}
 	}
 
 	if shouldSkipHostNetworkPod(newK8sPod) {
@@ -481,13 +492,12 @@ func (k *K8sPodWatcher) reconcilePodEndpoints(oldK8sPod, newK8sPod *slim_corev1.
 	)
 
 	if forceLabels && !labelsChanged {
-		oldK8sPodLabels, _ := labelsfilter.Filter(labels.Map2Labels(oldK8sPod.ObjectMeta.Labels, labels.LabelSourceK8s))
-		oldPodLabels = k8sUtils.StripPodSpecialLabels(oldK8sPodLabels.K8sStringMap())
-
-		strippedNewLabels := k8sUtils.StripPodSpecialLabels(newK8sPod.Labels)
-
-		newK8sPodLabels, _ := labelsfilter.Filter(labels.Map2Labels(strippedNewLabels, labels.LabelSourceK8s))
-		newPodLabels = newK8sPodLabels.K8sStringMap()
+		if oldPodLabels == nil || newPodLabels == nil {
+			strippedNewLabels := k8sUtils.StripPodSpecialLabels(newK8sPod.Labels)
+			newK8sPodLabels, _ := labelsfilter.Filter(labels.Map2Labels(strippedNewLabels, labels.LabelSourceK8s))
+			newPodLabels = newK8sPodLabels.K8sStringMap()
+			oldPodLabels = newPodLabels
+		}
 	}
 
 	podNSName := k8sUtils.GetObjNamespaceName(&newK8sPod.ObjectMeta)
@@ -531,10 +541,8 @@ func (k *K8sPodWatcher) reconcilePodEndpoints(oldK8sPod, newK8sPod *slim_corev1.
 					newK8sPod.Annotations[bandwidth.Priority])
 			}
 			if annoChangedNoTrack {
-				podEP.UpdateNoTrackRules(func() string {
-					value, _ := annotation.Get(newK8sPod, annotation.NoTrack, annotation.NoTrackAlias)
-					return value
-				}())
+				value, _ := annotation.Get(newK8sPod, annotation.NoTrack, annotation.NoTrackAlias)
+				podEP.UpdateNoTrackRules(value)
 			}
 
 			if annoChangedFIBTableID {
@@ -743,7 +751,7 @@ func (k *K8sPodWatcher) upsertPodHostData(ctx context.Context, oldPod, newPod *s
 
 	var namedPortsChanged bool
 
-	ipSliceEqual := oldPodIPs != nil && oldPodIPs.DeepEqual(&newPodIPs)
+	ipSliceEqual := slices.Equal(oldPodIPs, newPodIPs)
 
 	defer func() {
 		if oldPod != nil && (!ipSliceEqual || replace) {
@@ -770,12 +778,11 @@ func (k *K8sPodWatcher) upsertPodHostData(ctx context.Context, oldPod, newPod *s
 		}
 	}()
 
-	specEqual := oldPod != nil && newPod.Spec.DeepEqual(&oldPod.Spec)
-	hostIPEqual := oldPod != nil && newPod.Status.HostIP == oldPod.Status.HostIP
-
-	// if spec, host IPs, and pod IPs are the same there no need to perform the remaining
-	// operations
-	if specEqual && hostIPEqual && ipSliceEqual && !replace {
+	// if spec, host IPs, and pod IPs are the same there no need to perform the remaining operations
+	if oldPod != nil && !replace &&
+		ipSliceEqual &&
+		newPod.Status.HostIP == oldPod.Status.HostIP &&
+		newPod.Spec.DeepEqual(&oldPod.Spec) {
 		return nil
 	}
 
