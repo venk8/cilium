@@ -153,6 +153,8 @@ func (p *policyContext) PolicyTrace(format string, a ...any) {
 
 var FallbackRedirectID = "fallback"
 
+var noopCloser = func() {}
+
 // SelectorPolicy represents a selectorPolicy, previously resolved from
 // the policy repository and ready to be distilled against a set of identities
 // to compute datapath-level policy configuration.
@@ -232,17 +234,21 @@ func (p *selectorPolicy) GetAuthTypes(remoteID identity.NumericIdentity) types.A
 	var resTypes types.AuthTypes
 	for cs, authTypes := range p.L4Policy.authMap {
 		missing := false
-		for authType := range authTypes {
-			if _, exists := resTypes[authType]; !exists {
-				missing = true
-				break
+		if resTypes == nil {
+			missing = len(authTypes) > 0
+		} else {
+			for authType := range authTypes {
+				if _, exists := resTypes[authType]; !exists {
+					missing = true
+					break
+				}
 			}
 		}
 		// Only check if 'cs' selects 'remoteID' if one of the authTypes is still missing
 		// from the result.
 		if missing && cs.Selects(remoteID) {
 			if resTypes == nil {
-				resTypes = make(types.AuthTypes, 1)
+				resTypes = make(types.AuthTypes, len(authTypes))
 			}
 			for authType := range authTypes {
 				resTypes[authType] = struct{}{}
@@ -251,6 +257,7 @@ func (p *selectorPolicy) GetAuthTypes(remoteID identity.NumericIdentity) types.A
 	}
 	return resTypes
 }
+
 
 func (p *selectorPolicy) Attach(ctx PolicyContext) {
 	p.L4Policy.Attach(ctx)
@@ -686,7 +693,7 @@ func (p *EndpointPolicy) ConsumeMapChanges() (closer func(), changes ChangeState
 
 	// Update current selector snapshot and provide a closer function to close the new snapshot
 	// if (and only if) the old one was already closed.
-	closer = func() {}
+	closer = noopCloser
 	if selectors.IsValid() {
 		var msg string
 		// update p.selectors so that any follow-on processing acts on the basis of the new

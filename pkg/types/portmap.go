@@ -348,6 +348,11 @@ func (npm *namedPortMultiMap) GetNamedPort(name string, proto u8proto.U8proto, n
 	return result, nil
 }
 
+type nidPort struct {
+	nid  identity.NumericIdentity
+	port uint16
+}
+
 // GetNamedPorts returns an iterator to numeric identity / port number pairs for the given
 // 'nids'. Numeric identities in "nids" are skipped in the output iterator if there is no named port
 // mapping for that specific identity, or if there are more than one port defined for the identity.
@@ -370,20 +375,21 @@ func (npm *namedPortMultiMap) GetNamedPorts(name string, proto u8proto.U8proto, 
 	if !ok {
 		return EmptyNidPortSeq
 	}
-	var resultNIDs []identity.NumericIdentity
-	var resultPorts []uint16
+	var results []nidPort
 	for nid := range nids {
 		port, ok, duplicate := pps.lookupNamedPort(proto, nid)
 		if !ok || duplicate {
 			continue
 		}
-		resultNIDs = append(resultNIDs, nid)
-		resultPorts = append(resultPorts, port)
+		results = append(results, nidPort{nid: nid, port: port})
+	}
+	if len(results) == 0 {
+		return EmptyNidPortSeq
 	}
 
 	return func(yield func(identity.NumericIdentity, uint16) bool) {
-		for i, nid := range resultNIDs {
-			if !yield(nid, resultPorts[i]) {
+		for _, np := range results {
+			if !yield(np.nid, np.port) {
 				return
 			}
 		}
@@ -391,21 +397,27 @@ func (npm *namedPortMultiMap) GetNamedPorts(name string, proto u8proto.U8proto, 
 }
 
 func (s NidPortSeq) Ports() []uint16 {
-	portSet := map[uint16]struct{}{}
-	var port uint16
-	for _, port = range s {
-		portSet[port] = struct{}{}
+	var firstPort uint16
+	hasFirst := false
+	var ports []uint16
+
+	for _, port := range s {
+		if !hasFirst {
+			firstPort = port
+			hasFirst = true
+		} else if port != firstPort {
+			if ports == nil {
+				ports = []uint16{firstPort, port}
+			} else if !slices.Contains(ports, port) {
+				ports = append(ports, port)
+			}
+		}
 	}
-	if len(portSet) == 0 {
+	if !hasFirst {
 		return nil
 	}
-	if len(portSet) == 1 {
-		return []uint16{port}
-	}
-
-	ports := make([]uint16, 0, len(portSet))
-	for port := range portSet {
-		ports = append(ports, port)
+	if ports == nil {
+		return []uint16{firstPort}
 	}
 	slices.Sort(ports)
 	return ports

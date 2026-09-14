@@ -113,6 +113,9 @@ func (a StringSet) Merge(b StringSet) StringSet {
 	if len(a) == 0 {
 		return b
 	}
+	if len(b) == 0 {
+		return a
+	}
 	for s := range b {
 		a[s] = struct{}{}
 	}
@@ -587,6 +590,9 @@ type L4Filter struct {
 // endpoints, which is true if the wildcard endpoint selector is present in the
 // map.
 func (l4 *L4Filter) SelectsAllEndpoints() bool {
+	if l4.wildcard != nil {
+		return true
+	}
 	for cs := range l4.PerSelectorPolicies {
 		if cs.IsWildcard() {
 			return true
