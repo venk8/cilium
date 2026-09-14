@@ -141,7 +141,7 @@ func (*Neighbor) TableHeader() []string {
 
 func (n *Neighbor) TableRow() []string {
 	return []string{
-		fmt.Sprintf("%d", n.LinkIndex),
+		strconv.Itoa(n.LinkIndex),
 		n.IPAddr.String(),
 		n.HardwareAddr.String(),
 		n.Type.String(),
@@ -197,7 +197,7 @@ var ndaStrings = [...]string{
 
 func (t NeighborType) String() string {
 	if t >= NDA_MAX {
-		return fmt.Sprintf("NDA_UNKNOWN(%d)", t)
+		return "NDA_UNKNOWN(" + strconv.FormatUint(uint64(t), 10) + ")"
 	}
 
 	return ndaStrings[t]
@@ -233,22 +233,25 @@ func (s NeighborState) String() string {
 		return "NONE"
 	}
 
-	var out string
+	var buf [64]byte
+	b := buf[:0]
 	for i := range 16 {
 		if s&(1<<i) != 0 {
-			if out != "" {
-				out += "|"
+			if len(b) > 0 {
+				b = append(b, '|')
 			}
 
 			if i < len(nudStrings) {
-				out += nudStrings[i]
+				b = append(b, nudStrings[i]...)
 			} else {
-				out += fmt.Sprintf("NUD_UNKNOWN(%d)", i)
+				b = append(b, "NUD_UNKNOWN("...)
+				b = strconv.AppendInt(b, int64(i), 10)
+				b = append(b, ')')
 			}
 		}
 	}
 
-	return out
+	return string(b)
 }
 
 type NeighborFlags uint8 // bit mask of neighbor flags (NTF_*)
@@ -280,22 +283,25 @@ func (f NeighborFlags) String() string {
 		return "NONE"
 	}
 
-	var out string
+	var buf [64]byte
+	b := buf[:0]
 	for i := range 8 {
 		if f&(1<<i) != 0 {
-			if out != "" {
-				out += "|"
+			if len(b) > 0 {
+				b = append(b, '|')
 			}
 
 			if i < len(ntfStrings) {
-				out += ntfStrings[i]
+				b = append(b, ntfStrings[i]...)
 			} else {
-				out += fmt.Sprintf("NTF_UNKNOWN(%d)", i)
+				b = append(b, "NTF_UNKNOWN("...)
+				b = strconv.AppendInt(b, int64(i), 10)
+				b = append(b, ')')
 			}
 		}
 	}
 
-	return out
+	return string(b)
 }
 
 type NeighborFlagsExt uint32 // bit mask of extended neighbor flags (NTF_EXT_*)
@@ -313,20 +319,23 @@ func (f NeighborFlagsExt) String() string {
 		return "NONE"
 	}
 
-	var out string
+	var buf [64]byte
+	b := buf[:0]
 	for i := range 32 {
 		if f&(1<<i) != 0 {
-			if out != "" {
-				out += "|"
+			if len(b) > 0 {
+				b = append(b, '|')
 			}
 
 			if i < len(ntfExtStrings) {
-				out += ntfExtStrings[i]
+				b = append(b, ntfExtStrings[i]...)
 			} else {
-				out += fmt.Sprintf("NTF_EXT_UNKNOWN(%d)", i)
+				b = append(b, "NTF_EXT_UNKNOWN("...)
+				b = strconv.AppendInt(b, int64(i), 10)
+				b = append(b, ')')
 			}
 		}
 	}
 
-	return out
+	return string(b)
 }
