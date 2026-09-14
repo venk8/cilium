@@ -103,16 +103,34 @@ func (p statusTypeSlice) Swap(i, j int) { p[i], p[j] = p[j], p[i] }
 
 // sortByPriority returns a statusLog ordered from highest priority to lowest.
 func (ps componentStatus) sortByPriority() statusLog {
-	prs := make(statusTypeSlice, 0, len(ps))
+	var buf [4]StatusType
+	prs := buf[:0]
+	if len(ps) > len(buf) {
+		prs = make([]StatusType, 0, len(ps))
+	}
 	for k := range ps {
 		prs = append(prs, k)
 	}
 	slices.SortFunc(prs, func(a, b StatusType) int { return cmp.Compare(b, a) })
-	slogSorted := make(statusLog, 0, len(prs))
-	for _, pr := range prs {
-		slogSorted = append(slogSorted, ps[pr])
+	slogSorted := make(statusLog, len(prs))
+	for i, pr := range prs {
+		slogSorted[i] = ps[pr]
 	}
 	return slogSorted
+}
+
+func (ps componentStatus) currentStatus() StatusCode {
+	bestPriority := StatusType(-1)
+	bestCode := OK
+	for typ, msg := range ps {
+		if msg != nil && msg.Status.Code != OK {
+			if bestCode == OK || typ > bestPriority {
+				bestPriority = typ
+				bestCode = msg.Status.Code
+			}
+		}
+	}
+	return bestCode
 }
 
 // EndpointStatus represents the endpoint status.
@@ -217,10 +235,19 @@ func (e *EndpointStatus) addStatusLog(s *statusLogMsg) {
 }
 
 func (e *EndpointStatus) GetModel() []*models.EndpointStatusChange {
+	return e.GetModelWithLimit(0)
+}
+
+// GetModelWithLimit returns up to limit status changes. If limit <= 0, all status changes are returned.
+func (e *EndpointStatus) GetModelWithLimit(limit int) []*models.EndpointStatusChange {
 	e.indexMU.RLock()
 	defer e.indexMU.RUnlock()
 
-	list := []*models.EndpointStatusChange{}
+	n := len(e.Log)
+	if limit > 0 && limit < n {
+		n = limit
+	}
+	list := make([]*models.EndpointStatusChange, 0, n)
 	for i := e.lastIndex(); ; i-- {
 		if i < 0 {
 			i = maxLogs - 1
@@ -232,6 +259,9 @@ func (e *EndpointStatus) GetModel() []*models.EndpointStatusChange {
 				Message:   e.Log[i].Status.Msg,
 				State:     models.EndpointState(e.Log[i].Status.State),
 			})
+			if limit > 0 && len(list) >= limit {
+				break
+			}
 		}
 		if i == e.Index {
 			break
@@ -243,13 +273,7 @@ func (e *EndpointStatus) GetModel() []*models.EndpointStatusChange {
 func (e *EndpointStatus) CurrentStatus() StatusCode {
 	e.indexMU.RLock()
 	defer e.indexMU.RUnlock()
-	sP := e.CurrentStatuses.sortByPriority()
-	for _, v := range sP {
-		if v.Status.Code != OK {
-			return v.Status.Code
-		}
-	}
-	return OK
+	return e.CurrentStatuses.currentStatus()
 }
 
 func (e *EndpointStatus) String() string {

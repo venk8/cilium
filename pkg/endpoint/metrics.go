@@ -4,7 +4,7 @@
 package endpoint
 
 import (
-	"maps"
+	"iter"
 
 	"github.com/cilium/cilium/api/v1/models"
 	loaderMetrics "github.com/cilium/cilium/pkg/datapath/loader/metrics"
@@ -26,8 +26,8 @@ type statistics interface {
 	GetMap() map[string]*spanstat.SpanStat
 }
 
-func sendMetrics(stats statistics, metric metric.Vec[metric.Observer]) {
-	for scope, stat := range stats.GetMap() {
+func sendMetrics(stats *regenerationStatistics, metric metric.Vec[metric.Observer]) {
+	for scope, stat := range stats.All() {
 		// Skip scopes that have not been hit (zero duration), so the count in
 		// the histogram accurately reflects the number of times each scope is
 		// hit, and the distribution is not incorrectly skewed towards zero.
@@ -89,23 +89,37 @@ func (s *regenerationStatistics) SendMetrics() {
 	sendMetrics(s, metrics.EndpointRegenerationTimeStats)
 }
 
+// All yields each statistic name and its SpanStat.
+func (s *regenerationStatistics) All() iter.Seq2[string, *spanstat.SpanStat] {
+	return func(yield func(string, *spanstat.SpanStat) bool) {
+		if !yield("waitingForLock", &s.waitingForLock) ||
+			!yield("waitingForCTClean", &s.waitingForCTClean) ||
+			!yield("policyCalculation", &s.policyCalculation) ||
+			!yield("proxyConfiguration", &s.proxyConfiguration) ||
+			!yield("waitForPolicyCompute", &s.waitForPolicyCompute) ||
+			!yield("endpointPolicyCalculation", &s.endpointPolicyCalculation) ||
+			!yield("proxyPolicyCalculation", &s.proxyPolicyCalculation) ||
+			!yield("proxyWaitForAck", &s.proxyWaitForAck) ||
+			!yield("mapSync", &s.mapSync) ||
+			!yield("prepareBuild", &s.prepareBuild) ||
+			!yield("total", &s.totalTime) ||
+			!yield("buildPermitAcquisition", &s.buildPermitAcquisition) {
+			return
+		}
+		for field, stat := range s.datapathRealization.GetMap() {
+			if !yield(field, stat) {
+				return
+			}
+		}
+	}
+}
+
 // GetMap returns a map which key is the stat name and the value is the stat
 func (s *regenerationStatistics) GetMap() map[string]*spanstat.SpanStat {
-	result := map[string]*spanstat.SpanStat{
-		"waitingForLock":            &s.waitingForLock,
-		"waitingForCTClean":         &s.waitingForCTClean,
-		"policyCalculation":         &s.policyCalculation,
-		"proxyConfiguration":        &s.proxyConfiguration,
-		"waitForPolicyCompute":      &s.waitForPolicyCompute,
-		"endpointPolicyCalculation": &s.endpointPolicyCalculation,
-		"proxyPolicyCalculation":    &s.proxyPolicyCalculation,
-		"proxyWaitForAck":           &s.proxyWaitForAck,
-		"mapSync":                   &s.mapSync,
-		"prepareBuild":              &s.prepareBuild,
-		"total":                     &s.totalTime,
-		"buildPermitAcquisition":    &s.buildPermitAcquisition,
+	result := make(map[string]*spanstat.SpanStat, 15)
+	for field, stat := range s.All() {
+		result[field] = stat
 	}
-	maps.Copy(result, s.datapathRealization.GetMap())
 	return result
 }
 
@@ -147,26 +161,45 @@ func (epPolicyMaps *endpointPolicyStatusMap) Remove(endpointID uint16) {
 
 // UpdateMetrics update the policy enforcement metrics statistics for the endpoints.
 func (epPolicyMaps *endpointPolicyStatusMap) UpdateMetrics() {
-	var totalMissingRedirects uint
-	policyStatus := map[models.EndpointPolicyEnabled]float64{
-		models.EndpointPolicyEnabledNone:             0,
-		models.EndpointPolicyEnabledEgress:           0,
-		models.EndpointPolicyEnabledIngress:          0,
-		models.EndpointPolicyEnabledBoth:             0,
-		models.EndpointPolicyEnabledAuditDashEgress:  0,
-		models.EndpointPolicyEnabledAuditDashIngress: 0,
-		models.EndpointPolicyEnabledAuditDashBoth:    0,
-	}
+	var (
+		totalMissingRedirects uint
+		countNone             float64
+		countEgress           float64
+		countIngress          float64
+		countBoth             float64
+		countAuditEgress      float64
+		countAuditIngress     float64
+		countAuditBoth        float64
+	)
 
 	epPolicyMaps.mutex.Lock()
 	for _, value := range epPolicyMaps.m {
-		policyStatus[value.enforcementStatus]++
+		switch value.enforcementStatus {
+		case models.EndpointPolicyEnabledNone:
+			countNone++
+		case models.EndpointPolicyEnabledEgress:
+			countEgress++
+		case models.EndpointPolicyEnabledIngress:
+			countIngress++
+		case models.EndpointPolicyEnabledBoth:
+			countBoth++
+		case models.EndpointPolicyEnabledAuditDashEgress:
+			countAuditEgress++
+		case models.EndpointPolicyEnabledAuditDashIngress:
+			countAuditIngress++
+		case models.EndpointPolicyEnabledAuditDashBoth:
+			countAuditBoth++
+		}
 		totalMissingRedirects += value.missingRedirectsCount
 	}
 	epPolicyMaps.mutex.Unlock()
 
-	for k, v := range policyStatus {
-		metrics.PolicyEndpointStatus.WithLabelValues(string(k)).Set(v)
-	}
+	metrics.PolicyEndpointStatus.WithLabelValues(string(models.EndpointPolicyEnabledNone)).Set(countNone)
+	metrics.PolicyEndpointStatus.WithLabelValues(string(models.EndpointPolicyEnabledEgress)).Set(countEgress)
+	metrics.PolicyEndpointStatus.WithLabelValues(string(models.EndpointPolicyEnabledIngress)).Set(countIngress)
+	metrics.PolicyEndpointStatus.WithLabelValues(string(models.EndpointPolicyEnabledBoth)).Set(countBoth)
+	metrics.PolicyEndpointStatus.WithLabelValues(string(models.EndpointPolicyEnabledAuditDashEgress)).Set(countAuditEgress)
+	metrics.PolicyEndpointStatus.WithLabelValues(string(models.EndpointPolicyEnabledAuditDashIngress)).Set(countAuditIngress)
+	metrics.PolicyEndpointStatus.WithLabelValues(string(models.EndpointPolicyEnabledAuditDashBoth)).Set(countAuditBoth)
 	metrics.PolicyMissingProxyRedirects.WithLabelValues().Set(float64(totalMissingRedirects))
 }
