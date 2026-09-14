@@ -231,10 +231,11 @@ func (i *identitySelector) updateSelections() {
 		return
 	}
 
-	ids := make(identity.NumericIdentitySlice, 0, len(i.cachedSelections))
-
+	ids := make(identity.NumericIdentitySlice, len(i.cachedSelections))
+	idx := 0
 	for nid := range i.cachedSelections {
-		ids = append(ids, nid)
+		ids[idx] = nid
+		idx++
 	}
 
 	// Sort the numeric identities so that the map iteration order

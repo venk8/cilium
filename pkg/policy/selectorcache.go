@@ -4,6 +4,7 @@
 package policy
 
 import (
+	"context"
 	"iter"
 	"log/slog"
 	"slices"
@@ -289,8 +290,12 @@ type SelectorCache struct {
 	userMutex lock.Mutex
 	// userNotes holds a FIFO list of user notifications to be made
 	userNotes []userNotification
+	// processingNotes is a reusable buffer for handleUserNotifications
+	processingNotes []userNotification
 	// notifiedUsers is a set of all notified users
 	notifiedUsers map[CachedSelectionUser]struct{}
+	// namespacesMap is a reusable map for multi-namespace UpdateIdentities (under sc.mutex)
+	namespacesMap map[string]identity.NumericIdentitySlice
 
 	// used to lazily start the handler for user notifications.
 	startNotificationsHandlerOnce sync.Once
@@ -403,13 +408,13 @@ func (sc *SelectorCache) handleUserNotifications() {
 		for len(sc.userNotes) == 0 {
 			sc.userCond.Wait()
 		}
-		// get the current batch of notifications and release the lock so that SelectorCache
-		// can't block on userMutex while we call IdentitySelectionUpdated callbacks below.
-		notifications := sc.userNotes
-		sc.userNotes = nil
+		// Copy pending notifications into processing buffer to reuse slice capacity
+		sc.processingNotes = append(sc.processingNotes[:0], sc.userNotes...)
+		sc.userNotes = sc.userNotes[:0]
 		sc.userMutex.Unlock()
 
-		for _, n := range notifications {
+		for i := range sc.processingNotes {
+			n := &sc.processingNotes[i]
 			// Allow testing code to stop the handler by sending a zero notification.
 			if n.user == nil && sc.userHandlerDone != nil {
 				close(sc.userHandlerDone)
@@ -423,6 +428,7 @@ func (sc *SelectorCache) handleUserNotifications() {
 			}
 			n.wg.Done()
 		}
+		clear(sc.processingNotes)
 	}
 }
 
@@ -459,7 +465,7 @@ func (sc *SelectorCache) queueNotifiedUsersCommit(txn SelectorSnapshot, wg *sync
 			wg:   wg,
 		})
 	}
-	sc.notifiedUsers = nil
+	clear(sc.notifiedUsers)
 	sc.userMutex.Unlock()
 	sc.userCond.Signal()
 }
@@ -467,9 +473,11 @@ func (sc *SelectorCache) queueNotifiedUsersCommit(txn SelectorSnapshot, wg *sync
 // NewSelectorCache creates a new SelectorCache with the given identities.
 func NewSelectorCache(logger *slog.Logger, ids identity.IdentityMap) *SelectorCache {
 	sc := &SelectorCache{
-		logger:    logger,
-		idCache:   newScIdentityCache(ids),
-		selectors: selectorMapInitializer(),
+		logger:        logger,
+		idCache:       newScIdentityCache(ids),
+		selectors:     selectorMapInitializer(),
+		notifiedUsers: make(map[CachedSelectionUser]struct{}),
+		namespacesMap: make(map[string]identity.NumericIdentitySlice),
 	}
 	sc.userCond = sync.NewCond(&sc.userMutex)
 	sc.writeableSelections = sc.readableSelections.Txn()
@@ -594,23 +602,19 @@ func (sc *SelectorCache) addSelectorsTxn(user CachedSelectionUser, selectors ...
 	added := false
 	for i, selector := range selectors {
 		// Check if the selector has already been cached
-		operationStart := time.Now()
 		key := selector.Key()
 		sel, exists := sc.selectors.Get(key)
 		if !exists {
+			operationStart := time.Now()
 			// add the selector to the selector cache
 			sel = sc.addSelectorLocked(key, selector)
+			selectorCacheOperationDuration.WithLabelValues(types.LabelValueSCOperationAddSelector, types.LabelValueSCOperation, types.LabelValueSCTypePeer).Observe(time.Since(operationStart).Seconds())
 		}
 
 		if sel.addUser(user, sc.localIdentityNotifier) {
 			added = true
 		}
 		css[i] = sel
-
-		if !exists {
-			selectorCacheOperationDuration.WithLabelValues(types.LabelValueSCOperationAddSelector, types.LabelValueSCOperation, types.LabelValueSCTypePeer).Observe(time.Since(operationStart).Seconds())
-		}
-
 	}
 	return css, added
 }
@@ -662,10 +666,10 @@ func (sc *SelectorCache) AddIdentitySelectorForTest(user CachedSelectionUser, es
 
 // lock must be held
 func (sc *SelectorCache) removeSelectorLocked(selector CachedSelector, user CachedSelectionUser) {
-	start := time.Now()
 	key := selector.String()
 	sel, exists := sc.selectors.Get(key)
 	if exists && sel.removeUser(user, sc.localIdentityNotifier) {
+		start := time.Now()
 		sc.selectors.Delete(sel)
 		sel.updateSelections()
 		selectorCacheOperationDuration.WithLabelValues(types.LabelValueSCOperationRemoveSelector, types.LabelValueSCOperation, types.LabelValueSCTypePeer).Observe(time.Since(start).Seconds())
@@ -710,6 +714,9 @@ func (sc *SelectorCache) ChangeUser(selector CachedSelector, from, to CachedSele
 // and thus a no-op. Is used to de-dup an ID update stream, because identical updates
 // may come from multiple sources.
 func (sc *SelectorCache) CanSkipUpdate(added, deleted identity.IdentityMap) bool {
+	if len(added) == 0 && len(deleted) == 0 {
+		return true
+	}
 	sc.mutex.RLock()
 	defer sc.mutex.RUnlock()
 
@@ -803,11 +810,6 @@ func (sc *SelectorCache) UpdateIdentities(added, deleted identity.IdentityMap, w
 		return false
 	}
 
-	// Map of namespaces to scan for updates with added identities in the map value. All
-	// identities are matched against selectors that have no namespace requirements.
-	namespaces := make(map[string]identity.NumericIdentitySlice, 1+len(added)+len(deleted))
-	namespaces[""] = make(identity.NumericIdentitySlice, 0, len(added))
-
 	start := time.Now()
 	sc.mutex.Lock()
 	defer sc.mutex.Unlock()
@@ -818,18 +820,45 @@ func (sc *SelectorCache) UpdateIdentities(added, deleted identity.IdentityMap, w
 	}()
 
 	nextRev := sc.revision + 1
+	debugEnabled := sc.logger.Enabled(context.Background(), slog.LevelDebug)
+
+	// Track namespaces for updates without allocating a map for the common <=1 specific namespace case
+	var specificNS string
+	var multiNS bool
+	var allAdded identity.NumericIdentitySlice
+	var specificAdded identity.NumericIdentitySlice
+
+	if len(added) > 0 {
+		allAdded = make(identity.NumericIdentitySlice, 0, len(added))
+	}
 
 	// Update idCache so that newly added selectors get
 	// prepopulated with all matching numeric identities.
 	for numericID := range deleted {
 		if old, exists := sc.idCache.find(numericID); exists {
-			sc.logger.Debug(
-				"UpdateIdentities: Deleting identity",
-				logfields.NewVersion, nextRev,
-				logfields.Identity, numericID,
-				logfields.Labels, old.lbls,
-			)
-			namespaces[old.namespace] = identity.NumericIdentitySlice{}
+			if debugEnabled {
+				sc.logger.Debug(
+					"UpdateIdentities: Deleting identity",
+					logfields.NewVersion, nextRev,
+					logfields.Identity, numericID,
+					logfields.Labels, old.lbls,
+				)
+			}
+			if old.namespace != "" {
+				if specificNS == "" {
+					specificNS = old.namespace
+				} else if specificNS != old.namespace {
+					if !multiNS {
+						multiNS = true
+						clear(sc.namespacesMap)
+						sc.namespacesMap[""] = allAdded
+						if specificNS != "" {
+							sc.namespacesMap[specificNS] = specificAdded
+						}
+					}
+					sc.namespacesMap[old.namespace] = identity.NumericIdentitySlice{}
+				}
+			}
 			sc.idCache.delete(numericID)
 		} else {
 			sc.logger.Warn(
@@ -847,11 +876,13 @@ func (sc *SelectorCache) UpdateIdentities(added, deleted identity.IdentityMap, w
 			// sorted for the kv-store, so there should
 			// not be too many false negatives.
 			if lbls.Equals(old.lbls) {
-				sc.logger.Debug(
-					"UpdateIdentities: Skipping add of an existing identical identity",
-					logfields.NewVersion, nextRev,
-					logfields.Identity, numericID,
-				)
+				if debugEnabled {
+					sc.logger.Debug(
+						"UpdateIdentities: Skipping add of an existing identical identity",
+						logfields.NewVersion, nextRev,
+						logfields.Identity, numericID,
+					)
+				}
 				delete(added, numericID)
 				continue
 			}
@@ -861,12 +892,14 @@ func (sc *SelectorCache) UpdateIdentities(added, deleted identity.IdentityMap, w
 			// the kube-apiserver is running on the local host, see
 			// ipcache.TriggerLabelInjection().
 			if numericID == identity.ReservedIdentityHost {
-				sc.logger.Debug(msg,
-					logfields.NewVersion, nextRev,
-					logfields.Identity, numericID,
-					logfields.Labels, old.lbls,
-					logfields.LabelsNew, lbls,
-				)
+				if debugEnabled {
+					sc.logger.Debug(msg,
+						logfields.NewVersion, nextRev,
+						logfields.Identity, numericID,
+						logfields.Labels, old.lbls,
+						logfields.LabelsNew, lbls,
+					)
+				}
 			} else {
 				sc.logger.Warn(msg,
 					logfields.NewVersion, nextRev,
@@ -876,32 +909,59 @@ func (sc *SelectorCache) UpdateIdentities(added, deleted identity.IdentityMap, w
 				)
 			}
 		} else {
-			sc.logger.Debug(
-				"UpdateIdentities: Adding a new identity",
-				logfields.NewVersion, nextRev,
-				logfields.Identity, numericID,
-				logfields.Labels, lbls,
-			)
+			if debugEnabled {
+				sc.logger.Debug(
+					"UpdateIdentities: Adding a new identity",
+					logfields.NewVersion, nextRev,
+					logfields.Identity, numericID,
+					logfields.Labels, lbls,
+				)
+			}
 		}
 		id := sc.idCache.insert(numericID, lbls)
 
-		namespaces[id.namespace] = append(namespaces[id.namespace], numericID)
-
-		// namespaced identities are also checked against non-namespeced selectors
+		allAdded = append(allAdded, numericID)
 		if id.namespace != "" {
-			namespaces[""] = append(namespaces[""], numericID)
+			if specificNS == "" {
+				specificNS = id.namespace
+				specificAdded = append(specificAdded, numericID)
+			} else if specificNS == id.namespace {
+				specificAdded = append(specificAdded, numericID)
+			} else {
+				if !multiNS {
+					multiNS = true
+					clear(sc.namespacesMap)
+					sc.namespacesMap[""] = allAdded
+					sc.namespacesMap[specificNS] = specificAdded
+				}
+				sc.namespacesMap[id.namespace] = append(sc.namespacesMap[id.namespace], numericID)
+			}
 		}
 	}
 
 	updated := false
 	if len(deleted)+len(added) > 0 {
-		for ns, nsAdded := range namespaces {
-			// Iterate through all locally used identity selectors and
-			// update the cached numeric identities as required.
-			for sel := range sc.selectors.selectorsByNamespace[ns] {
-				u, m := sc.updateSelections(sel, nsAdded, deleted, wg)
+		if !multiNS {
+			for sel := range sc.selectors.selectorsByNamespace[""] {
+				u, m := sc.updateSelections(sel, allAdded, deleted, wg)
 				updated = updated || u
 				mutated = mutated || m
+			}
+			if specificNS != "" {
+				for sel := range sc.selectors.selectorsByNamespace[specificNS] {
+					u, m := sc.updateSelections(sel, specificAdded, deleted, wg)
+					updated = updated || u
+					mutated = mutated || m
+				}
+			}
+		} else {
+			sc.namespacesMap[""] = allAdded
+			for ns, nsAdded := range sc.namespacesMap {
+				for sel := range sc.selectors.selectorsByNamespace[ns] {
+					u, m := sc.updateSelections(sel, nsAdded, deleted, wg)
+					updated = updated || u
+					mutated = mutated || m
+				}
 			}
 		}
 	}
