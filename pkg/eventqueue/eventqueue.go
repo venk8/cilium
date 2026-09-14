@@ -4,7 +4,7 @@
 package eventqueue
 
 import (
-	"fmt"
+	"errors"
 	"log/slog"
 	"reflect"
 	"sync"
@@ -95,25 +95,30 @@ func NewEventQueueBuffered(defaultLogger *slog.Logger, name string, numBufferedE
 // waiting to receive on such a channel will block forever. Returns an error
 // if the Event has been previously enqueued, if the Event is nil, or the queue
 // itself is not initialized properly.
+var (
+	errUnableToEnqueue      = errors.New("unable to Enqueue event")
+	errEventAlreadyEnqueued = errors.New("unable to Enqueue event; event has already had Enqueue called on it")
+)
+
 func (q *EventQueue) Enqueue(ev *Event) (<-chan any, error) {
 	if q.notSafeToAccess() || ev == nil {
-		return nil, fmt.Errorf("unable to Enqueue event")
+		return nil, errUnableToEnqueue
 	}
 
 	// Events can only be enqueued once.
 	if !ev.enqueued.CompareAndSwap(false, true) {
-		return nil, fmt.Errorf("unable to Enqueue event; event has already had Enqueue called on it")
+		return nil, errEventAlreadyEnqueued
 	}
 
 	// Multiple Enqueues can occur at the same time. Ensure that events channel
 	// is not closed while we are enqueueing events.
 	q.eventsMu.RLock()
-	defer q.eventsMu.RUnlock()
 
 	select {
 	// The event should be drained from the queue (e.g., it should not be
 	// processed).
 	case <-q.drain:
+		q.eventsMu.RUnlock()
 		// Closed eventResults channel signifies cancellation.
 		close(ev.cancelled)
 		close(ev.eventResults)
@@ -125,10 +130,15 @@ func (q *EventQueue) Enqueue(ev *Event) (<-chan any, error) {
 		// channel asynchronously! If the EventQueue is closed before this
 		// event is processed, then it will be cancelled.
 
-		ev.stats.waitEnqueue.Start()
-		ev.stats.waitConsumeOffQueue.Start()
+		if option.Config.Debug && ev.stats != nil {
+			ev.stats.waitEnqueue.Start()
+			ev.stats.waitConsumeOffQueue.Start()
+		}
 		q.events <- ev
-		ev.stats.waitEnqueue.End(true)
+		q.eventsMu.RUnlock()
+		if option.Config.Debug && ev.stats != nil {
+			ev.stats.waitEnqueue.End(true)
+		}
 		return ev.eventResults, nil
 	}
 }
@@ -154,7 +164,7 @@ type Event struct {
 
 	// stats is a field which contains information about when this event is
 	// enqueued, dequeued, etc.
-	stats eventStatistics
+	stats *eventStatistics
 
 	// enqueued specifies whether this event has been enqueued on an EventQueue.
 	enqueued atomic.Bool
@@ -177,12 +187,15 @@ type eventStatistics struct {
 
 // NewEvent returns an Event with all fields initialized.
 func NewEvent(meta EventHandler) *Event {
-	return &Event{
+	ev := &Event{
 		Metadata:     meta,
 		eventResults: make(chan any, 1),
 		cancelled:    make(chan struct{}),
-		stats:        eventStatistics{},
 	}
+	if option.Config.Debug {
+		ev.stats = &eventStatistics{}
+	}
+	return ev
 }
 
 // WasCancelled returns whether the cancelled channel for the given Event has
@@ -200,7 +213,7 @@ func (ev *Event) WasCancelled() bool {
 }
 
 func (ev *Event) printStats(q *EventQueue) {
-	if option.Config.Debug {
+	if option.Config.Debug && ev.stats != nil {
 		q.logger.Debug(
 			"EventQueue event processing statistics",
 			logfields.EventType, reflect.TypeOf(ev.Metadata).String(),
@@ -233,16 +246,22 @@ func (q *EventQueue) run() {
 		for ev := range q.events {
 			select {
 			case <-q.drain:
-				ev.stats.waitConsumeOffQueue.End(false)
+				if option.Config.Debug && ev.stats != nil {
+					ev.stats.waitConsumeOffQueue.End(false)
+				}
 				close(ev.cancelled)
 				close(ev.eventResults)
 				ev.printStats(q)
 			default:
-				ev.stats.waitConsumeOffQueue.End(true)
-				ev.stats.durationStat.Start()
+				if option.Config.Debug && ev.stats != nil {
+					ev.stats.waitConsumeOffQueue.End(true)
+					ev.stats.durationStat.Start()
+				}
 				ev.Metadata.Handle(ev.eventResults)
-				// Always indicate success for now.
-				ev.stats.durationStat.End(true)
+				if option.Config.Debug && ev.stats != nil {
+					// Always indicate success for now.
+					ev.stats.durationStat.End(true)
+				}
 				// Ensures that no more results can be sent as the event has
 				// already been processed.
 				ev.printStats(q)

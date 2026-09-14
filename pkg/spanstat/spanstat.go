@@ -28,16 +28,17 @@ func Start() *SpanStat {
 // Start starts a new span
 func (s *SpanStat) Start() *SpanStat {
 	s.mutex.Lock()
-	defer s.mutex.Unlock()
 	s.spanStart = time.Now()
+	s.mutex.Unlock()
 	return s
 }
 
 // EndError calls End() based on the value of err
 func (s *SpanStat) EndError(err error) *SpanStat {
 	s.mutex.Lock()
-	defer s.mutex.Unlock()
-	return s.end(err == nil)
+	s.end(err == nil)
+	s.mutex.Unlock()
+	return s
 }
 
 // End ends the current span and adds the measured duration to the total
@@ -45,8 +46,9 @@ func (s *SpanStat) EndError(err error) *SpanStat {
 // depending on the given success flag
 func (s *SpanStat) End(success bool) *SpanStat {
 	s.mutex.Lock()
-	defer s.mutex.Unlock()
-	return s.end(success)
+	s.end(success)
+	s.mutex.Unlock()
+	return s
 }
 
 // must be called with Lock() held
@@ -68,42 +70,45 @@ func (s *SpanStat) end(success bool) *SpanStat {
 // successes and failures
 func (s *SpanStat) Total() time.Duration {
 	s.mutex.RLock()
-	defer s.mutex.RUnlock()
-	return s.successDuration + s.failureDuration
+	d := s.successDuration + s.failureDuration
+	s.mutex.RUnlock()
+	return d
 }
 
 // SuccessTotal returns the total duration of all successful spans measured
 func (s *SpanStat) SuccessTotal() time.Duration {
 	s.mutex.RLock()
-	defer s.mutex.RUnlock()
-	return s.successDuration
+	d := s.successDuration
+	s.mutex.RUnlock()
+	return d
 }
 
 // FailureTotal returns the total duration of all unsuccessful spans measured
 func (s *SpanStat) FailureTotal() time.Duration {
 	s.mutex.RLock()
-	defer s.mutex.RUnlock()
-	return s.failureDuration
+	d := s.failureDuration
+	s.mutex.RUnlock()
+	return d
 }
 
 // Reset rests the duration measurements
 func (s *SpanStat) Reset() {
 	s.mutex.Lock()
-	defer s.mutex.Unlock()
 	s.successDuration = 0
 	s.failureDuration = 0
+	s.mutex.Unlock()
 }
 
 // Seconds returns the number of seconds represents by the spanstat. If a span
 // is still open, it is closed first.
 func (s *SpanStat) Seconds() float64 {
 	s.mutex.Lock()
-	defer s.mutex.Unlock()
 	if !s.spanStart.IsZero() {
 		s.end(true)
 	}
 
 	total := s.successDuration + s.failureDuration
+	s.mutex.Unlock()
 	return total.Seconds()
 }
 
@@ -112,6 +117,6 @@ func (s *SpanStat) Seconds() float64 {
 // (e.g., the standalone DNS proxy sending timing data via gRPC).
 func (s *SpanStat) SetSuccessDuration(d time.Duration) {
 	s.mutex.Lock()
-	defer s.mutex.Unlock()
 	s.successDuration = d
+	s.mutex.Unlock()
 }
