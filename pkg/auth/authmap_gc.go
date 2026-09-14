@@ -416,7 +416,7 @@ func (r *authMapGarbageCollector) cleanupEndpoints(_ context.Context) error {
 	r.ciliumIdentitiesMutex.RUnlock()
 
 	r.endpointsCacheMutex.RLock()
-	idsInUse := map[identity.NumericIdentity]struct{}{}
+	idsInUse := make(map[identity.NumericIdentity]struct{}, len(r.endpointsCache))
 	for _, ep := range r.endpointsCache {
 		if id, err := ep.GetSecurityIdentity(); err == nil && id != nil {
 			idsInUse[id.ID] = struct{}{}

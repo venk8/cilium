@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"maps"
 
 	"github.com/cilium/ebpf"
 
@@ -44,11 +43,11 @@ func (r *authMapCache) All() (map[authKey]authInfo, error) {
 	r.cacheEntriesMutex.RLock()
 	defer r.cacheEntriesMutex.RUnlock()
 
-	result := make(map[authKey]authInfo)
+	result := make(map[authKey]authInfo, len(r.cacheEntries))
 	for k, v := range r.cacheEntries {
 		result[k] = v.authInfo
 	}
-	return maps.Clone(result), nil
+	return result, nil
 }
 
 func (r *authMapCache) Get(key authKey) (authInfo, error) {
@@ -132,6 +131,9 @@ func (r *authMapCache) restoreCache() error {
 	all, err := r.authmap.All()
 	if err != nil {
 		return fmt.Errorf("failed to load all auth map entries: %w", err)
+	}
+	if len(r.cacheEntries) == 0 && len(all) > 0 {
+		r.cacheEntries = make(map[authKey]authInfoCache, len(all))
 	}
 	for k, v := range all {
 		r.cacheEntries[k] = authInfoCache{
