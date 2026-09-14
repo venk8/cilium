@@ -22,6 +22,11 @@ import (
 )
 
 var (
+	defaultPrefixV4 = netip.MustParsePrefix("0.0.0.0/0")
+	defaultPrefixV6 = netip.MustParsePrefix("::/0")
+	zeroIPv4        = netip.AddrFrom4([4]byte{})
+	zeroIPv6        = netip.AddrFrom16([16]byte{})
+
 	// Routing rule for traffic to proxy.
 	toProxyRule = route.Rule{
 		// Cilium bumps the default catch-all pref 0 routing rule that points at
@@ -164,10 +169,10 @@ func installToProxyRoutesIPv4(loDevice *tables.Device, routeManager *reconciler.
 	route4 := reconciler.DesiredRoute{
 		Owner:         routeOwner,
 		Table:         linux_defaults.RouteTableToProxy,
-		Prefix:        netip.MustParsePrefix("0.0.0.0/0"),
+		Prefix:        defaultPrefixV4,
 		AdminDistance: reconciler.AdminDistanceDefault,
 		Type:          reconciler.RTN_LOCAL,
-		Src:           netip.AddrFrom4([4]byte{}),
+		Src:           zeroIPv4,
 		Device:        loDevice,
 	}
 
@@ -196,10 +201,10 @@ func installToProxyRulesIPv6(loDevice *tables.Device, routeManager *reconciler.D
 	route6 := reconciler.DesiredRoute{
 		Owner:         routeOwner,
 		Table:         linux_defaults.RouteTableToProxy,
-		Prefix:        netip.MustParsePrefix("::/0"),
+		Prefix:        defaultPrefixV6,
 		AdminDistance: reconciler.AdminDistanceDefault,
 		Type:          route.RTN_LOCAL,
-		Src:           netip.AddrFrom16([16]byte{}),
+		Src:           zeroIPv6,
 		Device:        loDevice,
 	}
 
@@ -267,7 +272,7 @@ func installFromProxyRoutesIPv4(
 	fromProxyDefaultRoute4 := reconciler.DesiredRoute{
 		Owner:         routeOwner,
 		Table:         linux_defaults.RouteTableFromProxy,
-		Prefix:        netip.MustParsePrefix("0.0.0.0/0"),
+		Prefix:        defaultPrefixV4,
 		AdminDistance: reconciler.AdminDistanceDefault,
 
 		Nexthop: ipv4,
@@ -330,7 +335,7 @@ func installFromProxyRoutesIPv6(
 	fromProxyDefaultRoute6 := reconciler.DesiredRoute{
 		Owner:         routeOwner,
 		Table:         linux_defaults.RouteTableFromProxy,
-		Prefix:        netip.MustParsePrefix("::/0"),
+		Prefix:        defaultPrefixV6,
 		AdminDistance: reconciler.AdminDistanceDefault,
 
 		Nexthop: ipv6,

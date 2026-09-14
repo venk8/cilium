@@ -6,8 +6,6 @@ package proxyports
 import (
 	"bytes"
 	"os"
-	"regexp"
-	"strconv"
 
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/option"
@@ -23,10 +21,6 @@ var (
 		"/proc/net/tcp6": option.Config.EnableIPv6,
 		"/proc/net/udp6": option.Config.EnableIPv6,
 	}
-
-	// procNetFileRegexp matches the first two columns of /proc/net/{tcp,udp}*
-	// files and submatches on the local port number.
-	procNetFileRegexp = regexp.MustCompile("^ *[[:digit:]]*: *[[:xdigit:]]*:([[:xdigit:]]*) ")
 )
 
 // GetOpenLocalPorts returns the set of L4 ports currently open locally.
@@ -50,23 +44,75 @@ func (p *ProxyPorts) GetOpenLocalPorts() map[uint16]struct{} {
 
 		// Extract the local port number from the "local_address" column.
 		// The header line won't match and will be ignored.
-		for line := range bytes.SplitSeq(b, []byte("\n")) {
-			groups := procNetFileRegexp.FindSubmatch(line)
-			if len(groups) != 2 { // no match
-				continue
+		for len(b) > 0 {
+			line := b
+			if idx := bytes.IndexByte(b, '\n'); idx >= 0 {
+				line = b[:idx]
+				b = b[idx+1:]
+			} else {
+				b = nil
 			}
-			// The port number is in hexadecimal.
-			localPort, err := strconv.ParseUint(string(groups[1]), 16, 16)
-			if err != nil {
-				p.logger.Error("failed to parse port from proc file",
-					logfields.Path, file,
-					logfields.Error, err,
-				)
-				continue
+			if port, ok := parseProcNetPort(line); ok {
+				openLocalPorts[port] = struct{}{}
 			}
-			openLocalPorts[uint16(localPort)] = struct{}{}
 		}
 	}
 
 	return openLocalPorts
+}
+
+func parseProcNetPort(line []byte) (uint16, bool) {
+	i := 0
+	for i < len(line) && line[i] == ' ' {
+		i++
+	}
+	if i >= len(line) || line[i] < '0' || line[i] > '9' {
+		return 0, false
+	}
+	for i < len(line) && line[i] >= '0' && line[i] <= '9' {
+		i++
+	}
+	if i >= len(line) || line[i] != ':' {
+		return 0, false
+	}
+	i++
+	for i < len(line) && line[i] == ' ' {
+		i++
+	}
+	ipStart := i
+	for i < len(line) && isHex(line[i]) {
+		i++
+	}
+	if i == ipStart || i >= len(line) || line[i] != ':' {
+		return 0, false
+	}
+	i++
+	var port uint16
+	portStart := i
+	for i < len(line) && isHex(line[i]) {
+		val := hexVal(line[i])
+		port = (port << 4) | uint16(val)
+		i++
+	}
+	if i == portStart || i >= len(line) || line[i] != ' ' {
+		return 0, false
+	}
+	return port, true
+}
+
+func isHex(c byte) bool {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+}
+
+func hexVal(c byte) byte {
+	switch {
+	case c >= '0' && c <= '9':
+		return c - '0'
+	case c >= 'a' && c <= 'f':
+		return c - 'a' + 10
+	case c >= 'A' && c <= 'F':
+		return c - 'A' + 10
+	default:
+		return 0
+	}
 }
