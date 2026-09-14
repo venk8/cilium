@@ -91,9 +91,8 @@ type StatsValue struct {
 	Bytes   uint64 `align:"bytes"`
 }
 
-func (v *StatsValue) String() string {
-	bb := make([]byte, 0, 20)
-
+// AppendTo appends the string representation of StatsValue to bb.
+func (v *StatsValue) AppendTo(bb []byte) []byte {
 	if v.Packets == StatNotAvailable {
 		bb = append(bb, '-')
 	} else {
@@ -105,7 +104,12 @@ func (v *StatsValue) String() string {
 	} else {
 		bb = strconv.AppendUint(bb, v.Bytes, 10)
 	}
-	return string(bb)
+	return bb
+}
+
+func (v *StatsValue) String() string {
+	var buf [40]byte
+	return string(v.AppendTo(buf[:0]))
 }
 
 // StatsMap is a per-CPU map, so the value is a slice

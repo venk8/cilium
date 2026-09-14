@@ -113,12 +113,16 @@ func (pe PolicyEntry) IsDeny() bool {
 	return pe.Flags.is(policyFlagDeny)
 }
 
+// AppendTo appends the string representation of PolicyEntry to b.
+func (pe *PolicyEntry) AppendTo(b []byte) []byte {
+	b = strconv.AppendUint(b, uint64(pe.GetProxyPort()), 10)
+	b = append(b, ' ')
+	return strconv.AppendUint(b, uint64(pe.Flags.getPrefixLen()), 10)
+}
+
 func (pe *PolicyEntry) String() string {
 	var buf [32]byte
-	b := strconv.AppendUint(buf[:0], uint64(pe.GetProxyPort()), 10)
-	b = append(b, ' ')
-	b = strconv.AppendUint(b, uint64(pe.Flags.getPrefixLen()), 10)
-	return string(b)
+	return string(pe.AppendTo(buf[:0]))
 }
 
 func (pe *PolicyEntry) New() bpf.MapValue { return &PolicyEntry{} }
@@ -237,20 +241,26 @@ type PolicyEntryDump struct {
 // PolicyEntriesDump is a wrapper for a slice of PolicyEntryDump
 type PolicyEntriesDump []PolicyEntryDump
 
+const padSpaces20 = "                    "
+
 // String returns a string representation of PolicyEntriesDump
 func (p PolicyEntriesDump) String() string {
 	var sb strings.Builder
 	sb.Grow(len(p) * 60)
-	for _, entry := range p {
-		k := entry.Key.String()
-		if len(k) < 20 {
-			sb.WriteString(strings.Repeat(" ", 20-len(k)))
+	var lineBuf [128]byte
+	for i := range p {
+		entry := &p[i]
+		keyBytes := entry.Key.AppendTo(lineBuf[:0])
+		if len(keyBytes) < 20 {
+			sb.WriteString(padSpaces20[:20-len(keyBytes)])
 		}
-		sb.WriteString(k)
+		sb.Write(keyBytes)
 		sb.WriteString(": ")
-		sb.WriteString(entry.PolicyEntry.String())
+		peBytes := entry.PolicyEntry.AppendTo(lineBuf[:0])
+		sb.Write(peBytes)
 		sb.WriteByte(' ')
-		sb.WriteString(entry.StatsValue.String())
+		statsBytes := entry.StatsValue.AppendTo(lineBuf[:0])
+		sb.Write(statsBytes)
 		sb.WriteByte('\n')
 	}
 	return sb.String()
@@ -267,10 +277,10 @@ func (p PolicyEntriesDump) Sort() {
 			}
 			return 1
 		}
-		if c := cmp.Compare(a.Key.TrafficDirection, b.Key.TrafficDirection); c != 0 {
-			return c
-		}
-		return cmp.Compare(a.Key.Identity, b.Key.Identity)
+		return cmp.Or(
+			cmp.Compare(a.Key.TrafficDirection, b.Key.TrafficDirection),
+			cmp.Compare(a.Key.Identity, b.Key.Identity),
+		)
 	})
 }
 
@@ -332,15 +342,19 @@ func (key *PolicyKey) PortProtoString() string {
 	return string(key.appendPortProto(buf[:0]))
 }
 
-func (key *PolicyKey) String() string {
+// AppendTo appends the string representation of PolicyKey to b.
+func (key *PolicyKey) AppendTo(b []byte) []byte {
 	trafficDirectionString := trafficdirection.TrafficDirection(key.TrafficDirection).String()
-	var buf [64]byte
-	b := append(buf[:0], trafficDirectionString...)
+	b = append(b, trafficDirectionString...)
 	b = append(b, ':', ' ')
 	b = strconv.AppendUint(b, uint64(key.Identity), 10)
 	b = append(b, ' ')
-	b = key.appendPortProto(b)
-	return string(b)
+	return key.appendPortProto(b)
+}
+
+func (key *PolicyKey) String() string {
+	var buf [64]byte
+	return string(key.AppendTo(buf[:0]))
 }
 
 func (key *PolicyKey) New() bpf.MapKey { return &PolicyKey{} }
@@ -419,7 +433,7 @@ func (pm *policyMap) Dump() (string, error) {
 }
 
 func (pm *policyMap) DumpToSlice() (PolicyEntriesDump, error) {
-	entries := PolicyEntriesDump{}
+	entries := make(PolicyEntriesDump, 0, 64)
 
 	cb := func(key bpf.MapKey, value bpf.MapValue) {
 		eDump := PolicyEntryDump{
@@ -443,7 +457,7 @@ func (pm *policyMap) DumpToSlice() (PolicyEntriesDump, error) {
 }
 
 func (pm *policyMap) DumpToMapStateMap() (policyTypes.MapStateMap, error) {
-	out := make(policyTypes.MapStateMap)
+	out := make(policyTypes.MapStateMap, 64)
 
 	cb := func(bpfKey bpf.MapKey, bpfVal bpf.MapValue) {
 		key := bpfKey.(*PolicyKey)
