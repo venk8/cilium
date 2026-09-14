@@ -1821,17 +1821,33 @@ func (mc *MapChanges) consumeMapChanges(p *EndpointPolicy, features policyFeatur
 		}
 	}
 
-	changes := ChangeState{
-		Adds:    make(Keys, len(mc.synced)),
-		Deletes: make(Keys, len(mc.synced)),
-		old:     make(mapStateMap, len(mc.synced)),
+	var numAdds, numDeletes int
+	hasMultipleTiers := false
+	firstTier := mc.synced[0].Tier
+	for i := range mc.synced {
+		if mc.synced[i].Add {
+			numAdds++
+		} else {
+			numDeletes++
+		}
+		if !hasMultipleTiers && mc.synced[i].Tier != firstTier {
+			hasMultipleTiers = true
+		}
 	}
 
-	// sort changes in mc.synced so that we will insert higher tier rules first.
-	slices.SortFunc(mc.synced, func(a, b mapChange) int {
-		// lower tier values come first
-		return cmp.Compare(a.Tier, b.Tier)
-	})
+	if hasMultipleTiers {
+		// sort changes in mc.synced so that we will insert higher tier rules first.
+		slices.SortFunc(mc.synced, func(a, b mapChange) int {
+			// lower tier values come first
+			return cmp.Compare(a.Tier, b.Tier)
+		})
+	}
+
+	changes := ChangeState{
+		Adds:    make(Keys, numAdds),
+		Deletes: make(Keys, numDeletes),
+		old:     make(mapStateMap, numDeletes),
+	}
 
 	for i := range mc.synced {
 		key := mc.synced[i].Key

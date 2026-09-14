@@ -28,11 +28,8 @@ func ProxyStatsKey(ingress bool, protocol string, port, proxyPort uint16) string
 	return string(b)
 }
 
-// ProxyID returns a unique string to identify a proxy mapping.
-func ProxyID(endpointID uint16, ingress bool, protocol string, port uint16, listener string) string {
-	var buf [128]byte
-	b := buf[:0]
-	b = strconv.AppendUint(b, uint64(endpointID), 10)
+func appendProxyID(buf []byte, endpointID uint16, ingress bool, protocol string, port uint16, listener string) []byte {
+	b := strconv.AppendUint(buf, uint64(endpointID), 10)
 	b = append(b, ':')
 	if ingress {
 		b = append(b, "ingress:"...)
@@ -43,9 +40,13 @@ func ProxyID(endpointID uint16, ingress bool, protocol string, port uint16, list
 	b = append(b, ':')
 	b = strconv.AppendUint(b, uint64(port), 10)
 	b = append(b, ':')
-	b = append(b, listener...)
+	return append(b, listener...)
+}
 
-	return string(b)
+// ProxyID returns a unique string to identify a proxy mapping.
+func ProxyID(endpointID uint16, ingress bool, protocol string, port uint16, listener string) string {
+	var buf [128]byte
+	return string(appendProxyID(buf[:0], endpointID, ingress, protocol, port, listener))
 }
 
 // ParseProxyID parses a proxy ID returned by ProxyID and returns its components.

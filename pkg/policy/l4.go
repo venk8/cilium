@@ -790,7 +790,16 @@ func (l4 *L4Filter) toMapState(logger *slog.Logger, tierPriority, nextTierPriori
 			}
 		}
 
-		idents := cs.GetSelectionsAt(p.selectors)
+		var idents []identity.NumericIdentity
+		if !egressNamedPort && cs == l4.wildcard {
+			idents = AllAggregates
+		} else {
+			idents = cs.GetSelectionsAt(p.selectors)
+			if len(idents) == 0 {
+				continue
+			}
+		}
+
 		if egressNamedPort {
 			// Egress named ports can map to multiple ports that can be different for
 			// each selector.
@@ -821,10 +830,6 @@ func (l4 *L4Filter) toMapState(logger *slog.Logger, tierPriority, nextTierPriori
 				p.policyMapState.insertWithChanges(tierMaxPrecedence, keyToAdd, entry, features, changes)
 			}
 			continue
-		}
-
-		if cs == l4.wildcard {
-			idents = AllAggregates
 		}
 
 		// single port case, may be wildcard port

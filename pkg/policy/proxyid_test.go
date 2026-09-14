@@ -81,3 +81,20 @@ func BenchmarkParseProxyID(b *testing.B) {
 		_, _, _, _, _, _ = ParseProxyID(id)
 	}
 }
+
+func BenchmarkLookupRedirectPort(b *testing.B) {
+	epPolicy := &EndpointPolicy{
+		PolicyOwner: DummyOwner{},
+		Redirects: map[string]uint16{
+			ProxyID(1234, true, "TCP", 8080, "envoy-listener"): 18080,
+		},
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		port, err := epPolicy.LookupRedirectPort(true, "TCP", 8080, "envoy-listener")
+		if err != nil || port != 18080 {
+			b.Fatalf("unexpected result: port=%d, err=%v", port, err)
+		}
+	}
+}

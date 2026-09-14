@@ -231,6 +231,9 @@ func (p *selectorPolicy) GetEgressNamedPorts(name string, proto u8proto.U8proto,
 // remoteID, or nil if none. The selectorPolicy is treated as immutable after
 // creation, so no locking is required.
 func (p *selectorPolicy) GetAuthTypes(remoteID identity.NumericIdentity) types.AuthTypes {
+	if len(p.L4Policy.authMap) == 0 {
+		return nil
+	}
 	var resTypes types.AuthTypes
 	for cs, authTypes := range p.L4Policy.authMap {
 		missing := false
@@ -307,8 +310,12 @@ func (p *EndpointPolicy) GetPolicySelectors() SelectorSnapshot {
 // Returns an error if the redirect port can not be found.
 // This is called when accumulating incremental map changes, endpoint lock must not be taken.
 func (p *EndpointPolicy) LookupRedirectPort(ingress bool, protocol string, port uint16, listener string) (uint16, error) {
-	proxyID := ProxyID(uint16(p.PolicyOwner.GetID()), ingress, protocol, port, listener)
-	if proxyPort, exists := p.Redirects[proxyID]; exists {
+	if len(p.Redirects) == 0 {
+		return 0, errors.New("no proxy redirects configured")
+	}
+	var buf [128]byte
+	b := appendProxyID(buf[:0], uint16(p.PolicyOwner.GetID()), ingress, protocol, port, listener)
+	if proxyPort, exists := p.Redirects[string(b)]; exists {
 		return proxyPort, nil
 	}
 	// When simulating policy, we don't want to actually configure proxy. So, use the special
@@ -316,7 +323,7 @@ func (p *EndpointPolicy) LookupRedirectPort(ingress bool, protocol string, port 
 	if proxyPort, exists := p.Redirects[FallbackRedirectID]; len(p.Redirects) == 1 && exists {
 		return proxyPort, nil
 	}
-	return 0, fmt.Errorf("Proxy port for redirect %q not found", proxyID)
+	return 0, fmt.Errorf("Proxy port for redirect %q not found", string(b))
 }
 
 // Lookup finds the policy verdict applicable to the given 'key' using the same precedence logic
