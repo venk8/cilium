@@ -111,7 +111,7 @@ func (k *K8sCiliumNodeWatcher) ciliumNodeInit(ctx context.Context) {
 					needUpdate = k.onCiliumNodeUpdate(oldObj, event.Object)
 				}
 				if needUpdate {
-					cache[event.Key] = event.Object.DeepCopy()
+					cache[event.Key] = cloneForNodeWatcher(event.Object)
 				}
 			case resource.Delete:
 				k.onCiliumNodeDelete(event.Object)
@@ -120,6 +120,21 @@ func (k *K8sCiliumNodeWatcher) ciliumNodeInit(ctx context.Context) {
 			event.Done(nil)
 		}
 	}()
+}
+
+// cloneForNodeWatcher copies only the fields required by K8sCiliumNodeWatcher:
+// ObjectMeta (Labels and Annotations) and Spec. It skips Status to avoid retaining
+// large IPAM and ENI maps in watcher cache memory.
+func cloneForNodeWatcher(in *cilium_v2.CiliumNode) *cilium_v2.CiliumNode {
+	if in == nil {
+		return nil
+	}
+	out := new(cilium_v2.CiliumNode)
+	*out = *in
+	in.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
+	in.Spec.DeepCopyInto(&out.Spec)
+	out.Status = cilium_v2.NodeStatus{}
+	return out
 }
 
 func (k *K8sCiliumNodeWatcher) onCiliumNodeInsert(ciliumNode *cilium_v2.CiliumNode) bool {
@@ -132,8 +147,12 @@ func (k *K8sCiliumNodeWatcher) onCiliumNodeInsert(ciliumNode *cilium_v2.CiliumNo
 }
 
 func (k *K8sCiliumNodeWatcher) onCiliumNodeUpdate(oldNode, newNode *cilium_v2.CiliumNode) bool {
-	// Comparing Annotations here since wg-pub-key annotation is used to exchange rotated WireGuard keys.
-	if oldNode.DeepEqual(newNode) &&
+	// CiliumNode status updates do not affect node configuration parsed by ParseCiliumNode
+	// (which only consumes Spec and ObjectMeta Labels/Annotations). Comparing only Spec,
+	// Labels, and Annotations avoids triggering NodeUpdated events on remote node status churn.
+	// Comparing Annotations is required since wg-pub-key annotation exchanges rotated WireGuard keys.
+	if oldNode != nil && newNode != nil &&
+		oldNode.Spec.DeepEqual(&newNode.Spec) &&
 		maps.Equal(oldNode.ObjectMeta.Labels, newNode.ObjectMeta.Labels) &&
 		maps.Equal(oldNode.ObjectMeta.Annotations, newNode.ObjectMeta.Annotations) {
 		return false
