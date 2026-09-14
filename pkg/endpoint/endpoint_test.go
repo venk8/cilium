@@ -1700,3 +1700,45 @@ func BenchmarkGetNamedPortsModel(b *testing.B) {
 		_ = ep.getNamedPortsModel()
 	}
 }
+
+func BenchmarkComputeCIDRLabelsRLocked(b *testing.B) {
+	originalMode := option.Config.PolicyCIDRMatchMode
+	defer func() {
+		option.Config.PolicyCIDRMatchMode = originalMode
+	}()
+	option.Config.PolicyCIDRMatchMode = []string{"pods"}
+
+	podIP := netip.MustParseAddr("10.244.1.7")
+	lblCIDR := labels.NewLabel("10.244.1.0/24", "", labels.LabelSourceCIDR)
+	expected := labels.Labels{lblCIDR.GetExtendedKey(): lblCIDR}
+	mockIPC := &mockIPCache{labels: map[string]labels.Labels{
+		podIP.String(): expected,
+	}}
+
+	ep := &Endpoint{
+		IPv4:    podIP,
+		ipcache: mockIPC,
+	}
+
+	b.Run("Matched", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for b.Loop() {
+			_ = ep.computeCIDRLabelsRLocked()
+		}
+	})
+
+	epEmpty := &Endpoint{
+		IPv4:    podIP,
+		ipcache: &mockIPCache{labels: map[string]labels.Labels{}},
+	}
+	b.Run("FallbackWildcard", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for b.Loop() {
+			_ = epEmpty.computeCIDRLabelsRLocked()
+		}
+	})
+}
+
+

@@ -502,7 +502,7 @@ func (ipc *IPCache) upsertLocked(
 		ipc.identityToIPCache[newIdentity.ID] = map[string]struct{}{}
 	}
 	ipc.identityToIPCache[newIdentity.ID][ip] = struct{}{}
-	ipc.prefixLengths.Add([]netip.Prefix{cidrCluster.AsPrefix()})
+	ipc.prefixLengths.AddPrefix(cidrCluster.AsPrefix())
 
 	if hostIP == nil {
 		delete(ipc.ipToHostIPCache, ip)
@@ -813,7 +813,7 @@ func (ipc *IPCache) deleteLocked(ip string, source source.Source) (namedPortsCha
 	delete(ipc.ipToHostIPCache, ip)
 	delete(ipc.ipToK8sMetadata, ip)
 	delete(ipc.ipToEndpointFlags, ip)
-	ipc.prefixLengths.Delete([]netip.Prefix{cidrCluster.AsPrefix()})
+	ipc.prefixLengths.DeletePrefix(cidrCluster.AsPrefix())
 
 	// Update named ports
 	namedPortsChanged = false

@@ -2328,6 +2328,13 @@ func (e *Endpoint) runIdentityResolver(ctx context.Context, blocking bool, updat
 	return regenTriggered
 }
 
+var (
+	wildcardCIDRv4    = labels.ParseLabel("cidr:0.0.0.0/0")
+	wildcardCIDRv4Key = wildcardCIDRv4.GetExtendedKey()
+	wildcardCIDRv6    = labels.ParseLabel("cidr:::/0")
+	wildcardCIDRv6Key = wildcardCIDRv6.GetExtendedKey()
+)
+
 // computeCIDRLabelsRLocked should be called with a lock held on the Endpoint.
 func (e *Endpoint) computeCIDRLabelsRLocked() labels.Labels {
 	newCIDRLabels := labels.Labels{}
@@ -2335,7 +2342,7 @@ func (e *Endpoint) computeCIDRLabelsRLocked() labels.Labels {
 		return newCIDRLabels
 	}
 
-	for _, ip := range []netip.Addr{e.IPv4, e.IPv6} {
+	for _, ip := range [...]netip.Addr{e.IPv4, e.IPv6} {
 		if !ip.IsValid() {
 			continue
 		}
@@ -2352,14 +2359,11 @@ func (e *Endpoint) computeCIDRLabelsRLocked() labels.Labels {
 			}
 		}
 		if !hasCIDR {
-			var wildcard string
 			if ip.Is4() {
-				wildcard = "cidr:0.0.0.0/0"
+				newCIDRLabels[wildcardCIDRv4Key] = wildcardCIDRv4
 			} else {
-				wildcard = "cidr:::/0"
+				newCIDRLabels[wildcardCIDRv6Key] = wildcardCIDRv6
 			}
-			lbl := labels.ParseLabel(wildcard)
-			newCIDRLabels[lbl.GetExtendedKey()] = lbl
 		}
 	}
 
