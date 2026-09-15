@@ -743,6 +743,86 @@ func benchmarkIPCacheUpsert(b *testing.B, num int) {
 	}
 }
 
+func BenchmarkIPCacheDelete100(b *testing.B) {
+	logger := hivetest.Logger(b)
+	num := 100
+	buf := make([]byte, 4)
+	ips := make([]string, num)
+	for i := range num {
+		binary.BigEndian.PutUint32(buf, uint32(i+2<<26))
+		ip, _ := netip.AddrFromSlice(buf)
+		ips[i] = ip.String()
+	}
+
+	for b.Loop() {
+		b.StopTimer()
+		ipc := NewIPCache(&Configuration{
+			Context:         b.Context(),
+			Logger:          logger,
+			IdentityUpdater: &mockUpdater{},
+		})
+
+		for j := range num {
+			_, err := ipc.Upsert(ips[j], nil, 0, nil, Identity{
+				ID:     identityPkg.NumericIdentity(j),
+				Source: source.Kubernetes,
+			})
+			if err != nil {
+				b.Fatalf("failed to upsert: %v", err)
+			}
+		}
+
+		b.StartTimer()
+		for j := range num {
+			ipc.Delete(ips[j], source.Kubernetes)
+		}
+	}
+}
+
+func BenchmarkK8sMetadataEqual(b *testing.B) {
+	m1 := &K8sMetadata{
+		Namespace: "default",
+		PodName:   "app-1",
+		PodUID:    "uid-1",
+		NamedPorts: types.NamedPortMap{
+			"http": types.PortProto{Port: 80, Proto: u8proto.TCP},
+			"dns":  types.PortProto{Port: 53, Proto: u8proto.UDP},
+		},
+	}
+	m2 := &K8sMetadata{
+		Namespace: "default",
+		PodName:   "app-2",
+		PodUID:    "uid-2",
+		NamedPorts: types.NamedPortMap{
+			"http": types.PortProto{Port: 80, Proto: u8proto.TCP},
+			"dns":  types.PortProto{Port: 53, Proto: u8proto.UDP},
+		},
+	}
+	m3 := &K8sMetadata{
+		Namespace: "default",
+		PodName:   "app-1",
+		PodUID:    "uid-1",
+		NamedPorts: types.NamedPortMap{
+			"http": types.PortProto{Port: 80, Proto: u8proto.TCP},
+			"dns":  types.PortProto{Port: 53, Proto: u8proto.UDP},
+		},
+	}
+
+	b.Run("DifferentPods", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			_ = m1.Equal(m2)
+		}
+	})
+
+	b.Run("IdenticalPods", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			_ = m1.Equal(m3)
+		}
+	})
+}
+
 type dummyListener struct {
 	entries map[string]identityPkg.NumericIdentity
 	events  []recordedChange
