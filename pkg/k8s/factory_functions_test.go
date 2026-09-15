@@ -1304,3 +1304,37 @@ func Test_AnnotationsEqual(t *testing.T) {
 			relevantAnnoKey: relevantAnnoVal2,
 		}))
 }
+
+func BenchmarkConvertCoreCiliumEndpointToTypesCiliumEndpoint(b *testing.B) {
+	coreCEP := &cilium_v2a1.CoreCiliumEndpoint{
+		Name:       "test-endpoint",
+		IdentityID: 5678,
+		PodUID:     "test-pod-uid-5678",
+		Networking: &v2.EndpointNetworking{
+			Addressing: []*v2.AddressPair{
+				{
+					IPV4: "10.0.0.2",
+					IPV6: "fd00::2",
+				},
+			},
+			NodeIP: "192.168.1.2",
+		},
+		Encryption: v2.EncryptionSpec{
+			Key: 99,
+		},
+		NamedPorts: []*models.Port{
+			{
+				Name:     "grpc",
+				Port:     9090,
+				Protocol: "TCP",
+			},
+		},
+		ServiceAccount: "test-service-account",
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = ConvertCoreCiliumEndpointToTypesCiliumEndpoint(coreCEP, "test-namespace")
+	}
+}

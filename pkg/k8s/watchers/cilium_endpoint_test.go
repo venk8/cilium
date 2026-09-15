@@ -53,7 +53,9 @@ func (b *benchIPCacheManager) RemoveLabelsExcluded(lbls labels.Labels, toExclude
 
 func (b *benchIPCacheManager) DeleteOnMetadataMatch(IP string, source source.Source, namespace, name, uid string) bool {
 	b.deletes++
-	b.deletedIPs = append(b.deletedIPs, IP)
+	if len(b.deletedIPs) < 16 {
+		b.deletedIPs = append(b.deletedIPs, IP)
+	}
 	return false
 }
 
@@ -134,6 +136,48 @@ func BenchmarkK8sCiliumEndpointsWatcher_EndpointUpdated(b *testing.B) {
 			NodeIP: "192.168.1.1",
 			Addressing: v2.AddressPairList{
 				{IPV4: "10.244.0.2"},
+			},
+		},
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		k.endpointUpdated(oldEP, newEP)
+	}
+}
+
+func BenchmarkK8sCiliumEndpointsWatcher_EndpointUpdated_NoIPChange(b *testing.B) {
+	ipc := &benchIPCacheManager{}
+	k := &K8sCiliumEndpointsWatcher{
+		logger:         hivetest.Logger(b),
+		policyManager:  &benchPolicyManager{},
+		ipcache:        ipc,
+		localNodeStore: node.NewTestLocalNodeStore(node.LocalNode{}),
+		wgConfig:       fakewireguard.Config{},
+		ipsecConfig:    fakeipsec.Config{},
+	}
+	oldEP := &types.CiliumEndpoint{
+		ObjectMeta: slim_metav1.ObjectMeta{
+			Name:      "test-cep",
+			Namespace: "default",
+		},
+		Networking: &v2.EndpointNetworking{
+			NodeIP: "192.168.1.1",
+			Addressing: v2.AddressPairList{
+				{IPV4: "10.244.0.1"},
+			},
+		},
+	}
+	newEP := &types.CiliumEndpoint{
+		ObjectMeta: slim_metav1.ObjectMeta{
+			Name:      "test-cep",
+			Namespace: "default",
+		},
+		Networking: &v2.EndpointNetworking{
+			NodeIP: "192.168.1.1",
+			Addressing: v2.AddressPairList{
+				{IPV4: "10.244.0.1"},
 			},
 		},
 	}
