@@ -128,6 +128,10 @@ func (a Address) AddrType() addressing.AddressType {
 	return a.Type
 }
 
+func (a Address) GetIP() net.IP {
+	return a.IP
+}
+
 // IsNodeIP determines if addr is one of the node's IP addresses,
 // and returns which type of address it is. "" is returned if addr
 // is not one of the node's IP addresses.
