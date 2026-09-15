@@ -7,7 +7,6 @@ import (
 	"bytes"
 	"cmp"
 	"errors"
-	"fmt"
 	"net"
 	"net/netip"
 	"strconv"
@@ -96,22 +95,17 @@ func (a *AddrCluster) UnmarshalJSON(data []byte) error {
 // netip.ParseAddr()) or IP string + @ + ClusterID with decimal. Bare IP
 // string is considered as IP string + @ + ClusterID = 0.
 func ParseAddrCluster(s string) (AddrCluster, error) {
-	atIndex := strings.LastIndex(s, "@")
-
-	var (
-		addrStr      string
-		clusterIDStr string
-	)
-
+	atIndex := strings.LastIndexByte(s, '@')
 	if atIndex == -1 {
-		// s may be a bare IP address string, still valid
-		addrStr = s
-		clusterIDStr = ""
-	} else {
-		// s may be a IP + ClusterID string
-		addrStr = s[:atIndex]
-		clusterIDStr = s[atIndex+1:]
+		addr, err := netip.ParseAddr(s)
+		if err != nil {
+			return AddrCluster{}, err
+		}
+		return AddrCluster{addr: addr, clusterID: 0}, nil
 	}
+
+	addrStr := s[:atIndex]
+	clusterIDStr := s[atIndex+1:]
 
 	addr, err := netip.ParseAddr(addrStr)
 	if err != nil {
@@ -119,12 +113,7 @@ func ParseAddrCluster(s string) (AddrCluster, error) {
 	}
 
 	if clusterIDStr == "" {
-		if atIndex != len(s)-1 {
-			return AddrCluster{addr: addr, clusterID: 0}, nil
-		} else {
-			// handle the invalid case like "10.0.0.0@"
-			return AddrCluster{}, fmt.Errorf("empty cluster ID")
-		}
+		return AddrCluster{}, errors.New("empty cluster ID")
 	}
 
 	clusterID64, err := strconv.ParseUint(clusterIDStr, 10, 32)
@@ -298,22 +287,17 @@ func NewLocalPrefixCluster(prefix netip.Prefix) PrefixCluster {
 // netip.ParsePrefix()) or prefix string + @ + ClusterID with decimal. Bare prefix
 // string is considered as prefix string + @ + ClusterID = 0.
 func ParsePrefixCluster(s string) (PrefixCluster, error) {
-	atIndex := strings.LastIndex(s, "@")
-
-	var (
-		prefixStr    string
-		clusterIDStr string
-	)
-
+	atIndex := strings.LastIndexByte(s, '@')
 	if atIndex == -1 {
-		// s may be a bare IP prefix string, still valid
-		prefixStr = s
-		clusterIDStr = ""
-	} else {
-		// s may be a prefix + ClusterID string
-		prefixStr = s[:atIndex]
-		clusterIDStr = s[atIndex+1:]
+		prefix, err := netip.ParsePrefix(s)
+		if err != nil {
+			return PrefixCluster{}, err
+		}
+		return PrefixCluster{prefix: prefix, clusterID: 0}, nil
 	}
+
+	prefixStr := s[:atIndex]
+	clusterIDStr := s[atIndex+1:]
 
 	prefix, err := netip.ParsePrefix(prefixStr)
 	if err != nil {
@@ -321,12 +305,7 @@ func ParsePrefixCluster(s string) (PrefixCluster, error) {
 	}
 
 	if clusterIDStr == "" {
-		if atIndex != len(s)-1 {
-			return PrefixCluster{prefix: prefix, clusterID: 0}, nil
-		} else {
-			// handle the invalid case like "10.0.0.0/24@"
-			return PrefixCluster{}, fmt.Errorf("empty cluster ID")
-		}
+		return PrefixCluster{}, errors.New("empty cluster ID")
 	}
 
 	clusterID64, err := strconv.ParseUint(clusterIDStr, 10, 32)

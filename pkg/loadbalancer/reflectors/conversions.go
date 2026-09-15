@@ -56,7 +56,16 @@ var (
 	ipv4Family      = []slim_corev1.IPFamily{slim_corev1.IPv4Protocol}
 	ipv6Family      = []slim_corev1.IPFamily{slim_corev1.IPv6Protocol}
 	dualStackFamily = []slim_corev1.IPFamily{slim_corev1.IPv4Protocol, slim_corev1.IPv6Protocol}
+
+	emptyLabels = labels.Labels{}
 )
+
+func cachedFEPortName(name string) loadbalancer.FEPortName {
+	if name == "" {
+		return ""
+	}
+	return loadbalancer.FEPortName(cache.Strings.Get(name))
+}
 
 func convertService(cfg loadbalancer.Config, extCfg loadbalancer.ExternalConfig, rawlog *slog.Logger, localNode *node.LocalNode, svc *slim_corev1.Service, source source.Source) (s *loadbalancer.Service, fes []loadbalancer.FrontendParams) {
 	// Lazily construct the augmented logger as we very rarely log here.
@@ -71,11 +80,16 @@ func convertService(cfg loadbalancer.Config, extCfg loadbalancer.ExternalConfig,
 		return log
 	}
 
+	svcLabels := emptyLabels
+	if len(svc.Labels) > 0 {
+		svcLabels = labels.Map2Labels(svc.Labels, string(source))
+	}
+
 	name := loadbalancer.NewServiceName(svc.Namespace, svc.Name)
 	s = &loadbalancer.Service{
 		Name:                name,
 		Source:              source,
-		Labels:              labels.Map2Labels(svc.Labels, string(source)),
+		Labels:              svcLabels,
 		Selector:            svc.Spec.Selector,
 		Annotations:         svc.Annotations,
 		HealthCheckNodePort: uint16(svc.Spec.HealthCheckNodePort),
@@ -173,13 +187,20 @@ func convertService(cfg loadbalancer.Config, extCfg loadbalancer.ExternalConfig,
 	// ClusterIP
 	if expType.CanExpose(slim_corev1.ServiceTypeClusterIP) {
 		var clusterIPs []string
+		var stackIPs [4]string
 		if len(svc.Spec.ClusterIPs) == 1 {
 			clusterIPs = svc.Spec.ClusterIPs
 		} else if len(svc.Spec.ClusterIPs) > 1 {
-			clusterIPs = slices.Clone(svc.Spec.ClusterIPs)
+			if len(svc.Spec.ClusterIPs) <= len(stackIPs) {
+				clusterIPs = stackIPs[:len(svc.Spec.ClusterIPs)]
+				copy(clusterIPs, svc.Spec.ClusterIPs)
+			} else {
+				clusterIPs = slices.Clone(svc.Spec.ClusterIPs)
+			}
 			slices.Sort(clusterIPs)
 		} else if svc.Spec.ClusterIP != "" {
-			clusterIPs = []string{svc.Spec.ClusterIP}
+			stackIPs[0] = svc.Spec.ClusterIP
+			clusterIPs = stackIPs[:1]
 		}
 
 		if numPorts > 0 && len(clusterIPs) > 0 {
@@ -208,7 +229,7 @@ func convertService(cfg loadbalancer.Config, extCfg loadbalancer.ExternalConfig,
 			for _, port := range svc.Spec.Ports {
 				fe := loadbalancer.FrontendParams{
 					Type:        loadbalancer.SVCTypeClusterIP,
-					PortName:    loadbalancer.FEPortName(cache.Strings.Get(port.Name)),
+					PortName:    cachedFEPortName(port.Name),
 					ServiceName: name,
 					ServicePort: uint16(port.Port),
 				}
@@ -248,7 +269,7 @@ func convertService(cfg loadbalancer.Config, extCfg loadbalancer.ExternalConfig,
 
 						fe := loadbalancer.FrontendParams{
 							Type:        loadbalancer.SVCTypeNodePort,
-							PortName:    loadbalancer.FEPortName(cache.Strings.Get(port.Name)),
+							PortName:    cachedFEPortName(port.Name),
 							ServiceName: name,
 							ServicePort: uint16(port.Port),
 						}
@@ -305,7 +326,7 @@ func convertService(cfg loadbalancer.Config, extCfg loadbalancer.ExternalConfig,
 				for _, port := range svc.Spec.Ports {
 					fe := loadbalancer.FrontendParams{
 						Type:        loadbalancer.SVCTypeLoadBalancer,
-						PortName:    loadbalancer.FEPortName(cache.Strings.Get(port.Name)),
+						PortName:    cachedFEPortName(port.Name),
 						ServiceName: name,
 						ServicePort: uint16(port.Port),
 					}
@@ -342,7 +363,7 @@ func convertService(cfg loadbalancer.Config, extCfg loadbalancer.ExternalConfig,
 		for _, port := range svc.Spec.Ports {
 			fe := loadbalancer.FrontendParams{
 				Type:        loadbalancer.SVCTypeExternalIPs,
-				PortName:    loadbalancer.FEPortName(cache.Strings.Get(port.Name)),
+				PortName:    cachedFEPortName(port.Name),
 				ServiceName: name,
 				ServicePort: uint16(port.Port),
 			}
