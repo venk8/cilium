@@ -2337,10 +2337,10 @@ var (
 
 // computeCIDRLabelsRLocked should be called with a lock held on the Endpoint.
 func (e *Endpoint) computeCIDRLabelsRLocked() labels.Labels {
-	newCIDRLabels := labels.Labels{}
 	if !option.Config.PolicyCIDRMatchesPods() || e.ipcache == nil {
-		return newCIDRLabels
+		return labels.Labels{}
 	}
+	newCIDRLabels := make(labels.Labels, 2)
 
 	for _, ip := range [...]netip.Addr{e.IPv4, e.IPv6} {
 		if !ip.IsValid() {
