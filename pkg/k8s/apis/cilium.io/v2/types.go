@@ -528,6 +528,10 @@ func (n NodeAddress) AddrType() addressing.AddressType {
 	return n.Type
 }
 
+func (n NodeAddress) GetIP() net.IP {
+	return net.ParseIP(n.IP)
+}
+
 // GetIP returns one of the CiliumNode's IP addresses available with the
 // following priority:
 // - NodeInternalIP
