@@ -217,6 +217,16 @@ func (ac AddrCluster) String() string {
 	return ac.addr.String() + "@" + strconv.FormatUint(uint64(ac.clusterID), 10)
 }
 
+// AppendTo appends the string representation of AddrCluster to b and returns the extended slice.
+func (ac AddrCluster) AppendTo(b []byte) []byte {
+	b = ac.addr.AppendTo(b)
+	if ac.clusterID != 0 {
+		b = append(b, '@')
+		b = strconv.AppendUint(b, uint64(ac.clusterID), 10)
+	}
+	return b
+}
+
 // Is4 reports whether IP address part of AddrCluster is an IPv4 address.
 func (ac AddrCluster) Is4() bool {
 	return ac.addr.Is4()

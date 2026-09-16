@@ -20,6 +20,10 @@ func (v4 IPv4) String() string {
 	return v4.Addr().String()
 }
 
+func (v4 IPv4) AppendTo(b []byte) []byte {
+	return v4.Addr().AppendTo(b)
+}
+
 // FromAddr will populate the receiver with the specified address if and only
 // if the provided address is a valid IPv4 address. Any other address,
 // including the "invalid ip" value netip.Addr{} will zero the receiver.
