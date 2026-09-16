@@ -192,7 +192,7 @@ func (km *KVStoreMesh) synced(ctx context.Context, syncCallback func(context.Con
 		cancel()
 	}()
 
-	waiters := make([]wait.Fn, 0)
+	var waiters []wait.Fn
 	km.common.ForEachRemoteCluster(func(rci common.RemoteCluster) error {
 		rc := rci.(*remoteCluster)
 		waiters = append(waiters, rc.synced.Resources)

@@ -575,3 +575,46 @@ func TestNewLabelCIDR(t *testing.T) {
 		assert.Nil(t, lbl.cidr)
 	}
 }
+
+func TestFindReserved(t *testing.T) {
+	// No reserved labels
+	nonReserved := Labels{
+		"k8s:app": NewLabel("app", "test", LabelSourceK8s),
+	}
+	assert.Nil(t, nonReserved.FindReserved())
+
+	// With reserved labels
+	withReserved := Labels{
+		"k8s:app":        NewLabel("app", "test", LabelSourceK8s),
+		"reserved:world": NewLabel("world", "", LabelSourceReserved),
+	}
+	res := withReserved.FindReserved()
+	require.Len(t, res, 1)
+	assert.Equal(t, LabelSourceReserved, res[0].Source)
+}
+
+func BenchmarkFindReserved_NoReserved(b *testing.B) {
+	lbls := Labels{
+		"k8s:app":       NewLabel("app", "test", LabelSourceK8s),
+		"k8s:env":       NewLabel("env", "prod", LabelSourceK8s),
+		"k8s:component": NewLabel("component", "backend", LabelSourceK8s),
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = lbls.FindReserved()
+	}
+}
+
+func BenchmarkFindReserved_WithReserved(b *testing.B) {
+	lbls := Labels{
+		"k8s:app":        NewLabel("app", "test", LabelSourceK8s),
+		"k8s:env":        NewLabel("env", "prod", LabelSourceK8s),
+		"reserved:world": NewLabel("world", "", LabelSourceReserved),
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = lbls.FindReserved()
+	}
+}

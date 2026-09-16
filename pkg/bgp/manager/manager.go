@@ -4,12 +4,13 @@
 package manager
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/cilium/hive/cell"
@@ -733,12 +734,14 @@ func (m *BGPRouterManager) getErrorsFromTable(txn statedb.WriteTxn, instance str
 	var reconcileErrs []*tables.BGPReconcileError
 	iter := m.ReconcileErrorTable.List(txn, tables.BGPReconcileErrorsByInstance(instance))
 	for instanceErr := range iter {
-		reconcileErrs = append(reconcileErrs, instanceErr.DeepCopy())
+		reconcileErrs = append(reconcileErrs, instanceErr)
 	}
 	// sort errors based on ID
-	sort.Slice(reconcileErrs, func(i, j int) bool { return reconcileErrs[i].ErrorID < reconcileErrs[j].ErrorID })
+	slices.SortFunc(reconcileErrs, func(a, b *tables.BGPReconcileError) int {
+		return cmp.Compare(a.ErrorID, b.ErrorID)
+	})
 
-	var errs []error
+	errs := make([]error, 0, len(reconcileErrs))
 	for _, rErr := range reconcileErrs {
 		errs = append(errs, errors.New(rErr.Error))
 	}

@@ -45,10 +45,12 @@ func GetPodMetadata(logger *slog.Logger, clusterInfo cmtypes.ClusterInfo, k8sNs 
 
 	labels := k8sUtils.SanitizePodLabels(pod.ObjectMeta.Labels, k8sNs, pod.Spec.ServiceAccountName, clusterInfo.Name)
 
-	namedPorts = make(ciliumTypes.NamedPortMap)
 	for _, containers := range pod.Spec.Containers {
 		for _, port := range containers.Ports {
 			if port.Name != "" {
+				if namedPorts == nil {
+					namedPorts = make(ciliumTypes.NamedPortMap)
+				}
 				if err := namedPorts.AddPort(port.Name, int(port.ContainerPort), string(port.Protocol)); err != nil {
 					logger.Warn("Adding named port failed", logfields.Error, err)
 				}

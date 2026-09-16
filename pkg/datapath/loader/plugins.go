@@ -10,7 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/cilium/ebpf"
@@ -1051,25 +1051,25 @@ func (g pluginDependencyGraph) after(a, b string) {
 
 // sortedNodes sorts plugins by name in ascending order.
 func (g pluginDependencyGraph) sortedNodes() []string {
-	var nodes []string
+	nodes := make([]string, 0, len(g))
 
 	for n := range g {
 		nodes = append(nodes, n)
 	}
 
-	sort.Strings(nodes)
+	slices.Sort(nodes)
 	return nodes
 }
 
 // sortedNodes sorts after dependencies for plugin n in ascending order.
 func (g pluginDependencyGraph) sortedOutgoing(n string) []string {
-	var outgoing []string
+	outgoing := make([]string, 0, len(g[n].outgoing))
 
 	for o := range g[n].outgoing {
 		outgoing = append(outgoing, o)
 	}
 
-	sort.Strings(outgoing)
+	slices.Sort(outgoing)
 	return outgoing
 }
 

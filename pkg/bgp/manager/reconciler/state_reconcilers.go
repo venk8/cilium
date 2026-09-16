@@ -4,9 +4,10 @@
 package reconciler
 
 import (
+	"cmp"
 	"context"
 	"log/slog"
-	"sort"
+	"slices"
 
 	"github.com/cilium/hive/cell"
 
@@ -71,7 +72,7 @@ func GetActiveStateReconcilers(logger *slog.Logger, reconcilers []StateReconcile
 		recMap[r.Name()] = r
 	}
 
-	var activeReconcilers []StateReconciler
+	activeReconcilers := make([]StateReconciler, 0, len(recMap))
 	for _, r := range recMap {
 		logger.Debug("Adding BGP reconciler",
 			types.ReconcilerLogField, r.Name(),
@@ -79,8 +80,8 @@ func GetActiveStateReconcilers(logger *slog.Logger, reconcilers []StateReconcile
 		)
 		activeReconcilers = append(activeReconcilers, r)
 	}
-	sort.Slice(activeReconcilers, func(i, j int) bool {
-		return activeReconcilers[i].Priority() < activeReconcilers[j].Priority()
+	slices.SortFunc(activeReconcilers, func(a, b StateReconciler) int {
+		return cmp.Compare(a.Priority(), b.Priority())
 	})
 
 	return activeReconcilers

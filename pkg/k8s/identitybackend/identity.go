@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"reflect"
-	"sort"
+	"slices"
 	"strconv"
 	"sync/atomic"
 
@@ -237,18 +237,25 @@ func (c *crdBackend) get(ctx context.Context, key allocator.AllocatorKey) *v2.Ci
 		return nil
 	}
 
-	sort.Slice(identities, func(i, j int) bool {
-		left, ok := identities[i].(*v2.CiliumIdentity)
+	slices.SortFunc(identities, func(a, b any) int {
+		left, ok := a.(*v2.CiliumIdentity)
 		if !ok {
-			return false
+			return 0
 		}
 
-		right, ok := identities[j].(*v2.CiliumIdentity)
+		right, ok := b.(*v2.CiliumIdentity)
 		if !ok {
-			return false
+			return 0
 		}
 
-		return left.CreationTimestamp.Before(&right.CreationTimestamp)
+		switch {
+		case left.CreationTimestamp.Before(&right.CreationTimestamp):
+			return -1
+		case right.CreationTimestamp.Before(&left.CreationTimestamp):
+			return 1
+		default:
+			return 0
+		}
 	})
 
 	for _, identityObject := range identities {

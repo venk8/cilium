@@ -9,6 +9,8 @@ import (
 
 	"github.com/cilium/hive/hivetest"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/cilium/cilium/pkg/identity"
 )
 
 func Test_authMapCache_restoreCache(t *testing.T) {
@@ -203,4 +205,35 @@ func Test_authMapCache_DeleteIf(t *testing.T) {
 	})
 	assert.ErrorContains(t, err, "failed to delete auth entry from map: failed to delete entry")
 	assert.Len(t, am.cacheEntries, 1)
+}
+
+func BenchmarkAuthMapCache_All(b *testing.B) {
+	const numEntries = 100
+	cacheEntries := make(map[authKey]authInfoCache, numEntries)
+	now := time.Now()
+	for i := 0; i < numEntries; i++ {
+		key := authKey{
+			localIdentity:  identity.NumericIdentity(1000 + i),
+			remoteIdentity: identity.NumericIdentity(2000 + i),
+			remoteNodeID:   uint16(i % 50),
+		}
+		cacheEntries[key] = authInfoCache{
+			authInfo: authInfo{expiration: now.Add(10 * time.Minute)},
+			storedAt: now,
+		}
+	}
+
+	am := &authMapCache{
+		cacheEntries: cacheEntries,
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		res, err := am.All()
+		if err != nil || len(res) != numEntries {
+			b.Fatalf("unexpected result: len=%d, err=%v", len(res), err)
+		}
+	}
 }

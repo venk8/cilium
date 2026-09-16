@@ -4,6 +4,7 @@
 package bgp
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,7 +14,6 @@ import (
 	"net/netip"
 	"os"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -246,8 +246,12 @@ func printRouteSummary(out io.Writer, routesPerNode map[string][]*models.BgpRout
 	// sort routes per node
 	for _, routes := range routesPerNode {
 		// sort routes first by ASN, then by neighbor and then by prefix
-		sort.Slice(routes, func(i, j int) bool {
-			return routes[i].RouterAsn < routes[j].RouterAsn || routes[i].Neighbor < routes[j].Neighbor || routes[i].Prefix < routes[j].Prefix
+		slices.SortFunc(routes, func(a, b *models.BgpRoute) int {
+			return cmp.Or(
+				cmp.Compare(a.RouterAsn, b.RouterAsn),
+				cmp.Compare(a.Neighbor, b.Neighbor),
+				cmp.Compare(a.Prefix, b.Prefix),
+			)
 		})
 	}
 

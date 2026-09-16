@@ -142,7 +142,7 @@ func doDumpEntries(m ctmap.CtMap) {
 }
 
 func dumpCt(maps []ctmap.CtMap, args ...any) {
-	entries := make([]ctmap.CtMapRecord, 0)
+	var entries []ctmap.CtMapRecord
 
 	t := args[0].(string)
 

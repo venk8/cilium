@@ -55,8 +55,9 @@ func (s *Status) initTargetCiliumPods(ctx context.Context) error {
 		return fmt.Errorf("unable to list Cilium pods: %w", err)
 	}
 
-	for _, ciliumPod := range ciliumPods.Items {
-		s.ciliumPods = append(s.ciliumPods, ciliumPod.DeepCopy())
+	s.ciliumPods = make([]*corev1.Pod, len(ciliumPods.Items))
+	for i := range ciliumPods.Items {
+		s.ciliumPods[i] = &ciliumPods.Items[i]
 	}
 	return nil
 }

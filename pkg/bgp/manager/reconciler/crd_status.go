@@ -4,12 +4,12 @@
 package reconciler
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"slices"
-	"sort"
 	"strings"
 
 	"github.com/cilium/hive/cell"
@@ -206,11 +206,11 @@ func (r *StatusReconciler) updateErrorConditions() error {
 	}
 
 	// sort instance errors by instance name and then by error ID
-	sort.Slice(instanceErrors, func(i, j int) bool {
-		if strings.Compare(instanceErrors[i].Instance, instanceErrors[j].Instance) == 0 {
-			return instanceErrors[i].ErrorID < instanceErrors[j].ErrorID
+	slices.SortFunc(instanceErrors, func(a, b tables.BGPReconcileError) int {
+		if c := cmp.Compare(a.Instance, b.Instance); c != 0 {
+			return c
 		}
-		return strings.Compare(instanceErrors[i].Instance, instanceErrors[j].Instance) < 0
+		return cmp.Compare(a.ErrorID, b.ErrorID)
 	})
 
 	// combine all errors into a single message

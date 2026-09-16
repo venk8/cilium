@@ -61,7 +61,7 @@ func init() {
 }
 
 func dumpNat(maps []nat.NatMap, args ...any) {
-	entries := make([]nat.NatMapRecord, 0)
+	var entries []nat.NatMapRecord
 
 	for _, m := range maps {
 		if m == nil || reflect.ValueOf(m).IsNil() {

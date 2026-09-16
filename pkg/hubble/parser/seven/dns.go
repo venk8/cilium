@@ -67,7 +67,7 @@ func dnsSummary(flowType accesslog.FlowType, dns *accesslog.LogRecordDNS) string
 		if rcode != layers.DNSResponseCodeNoErr {
 			answer = fmt.Sprintf("RCode: %s", rcode)
 		} else {
-			parts := make([]string, 0)
+			parts := make([]string, 0, 2)
 
 			if len(dns.IPs) > 0 {
 				ips := make([]string, 0, len(dns.IPs))

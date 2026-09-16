@@ -287,7 +287,7 @@ func (cm *ClusterMesh) synced(ctx context.Context, toWaitFn func(*remoteCluster)
 	wctx, cancel := context.WithTimeout(ctx, cm.conf.ClusterMeshSyncTimeout)
 	defer cancel()
 
-	waiters := make([]wait.Fn, 0)
+	var waiters []wait.Fn
 	cm.common.ForEachRemoteCluster(func(rci common.RemoteCluster) error {
 		rc := rci.(*remoteCluster)
 		waiters = append(waiters, toWaitFn(rc))

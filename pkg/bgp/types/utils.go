@@ -4,6 +4,7 @@
 package types
 
 import (
+	"cmp"
 	"fmt"
 	"net/netip"
 	"slices"
@@ -129,4 +130,18 @@ type PolicyPrefixList []RoutePolicyPrefix
 func (l PolicyPrefixList) Less(i, j int) bool {
 	return l[i].CIDR.Bits() < l[j].CIDR.Bits() || l[i].CIDR.Addr().Less(l[j].CIDR.Addr()) ||
 		l[i].PrefixLenMin < l[j].PrefixLenMin || l[i].PrefixLenMax < l[j].PrefixLenMax
+}
+
+// Compare returns an integer comparing two RoutePolicyPrefix values.
+func (p RoutePolicyPrefix) Compare(other RoutePolicyPrefix) int {
+	if c := cmp.Compare(p.CIDR.Bits(), other.CIDR.Bits()); c != 0 {
+		return c
+	}
+	if c := p.CIDR.Addr().Compare(other.CIDR.Addr()); c != 0 {
+		return c
+	}
+	if c := cmp.Compare(p.PrefixLenMin, other.PrefixLenMin); c != 0 {
+		return c
+	}
+	return cmp.Compare(p.PrefixLenMax, other.PrefixLenMax)
 }

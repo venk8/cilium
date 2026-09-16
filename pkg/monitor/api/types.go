@@ -6,9 +6,9 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"cmp"
 	"net"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -89,8 +89,8 @@ func AllMessageTypeNames() []string {
 	}
 
 	// Sort by the underlying MessageType
-	sort.SliceStable(names, func(i, j int) bool {
-		return MessageTypeNames[names[i]] < MessageTypeNames[names[j]]
+	slices.SortStableFunc(names, func(a, b string) int {
+		return cmp.Compare(MessageTypeNames[a], MessageTypeNames[b])
 	})
 
 	return names

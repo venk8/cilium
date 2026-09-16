@@ -4,11 +4,12 @@
 package reconciler
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"log/slog"
 	"maps"
-	"sort"
+	"slices"
 
 	"github.com/cilium/hive/cell"
 	"github.com/cilium/statedb"
@@ -226,11 +227,11 @@ func routePolicyFromStatements(policyKey tables.DesiredRoutePolicyObjectKey, sta
 	}
 
 	// sort by priority and statement name
-	sort.SliceStable(statements, func(i, j int) bool {
-		if statements[i].Priority == statements[j].Priority {
-			return statements[i].StatementName() < statements[j].StatementName()
+	slices.SortStableFunc(statements, func(a, b *tables.DesiredRoutePolicy) int {
+		if c := cmp.Compare(a.Priority, b.Priority); c != 0 {
+			return c
 		}
-		return statements[i].Priority < statements[j].Priority
+		return cmp.Compare(a.StatementName(), b.StatementName())
 	})
 
 	policy := &types.RoutePolicy{

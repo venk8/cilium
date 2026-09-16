@@ -4,6 +4,7 @@
 package check
 
 import (
+	"cmp"
 	"context"
 	"encoding/base64"
 	"errors"
@@ -12,7 +13,6 @@ import (
 	"net"
 	"net/netip"
 	"slices"
-	"sort"
 	"strings"
 	"time"
 
@@ -2905,11 +2905,11 @@ func (ct *ConnectivityTest) validateDeploymentPerf(ctx context.Context) error {
 	}
 
 	// Sort pods so results are always displayed in the same order in console
-	sort.SliceStable(ct.perfServerPod, func(i, j int) bool {
-		return ct.perfServerPod[i].Pod.Name < ct.perfServerPod[j].Pod.Name
+	slices.SortStableFunc(ct.perfServerPod, func(a, b Pod) int {
+		return cmp.Compare(a.Pod.Name, b.Pod.Name)
 	})
-	sort.SliceStable(ct.perfClientPods, func(i, j int) bool {
-		return ct.perfClientPods[i].Pod.Name < ct.perfClientPods[j].Pod.Name
+	slices.SortStableFunc(ct.perfClientPods, func(a, b Pod) int {
+		return cmp.Compare(a.Pod.Name, b.Pod.Name)
 	})
 
 	return nil
