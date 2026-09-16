@@ -81,3 +81,41 @@ func BenchmarkFQDNSelectorString(b *testing.B) {
 		}
 	}
 }
+
+func BenchmarkFQDNSelectorValidate(b *testing.B) {
+	selectors := []FQDNSelector{
+		{MatchName: "cilium.io."},
+		{MatchName: "get-cilium.io."},
+		{MatchName: "foo.cilium.io."},
+		{MatchName: "cilium.io"},
+		{MatchName: "_cilium.io"},
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for b.Loop() {
+		for _, s := range selectors {
+			_ = s.Validate()
+		}
+	}
+}
+
+func BenchmarkPortRuleDNSValidate(b *testing.B) {
+	rules := []PortRuleDNS{
+		{MatchName: "cilium.io."},
+		{MatchName: "get-cilium.io."},
+		{MatchName: "foo.cilium.io."},
+		{MatchName: "cilium.io"},
+		{MatchName: "_cilium.io"},
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for b.Loop() {
+		for _, r := range rules {
+			_ = r.Validate()
+		}
+	}
+}
+
+

@@ -6,6 +6,7 @@ package namemanager
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"log/slog"
 	"net/netip"
 	"regexp"
@@ -521,3 +522,40 @@ func (mgr *mgrMock) GetEndpoints() []*endpoint.Endpoint {
 	defer mgr.mu.Unlock()
 	return mgr.eps.UnsortedList()
 }
+
+func Test_nameLockIndex(t *testing.T) {
+	domains := []string{
+		"cilium.io",
+		"cilium.io.",
+		"google.com",
+		"k8s.io",
+		"subdomain.example.org",
+		"a.very.long.domain.name.with.many.labels.testing.fnv.hash.speed.and.accuracy.com",
+		"",
+		"a",
+		".",
+	}
+	counts := []int{1, 2, 7, 16, 32, 64, 1024}
+
+	for _, d := range domains {
+		for _, cnt := range counts {
+			h := fnv.New32()
+			h.Write([]byte(d))
+			expected := h.Sum32() % uint32(cnt)
+			actual := nameLockIndex(d, cnt)
+			require.Equal(t, expected, actual, "nameLockIndex mismatch for %q with cnt %d", d, cnt)
+		}
+	}
+}
+
+func BenchmarkNameLockIndex(b *testing.B) {
+	domain := "subdomain.example.com"
+	cnt := 64
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = nameLockIndex(domain, cnt)
+	}
+}
+

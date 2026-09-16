@@ -111,3 +111,37 @@ func TestOriginMerge(t *testing.T) {
 
 	td.policyMapEqualsPolicyEntries(t, nil, expected, entries...)
 }
+
+func BenchmarkRuleOrigin_Merge(b *testing.B) {
+	lbls1 := labels.NewLabelsFromSortedList("k8s:a=1;k8s:b=1").LabelArray()
+	lbls2 := labels.NewLabelsFromSortedList("k8s:a=2;k8s:b=2").LabelArray()
+	ro1 := makeSingleRuleOrigin(lbls1, "log1")
+	ro2 := makeSingleRuleOrigin(lbls2, "log2")
+
+	b.Run("Identical", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			_ = ro1.Merge(ro1)
+		}
+	})
+
+	b.Run("Different", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			_ = ro1.Merge(ro2)
+		}
+	})
+}
+
+func BenchmarkRule_Origin(b *testing.B) {
+	r := &rule{
+		PolicyEntry: types.PolicyEntry{
+			Labels: labels.NewLabelsFromSortedList("k8s:a=1;k8s:b=1").LabelArray(),
+			Log:    api.LogConfig{Value: "log1"},
+		},
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = r.origin()
+	}
+}

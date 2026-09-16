@@ -4,6 +4,7 @@
 package fqdn
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -11,7 +12,6 @@ import (
 	"net/netip"
 	"regexp"
 	"slices"
-	"sort"
 	"unsafe"
 
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -317,8 +317,15 @@ func (c *DNSCache) cleanupOverLimitEntries() (affectedNames sets.Set[string], re
 			sortedEntries = append(sortedEntries, IPEntry{ip, entry})
 		}
 
-		sort.Slice(sortedEntries, func(i, j int) bool {
-			return sortedEntries[i].entry.ExpirationTime.Before(sortedEntries[j].entry.ExpirationTime)
+		slices.SortFunc(sortedEntries, func(a, b IPEntry) int {
+			switch {
+			case a.entry.ExpirationTime.Before(b.entry.ExpirationTime):
+				return -1
+			case a.entry.ExpirationTime.After(b.entry.ExpirationTime):
+				return 1
+			default:
+				return 0
+			}
 		})
 
 		for i := range overlimit {
@@ -750,8 +757,8 @@ func (c *DNSCache) Dump() (lookups []*cacheEntry) {
 	// We iterate through the list, keeping unique pointers. This is correct
 	// because the list is sorted and, if two consecutive entries are the same,
 	// it is safe to overwrite the second duplicate.
-	sort.Slice(lookups, func(i, j int) bool {
-		return uintptr(unsafe.Pointer(lookups[i])) < uintptr(unsafe.Pointer(lookups[j]))
+	slices.SortFunc(lookups, func(a, b *cacheEntry) int {
+		return cmp.Compare(uintptr(unsafe.Pointer(a)), uintptr(unsafe.Pointer(b)))
 	})
 
 	deduped := lookups[:0] // len==0 but cap==cap(lookups)
@@ -1035,20 +1042,20 @@ func (zombies *DNSZombieMappings) isZombieAlive(zombie *DNSZombieMapping, aliveN
 // 2. when this ip was last scheduled for deletion (earlier == less important)
 // 3. tie-break by number of DNS names for that IP
 func sortZombieMappingSlice(alive []*DNSZombieMapping) {
-	sort.Slice(alive, func(i, j int) bool {
+	slices.SortFunc(alive, func(a, b *DNSZombieMapping) int {
 		switch {
-		case alive[i].AliveAt.Before(alive[j].AliveAt):
-			return true
-		case alive[i].AliveAt.After(alive[j].AliveAt):
-			return false
+		case a.AliveAt.Before(b.AliveAt):
+			return -1
+		case a.AliveAt.After(b.AliveAt):
+			return 1
 		// We have AliveAt equality after this point.
-		case alive[i].DeletePendingAt.Before(alive[j].DeletePendingAt):
-			return true
-		case alive[i].DeletePendingAt.After(alive[j].DeletePendingAt):
-			return false
+		case a.DeletePendingAt.Before(b.DeletePendingAt):
+			return -1
+		case a.DeletePendingAt.After(b.DeletePendingAt):
+			return 1
 		// DeletePendingAt is also equal. Tie-break by number of Names.
 		default:
-			return len(alive[i].Names) < len(alive[j].Names)
+			return cmp.Compare(len(a.Names), len(b.Names))
 		}
 	})
 }

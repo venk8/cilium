@@ -303,3 +303,30 @@ func TestLabelArrayListMergeSorted(t *testing.T) {
 		require.Equal(t, a.Sort().ArrayListString(), as, tc.name+" MergeSortedLabelArrayListStrings returned unsorted result")
 	}
 }
+
+func BenchmarkMergeSortedLabelArrayListStrings(b *testing.B) {
+	list1 := LabelArrayList{
+		{NewLabel("env", "devel", LabelSourceAny), NewLabel("user", "bob", LabelSourceK8s)},
+		{NewLabel("foo", "bar", LabelSourceAny)},
+	}.Sort()
+	list2 := LabelArrayList{
+		{NewLabel("env", "prod", LabelSourceAny), NewLabel("user", "alice", LabelSourceK8s)},
+		{NewLabel("foo", "bar", LabelSourceAny)},
+	}.Sort()
+	s1 := list1.ArrayListString()
+	s2 := list2.ArrayListString()
+
+	b.Run("Identical", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			_ = MergeSortedLabelArrayListStrings(s1, s1)
+		}
+	})
+
+	b.Run("Different", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			_ = MergeSortedLabelArrayListStrings(s1, s2)
+		}
+	})
+}

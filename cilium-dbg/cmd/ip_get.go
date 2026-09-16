@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"sort"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
@@ -54,7 +53,7 @@ var ipGetCmd = &cobra.Command{
 				Fatalf("Cannot get ipcache entries. err: %s", pkg.Hint(err))
 			}
 			im := ipcachetypes.IPListEntrySlice(ipcache.Payload)
-			sort.Slice(im, im.Less)
+			im.Sort()
 			printIPcacheEntries(ipcache.Payload)
 		}
 	},
@@ -82,7 +81,7 @@ func displayByLabels(lbls models.Labels) {
 		Fatalf("Cannot get ipcache entries. err: %s", pkg.Hint(err))
 	}
 	im := ipcachetypes.IPListEntrySlice(result.Payload)
-	sort.Slice(im, im.Less)
+	im.Sort()
 	if verbose {
 		printIPcacheEntries(result.Payload)
 	} else {

@@ -63,18 +63,19 @@ func (r CIDRRule) SelectorKey() string {
 
 // String converts the CIDRRule into a human-readable string.
 func (r CIDRRule) String() string {
-	exceptCIDRs := ""
-	if len(r.ExceptCIDRs) > 0 {
-		exceptCIDRs = "-" + CIDRSlice(r.ExceptCIDRs).String()
-	}
+	var key string
 	switch {
 	case r.CIDRGroupRef != "":
-		return r.CIDRGroupRef.SelectorKey() + exceptCIDRs
+		key = r.CIDRGroupRef.SelectorKey()
 	case r.CIDRGroupSelector.LabelSelector != nil:
-		return r.CIDRGroupSelector.SelectorKey() + exceptCIDRs
+		key = r.CIDRGroupSelector.SelectorKey()
 	default:
-		return r.Cidr.SelectorKey() + exceptCIDRs
+		key = r.Cidr.SelectorKey()
 	}
+	if len(r.ExceptCIDRs) == 0 {
+		return key
+	}
+	return key + "-" + CIDRSlice(r.ExceptCIDRs).String()
 }
 
 // CIDRSlice is a slice of CIDRs. It allows receiver methods to be defined for
@@ -110,7 +111,36 @@ func (s CIDRSlice) String() string {
 	if len(s) == 0 {
 		return ""
 	}
-	return "[" + strings.Join(s.StringSlice(), ",") + "]"
+	total := 1 + len(s)
+	for _, c := range s {
+		total += len(c)
+	}
+	if total <= 64 {
+		var buf [64]byte
+		buf[0] = '['
+		n := 1
+		for i, c := range s {
+			if i > 0 {
+				buf[n] = ','
+				n++
+			}
+			n += copy(buf[n:], c)
+		}
+		buf[n] = ']'
+		n++
+		return string(buf[:n])
+	}
+	var b strings.Builder
+	b.Grow(total)
+	b.WriteByte('[')
+	for i, c := range s {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(string(c))
+	}
+	b.WriteByte(']')
+	return b.String()
 }
 
 // CIDRRuleSlice is a slice of CIDRRules. It allows receiver methods to be
@@ -133,14 +163,10 @@ func (c CIDRGroupRef) SelectorKey() string {
 const LabelPrefixGroupName = "io.cilium.policy.cidrgroupname"
 
 func LabelForCIDRGroupRef(ref string) labels.Label {
-	var key strings.Builder
-	key.Grow(len(LabelPrefixGroupName) + len(ref) + 1)
-	key.WriteString(LabelPrefixGroupName)
-	key.WriteString("/")
-	key.WriteString(ref)
 	return labels.NewLabel(
-		key.String(),
+		LabelPrefixGroupName+"/"+ref,
 		"",
 		labels.LabelSourceCIDRGroup,
 	)
 }
+

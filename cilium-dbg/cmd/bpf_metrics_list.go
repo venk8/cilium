@@ -6,7 +6,7 @@ package cmd
 import (
 	"fmt"
 	"os"
-	"sort"
+	"slices"
 	"strings"
 	"text/tabwriter"
 
@@ -146,22 +146,20 @@ func listHumanReadableMetrics(bpfMetricsList []*metricsRow) {
 	fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", reasonTitle, directionTitle, packetsTitle, bytesTitle, lineTitle, fileTitle)
 
 	const numColumns = 6
-	rows := [][numColumns]string{}
+	rows := make([][numColumns]string, 0, len(bpfMetricsList))
 
 	for _, row := range bpfMetricsList {
 		rows = append(rows, [numColumns]string{row.reasonDesc, row.direction, fmt.Sprintf("%d", row.packets), fmt.Sprintf("%d", row.bytes), fmt.Sprintf("%d", row.line), row.file})
 	}
 
-	sort.Slice(rows, func(i, j int) bool {
+	slices.SortFunc(rows, func(a, b [numColumns]string) int {
 		for k := range numColumns {
-			c := strings.Compare(rows[i][k], rows[j][k])
-
+			c := strings.Compare(a[k], b[k])
 			if c != 0 {
-				return c < 0
+				return c
 			}
 		}
-
-		return false
+		return 0
 	})
 
 	for _, r := range rows {

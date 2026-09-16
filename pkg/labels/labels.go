@@ -694,9 +694,13 @@ func (l Label) FormatForKVStore() []byte {
 	// Identity allocation in the kvstore depends on this (see
 	// kvstore.prefixMatchesKey())
 	b := make([]byte, 0, len(l.Source)+len(l.Key)+len(l.Value)+3)
-	buf := bytes.NewBuffer(b)
-	l.formatForKVStoreInto(buf)
-	return buf.Bytes()
+	b = append(b, l.Source...)
+	b = append(b, byte(sourceDelimiter))
+	b = append(b, l.Key...)
+	b = append(b, '=')
+	b = append(b, l.Value...)
+	b = append(b, ';')
+	return b
 }
 
 // formatForKVStoreInto writes the label as a formatted string, ending in
@@ -708,11 +712,27 @@ func (l Label) FormatForKVStore() []byte {
 // Non-pointer receiver allows this to be called on a value in a map.
 func (l Label) formatForKVStoreInto(buf *bytes.Buffer) {
 	buf.WriteString(l.Source)
-	buf.WriteRune(rune(sourceDelimiter))
+	buf.WriteByte(byte(sourceDelimiter))
 	buf.WriteString(l.Key)
-	buf.WriteRune('=')
+	buf.WriteByte('=')
 	buf.WriteString(l.Value)
-	buf.WriteRune(';')
+	buf.WriteByte(';')
+}
+
+// FormatForKVStoreIntoBuilder writes the label as a formatted string, ending in
+// a semicolon into sb without extra slice allocations.
+//
+// DO NOT BREAK THE FORMAT OF THIS. THE RETURNED STRING IS USED AS
+// PART OF THE KEY IN THE KEY-VALUE STORE.
+//
+// Non-pointer receiver allows this to be called on a value in a map.
+func (l Label) FormatForKVStoreIntoBuilder(sb *strings.Builder) {
+	sb.WriteString(l.Source)
+	sb.WriteByte(byte(sourceDelimiter))
+	sb.WriteString(l.Key)
+	sb.WriteByte('=')
+	sb.WriteString(l.Value)
+	sb.WriteByte(';')
 }
 
 // SortedList returns the labels as a sorted list, separated by semicolon
@@ -722,24 +742,23 @@ func (l Label) formatForKVStoreInto(buf *bytes.Buffer) {
 func (l Labels) SortedList() []byte {
 	keys := slices.Sorted(maps.Keys(l))
 
-	// Labels can have arbitrary size. However, when many CIDR identities are in
-	// the system, for example due to a FQDN policy matching S3, CIDR labels
-	// dominate in number. IPv4 CIDR labels in serialized form are max 25 bytes
-	// long. Allocate slightly more to avoid having a realloc if there's some
-	// other labels which may longer, since the cost of allocating a few bytes
-	// more is dominated by a second allocation, especially since these
-	// allocations are short-lived.
-	//
-	// cidr:123.123.123.123/32=;
-	// 0        1         2
-	// 1234567890123456789012345
-	b := make([]byte, 0, len(keys)*30)
-	buf := bytes.NewBuffer(b)
+	totalLen := 0
 	for _, k := range keys {
-		l[k].formatForKVStoreInto(buf)
+		lbl := l[k]
+		totalLen += len(lbl.Source) + 1 + len(lbl.Key) + 1 + len(lbl.Value) + 1
+	}
+	b := make([]byte, 0, totalLen)
+	for _, k := range keys {
+		lbl := l[k]
+		b = append(b, lbl.Source...)
+		b = append(b, byte(sourceDelimiter))
+		b = append(b, lbl.Key...)
+		b = append(b, '=')
+		b = append(b, lbl.Value...)
+		b = append(b, ';')
 	}
 
-	return buf.Bytes()
+	return b
 }
 
 // ToSlice returns a slice of label with the values of the given
@@ -924,6 +943,9 @@ func NewSourceEncodedLabelKey(sourcePrefix, key string) string {
 	src, next := parseSource(key, sourceDelimiter)
 	if len(src) == 0 {
 		return sourcePrefix + next
+	}
+	if len(key) > 0 && key[0] != '$' {
+		return key
 	}
 	return src + SourceDelimiter + next
 }

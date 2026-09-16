@@ -76,3 +76,38 @@ continueTest:
 		}
 	}
 }
+
+func BenchmarkCIDRSliceString(b *testing.B) {
+	s := CIDRSlice{
+		"192.0.2.0/24",
+		"198.51.100.0/24",
+		"203.0.113.0/24",
+		"10.0.0.0/8",
+	}
+	b.ResetTimer()
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = s.String()
+	}
+}
+
+func BenchmarkLabelForCIDRGroupRef(b *testing.B) {
+	ref := "my-cidr-group"
+	b.ResetTimer()
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = LabelForCIDRGroupRef(ref)
+	}
+}
+
+func BenchmarkCIDRRuleString(b *testing.B) {
+	r := CIDRRule{
+		Cidr: "192.0.2.0/24",
+	}
+	b.ResetTimer()
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = r.String()
+	}
+}
+

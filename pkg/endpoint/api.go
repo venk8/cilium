@@ -7,11 +7,10 @@
 package endpoint
 
 import (
+	"cmp"
 	"fmt"
 	"io"
-	"maps"
 	"slices"
-	"sort"
 	"strconv"
 
 	"go4.org/netipx"
@@ -193,13 +192,13 @@ func (e *Endpoint) GetModelRLocked() *models.Endpoint {
 
 	// Sort these slices since they come out in random orders. This allows
 	// reflect.DeepEqual to succeed.
-	sort.StringSlice(lblMdl.Realized.User).Sort()
-	sort.StringSlice(lblMdl.Disabled).Sort()
-	sort.StringSlice(lblMdl.SecurityRelevant).Sort()
-	sort.StringSlice(lblMdl.Derived).Sort()
+	slices.Sort(lblMdl.Realized.User)
+	slices.Sort(lblMdl.Disabled)
+	slices.Sort(lblMdl.SecurityRelevant)
+	slices.Sort(lblMdl.Derived)
 
 	controllerMdl := e.controllers.GetStatusModel()
-	sort.Slice(controllerMdl, func(i, j int) bool { return controllerMdl[i].Name < controllerMdl[j].Name })
+	slices.SortFunc(controllerMdl, func(a, b *models.ControllerStatus) int { return cmp.Compare(a.Name, b.Name) })
 
 	spec := &models.EndpointConfigurationSpec{
 		LabelConfiguration: lblMdl.Realized,
@@ -306,16 +305,22 @@ func (e *Endpoint) getNamedPortsModel() models.NamedPorts {
 		return models.NamedPorts{}
 	}
 	k8sPorts := *p
+	if len(k8sPorts) == 0 {
+		return models.NamedPorts{}
+	}
 
 	np := make(models.NamedPorts, 0, len(k8sPorts))
-	// keep named ports ordered to avoid the unnecessary updates to
-	// kube-apiserver
-	for _, name := range slices.Sorted(maps.Keys(k8sPorts)) {
-		value := k8sPorts[name]
+	for name, value := range k8sPorts {
 		np = append(np, &models.Port{
 			Name:     name,
 			Port:     value.Port,
 			Protocol: u8proto.U8proto(value.Proto).String(),
+		})
+	}
+	if len(np) > 1 {
+		// keep named ports ordered to avoid unnecessary updates to kube-apiserver
+		slices.SortFunc(np, func(a, b *models.Port) int {
+			return cmp.Compare(a.Name, b.Name)
 		})
 	}
 	return np

@@ -10,7 +10,7 @@ import (
 	"log/slog"
 	"net/netip"
 	"os"
-	"sort"
+	"slices"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
@@ -62,9 +62,7 @@ var MulticastGroupListCmd = &cobra.Command{
 
 func printGroupList(groups []netip.Addr) {
 	// sort groups by address
-	sort.Slice(groups, func(i, j int) bool {
-		return groups[i].Compare(groups[j]) < 0
-	})
+	slices.SortFunc(groups, netip.Addr.Compare)
 
 	w := tabwriter.NewWriter(os.Stdout, 5, 0, 3, ' ', 0)
 	fmt.Fprintln(w, "Group Address")

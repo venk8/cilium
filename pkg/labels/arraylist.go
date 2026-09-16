@@ -6,7 +6,7 @@ package labels
 import (
 	"bytes"
 	"iter"
-	"sort"
+	"slices"
 	"strings"
 )
 
@@ -162,8 +162,14 @@ func (ls LabelArrayList) BuildBytes(buf *bytes.Buffer) {
 // for convenience. The LabelArrays themselves must already be sorted. This is
 // true for all constructors of LabelArray.
 func (ls LabelArrayList) Sort() LabelArrayList {
-	sort.Slice(ls, func(i, j int) bool {
-		return ls[i].Less(ls[j])
+	slices.SortFunc(ls, func(a, b LabelArray) int {
+		if a.Less(b) {
+			return -1
+		}
+		if b.Less(a) {
+			return 1
+		}
+		return 0
 	})
 
 	return ls
@@ -226,7 +232,18 @@ func writeRemainder(str string, start, end int, sb *strings.Builder) {
 
 // merge 'b' to 'a' assuming both are sorted
 func MergeSortedLabelArrayListStrings(la, lb LabelArrayListString) LabelArrayListString {
+	if la == lb {
+		return la
+	}
+	if la == "" {
+		return lb
+	}
+	if lb == "" {
+		return la
+	}
+
 	var sb strings.Builder
+	sb.Grow(len(la) + len(lb) + 2)
 	var aStart, aEnd, bStart, bEnd int
 	a := string(la)
 	b := string(lb)

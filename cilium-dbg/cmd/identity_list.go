@@ -4,9 +4,10 @@
 package cmd
 
 import (
+	"cmp"
 	"fmt"
 	"os"
-	"sort"
+	"slices"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
@@ -16,8 +17,6 @@ import (
 	"github.com/cilium/cilium/pkg/api"
 	pkg "github.com/cilium/cilium/pkg/client"
 	"github.com/cilium/cilium/pkg/command"
-	"github.com/cilium/cilium/pkg/identity/cache"
-	"github.com/cilium/cilium/pkg/identity/identitymanager"
 	"github.com/cilium/cilium/pkg/labels"
 )
 
@@ -48,8 +47,9 @@ func listIdentities(args []string) {
 			Fatalf("Cannot get identities. err: %s", pkg.Hint(err))
 		}
 		// sort identities by ID
-		im := identitymanager.IdentitiesModel(identities.Payload)
-		sort.Slice(im, im.Less)
+		slices.SortFunc(identities.Payload, func(a, b *models.IdentityEndpoints) int {
+			return cmp.Compare(a.Identity.ID, b.Identity.ID)
+		})
 		printIdentitesEndpoints(identities.Payload)
 	default:
 		params := identityApi.NewGetIdentityParams().WithTimeout(api.ClientTimeout)
@@ -65,8 +65,9 @@ func listIdentities(args []string) {
 			}
 		}
 		// sort identities by ID
-		im := cache.IdentitiesModel(identities.Payload)
-		sort.Slice(im, im.Less)
+		slices.SortFunc(identities.Payload, func(a, b *models.Identity) int {
+			return cmp.Compare(a.ID, b.ID)
+		})
 		printIdentities(identities.Payload)
 	}
 }

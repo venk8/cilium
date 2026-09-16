@@ -48,6 +48,17 @@ func mergeStringList(a, b stringList) stringList {
 	if b == "" {
 		return a
 	}
+	if a == b {
+		return a
+	}
+
+	// Fast path for single items without separators
+	if !strings.Contains(string(a), separator) && !strings.Contains(string(b), separator) {
+		if a < b {
+			return a + separator + b
+		}
+		return b + separator + a
+	}
 
 	logLines := set.NewSet[string]()
 	for _, line := range a.List() {
