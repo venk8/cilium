@@ -383,10 +383,7 @@ func (r *gammaReconciler) ensureEnvoyConfig(ctx context.Context, desired *cilium
 }
 
 func (r *gammaReconciler) updateStatus(ctx context.Context, original *corev1.Service, new *corev1.Service) error {
-	oldStatus := original.Status.DeepCopy()
-	newStatus := new.Status.DeepCopy()
-
-	if cmp.Equal(oldStatus, newStatus, cmpopts.IgnoreFields(metav1.Condition{}, lastTransitionTime)) {
+	if cmp.Equal(&original.Status, &new.Status, cmpopts.IgnoreFields(metav1.Condition{}, lastTransitionTime)) {
 		return nil
 	}
 	return r.client.Status().Update(ctx, new)
@@ -401,10 +398,7 @@ func (r *gammaReconciler) handleReconcileErrorWithStatus(ctx context.Context, re
 }
 
 func (r *gammaReconciler) updateHTTPRouteStatus(ctx context.Context, original *gatewayv1.HTTPRoute, new *gatewayv1.HTTPRoute) error {
-	oldStatus := original.Status.DeepCopy()
-	newStatus := new.Status.DeepCopy()
-
-	if cmp.Equal(oldStatus, newStatus, cmpopts.IgnoreFields(metav1.Condition{}, lastTransitionTime)) {
+	if cmp.Equal(&original.Status, &new.Status, cmpopts.IgnoreFields(metav1.Condition{}, lastTransitionTime)) {
 		return nil
 	}
 	r.logger.DebugContext(ctx, "Updating HTTPRoute status", httpRoute, types.NamespacedName{Name: original.Name, Namespace: original.Namespace})
@@ -419,10 +413,7 @@ func (r *gammaReconciler) handleHTTPRouteReconcileErrorWithStatus(ctx context.Co
 }
 
 func (r *gammaReconciler) updateGRPCRouteStatus(ctx context.Context, original *gatewayv1.GRPCRoute, new *gatewayv1.GRPCRoute) error {
-	oldStatus := original.Status.DeepCopy()
-	newStatus := new.Status.DeepCopy()
-
-	if cmp.Equal(oldStatus, newStatus, cmpopts.IgnoreFields(metav1.Condition{}, lastTransitionTime)) {
+	if cmp.Equal(&original.Status, &new.Status, cmpopts.IgnoreFields(metav1.Condition{}, lastTransitionTime)) {
 		return nil
 	}
 	r.logger.DebugContext(ctx, "Updating GRPCRoute status", grpcRoute, types.NamespacedName{Name: original.Name, Namespace: original.Namespace})

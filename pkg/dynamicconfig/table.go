@@ -4,7 +4,8 @@
 package dynamicconfig
 
 import (
-	"sort"
+	"cmp"
+	"slices"
 	"strconv"
 
 	"github.com/cilium/hive/job"
@@ -142,7 +143,7 @@ func WatchAllKeys(txn statedb.ReadTxn, table statedb.Table[DynamicConfig]) (map[
 }
 
 func sortByPriority(entries []DynamicConfig) {
-	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].Priority < entries[j].Priority
+	slices.SortFunc(entries, func(a, b DynamicConfig) int {
+		return cmp.Compare(a.Priority, b.Priority)
 	})
 }

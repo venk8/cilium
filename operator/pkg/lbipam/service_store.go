@@ -5,7 +5,6 @@ package lbipam
 
 import (
 	"maps"
-	"net"
 	"net/netip"
 	"slices"
 
@@ -163,10 +162,12 @@ func (sv *ServiceView) isSatisfied() bool {
 	hasIPv4 := false
 	hasIPv6 := false
 	for _, assigned := range sv.Status.LoadBalancer.Ingress {
-		if net.ParseIP(assigned.IP).To4() == nil {
-			hasIPv6 = true
-		} else {
-			hasIPv4 = true
+		if addr, err := netip.ParseAddr(assigned.IP); err == nil {
+			if addr.Is4() {
+				hasIPv4 = true
+			} else if addr.Is6() {
+				hasIPv6 = true
+			}
 		}
 	}
 

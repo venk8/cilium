@@ -411,12 +411,13 @@ func (bs *backendProcessor) process(wtxn statedb.WriteTxn, closedWatches []<-cha
 			// Look up associated backends and update the load assignments.
 			bes, watchBes := bs.writer.BackendsForService(wtxn, svc.Name)
 			ws.Add(watchBes)
-			newEndpoints = make(map[string]*envoy_config_endpoint.ClusterLoadAssignment)
-			for _, assignment := range computeLoadAssignments(
+			assignments := computeLoadAssignments(
 				svc.Name,
 				res.ClusterReferences,
 				svc.PortNames,
-				bs.writer.SelectBackends(wtxn, bes, svc, nil)) {
+				bs.writer.SelectBackends(wtxn, bes, svc, nil))
+			newEndpoints = make(map[string]*envoy_config_endpoint.ClusterLoadAssignment, len(assignments))
+			for _, assignment := range assignments {
 				newEndpoints[assignment.ClusterName] = assignment
 			}
 		} else {

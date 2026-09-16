@@ -4,8 +4,8 @@
 package translation
 
 import (
+	"cmp"
 	goslices "slices"
-	"sort"
 	"strconv"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -145,14 +145,14 @@ func (i *cecTranslator) desiredBackendServices(m *model.Model) ([]*ciliumv2.Serv
 
 	// Make sure the result is sorted by namespace and name to avoid any
 	// nondeterministic behavior.
-	sort.Slice(res, func(i, j int) bool {
-		if res[i].Namespace != res[j].Namespace {
-			return res[i].Namespace < res[j].Namespace
+	goslices.SortFunc(res, func(a, b *ciliumv2.Service) int {
+		if c := cmp.Compare(a.Namespace, b.Namespace); c != 0 {
+			return c
 		}
-		if res[i].Name != res[j].Name {
-			return res[i].Name < res[j].Name
+		if c := cmp.Compare(a.Name, b.Name); c != 0 {
+			return c
 		}
-		return res[i].Ports[0] < res[j].Ports[0]
+		return cmp.Compare(a.Ports[0], b.Ports[0])
 	})
 	return res, nil
 }

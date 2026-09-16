@@ -185,7 +185,7 @@ func ToSelectors[T APISelector](peers ...T) Selectors {
 // Note: Only used in unit tests, but in multiple packages
 // Minimal implementation to cover the needs of current tests.
 func (ps Selectors) CIDRRules() api.CIDRRuleSlice {
-	result := make(api.CIDRRuleSlice, 0)
+	result := make(api.CIDRRuleSlice, 0, len(ps))
 	for _, v := range ps {
 		if ps, ok := v.(*CIDRSelector); ok && len(ps.requirements) > 0 {
 			var cidrRule api.CIDRRule

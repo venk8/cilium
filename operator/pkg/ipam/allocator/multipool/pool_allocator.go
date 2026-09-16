@@ -4,6 +4,7 @@
 package multipool
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -11,7 +12,6 @@ import (
 	"math/big"
 	"net/netip"
 	"slices"
-	"sort"
 
 	"go4.org/netipx"
 
@@ -573,8 +573,8 @@ func (p *PoolAllocator) AllocatedPools(targetNode string) (pools []types.IPAMPoo
 		})
 	}
 
-	sort.Slice(pools, func(i, j int) bool {
-		return pools[i].Pool < pools[j].Pool
+	slices.SortFunc(pools, func(a, b types.IPAMPoolAllocation) int {
+		return cmp.Compare(a.Pool, b.Pool)
 	})
 
 	return pools

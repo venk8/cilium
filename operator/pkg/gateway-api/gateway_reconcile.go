@@ -479,10 +479,7 @@ func (r *gatewayReconciler) ensureOwnedEnvoyConfigDeleted(ctx context.Context, g
 }
 
 func (r *gatewayReconciler) updateStatus(ctx context.Context, original *gatewayv1.Gateway, new *gatewayv1.Gateway) error {
-	oldStatus := original.Status.DeepCopy()
-	newStatus := new.Status.DeepCopy()
-
-	if cmp.Equal(oldStatus, newStatus, cmpopts.IgnoreFields(metav1.Condition{}, lastTransitionTime)) {
+	if cmp.Equal(&original.Status, &new.Status, cmpopts.IgnoreFields(metav1.Condition{}, lastTransitionTime)) {
 		return nil
 	}
 	return r.client.Status().Update(ctx, new)
