@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/netip"
+	"strconv"
 
 	"github.com/cilium/cilium/pkg/hubble/parser/getters"
 	"github.com/cilium/cilium/pkg/identity"
@@ -230,6 +231,18 @@ var traceReasons = map[uint8]string{
 	TraceReasonDeprecatedEncryptOverlay: "encrypt-overlay",
 }
 
+var traceReasonsArray = [...]string{
+	TraceReasonPolicy:                   "new",
+	TraceReasonCtEstablished:            "established",
+	TraceReasonCtReply:                  "reply",
+	TraceReasonCtRelated:                "related",
+	TraceReasonCtDeprecatedReopened:     "reopened",
+	TraceReasonUnknown:                  "unknown",
+	TraceReasonSRv6Encap:                "srv6-encap",
+	TraceReasonSRv6Decap:                "srv6-decap",
+	TraceReasonDeprecatedEncryptOverlay: "encrypt-overlay",
+}
+
 // dumpIdentity dumps the source and destination identities in numeric or
 // human-readable format.
 func (n *TraceNotify) dumpIdentity(buf *bufio.Writer, numeric api.DisplayFormat) {
@@ -248,12 +261,13 @@ func (n *TraceNotify) encryptReasonString() string {
 }
 
 func (n *TraceNotify) traceReasonString() string {
-	if str, ok := traceReasons[n.TraceReason()]; ok {
-		return str
+	r := n.TraceReason()
+	if int(r) < len(traceReasonsArray) && traceReasonsArray[r] != "" {
+		return traceReasonsArray[r]
 	}
 	// NOTE: show the underlying datapath trace reason without excluding the
 	// encrypt mask.
-	return fmt.Sprintf("%d", n.Reason)
+	return strconv.FormatUint(uint64(n.Reason), 10)
 }
 
 func (n *TraceNotify) traceSummary() string {
@@ -321,9 +335,7 @@ func (n *TraceNotify) OriginalIP() netip.Addr {
 	if n.IsIPv6() {
 		return netip.AddrFrom16(n.OrigIP)
 	}
-	var arr [4]byte
-	copy(arr[:], n.OrigIP[:4])
-	return netip.AddrFrom4(arr)
+	return netip.AddrFrom4([4]byte(n.OrigIP[:4]))
 }
 
 // DataOffset returns the offset from the beginning of TraceNotify where the
@@ -331,7 +343,21 @@ func (n *TraceNotify) OriginalIP() netip.Addr {
 //
 // Returns zero for invalid or unknown TraceNotify messages.
 func (n *TraceNotify) DataOffset() uint {
-	return traceNotifyLength[n.Version] + traceNotifyExtensionLengthFromVersion[n.ExtVersion]
+	var base uint
+	switch n.Version {
+	case TraceNotifyVersion0:
+		base = traceNotifyV0Len
+	case TraceNotifyVersion1:
+		base = traceNotifyV1Len
+	case TraceNotifyVersion2:
+		base = traceNotifyV2Len
+	default:
+		base = traceNotifyLength[n.Version]
+	}
+	if n.ExtVersion == TraceNotifyExtensionDisabled {
+		return base
+	}
+	return base + traceNotifyExtensionLengthFromVersion[n.ExtVersion]
 }
 
 // DumpInfo prints a summary of the trace messages.

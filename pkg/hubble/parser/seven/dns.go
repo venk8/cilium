@@ -4,7 +4,7 @@
 package seven
 
 import (
-	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/gopacket/gopacket/layers"
@@ -14,9 +14,12 @@ import (
 )
 
 func decodeDNS(flowType accesslog.FlowType, dns *accesslog.LogRecordDNS) *flowpb.Layer7_Dns {
-	qtypes := make([]string, 0, len(dns.QTypes))
-	for _, qtype := range dns.QTypes {
-		qtypes = append(qtypes, layers.DNSType(qtype).String())
+	var qtypes []string
+	if n := len(dns.QTypes); n > 0 {
+		qtypes = make([]string, n)
+		for i, qtype := range dns.QTypes {
+			qtypes[i] = layers.DNSType(qtype).String()
+		}
 	}
 	if flowType == accesslog.TypeRequest {
 		// Set only fields that are relevant for requests.
@@ -28,13 +31,19 @@ func decodeDNS(flowType accesslog.FlowType, dns *accesslog.LogRecordDNS) *flowpb
 			},
 		}
 	}
-	ips := make([]string, 0, len(dns.IPs))
-	for _, ip := range dns.IPs {
-		ips = append(ips, ip.String())
+	var ips []string
+	if n := len(dns.IPs); n > 0 {
+		ips = make([]string, n)
+		for i, ip := range dns.IPs {
+			ips[i] = ip.String()
+		}
 	}
-	rtypes := make([]string, 0, len(dns.AnswerTypes))
-	for _, rtype := range dns.AnswerTypes {
-		rtypes = append(rtypes, layers.DNSType(rtype).String())
+	var rtypes []string
+	if n := len(dns.AnswerTypes); n > 0 {
+		rtypes = make([]string, n)
+		for i, rtype := range dns.AnswerTypes {
+			rtypes[i] = layers.DNSType(rtype).String()
+		}
 	}
 	return &flowpb.Layer7_Dns{
 		Dns: &flowpb.DNS{
@@ -51,46 +60,69 @@ func decodeDNS(flowType accesslog.FlowType, dns *accesslog.LogRecordDNS) *flowpb
 }
 
 func dnsSummary(flowType accesslog.FlowType, dns *accesslog.LogRecordDNS) string {
-	types := []string{}
-	for _, t := range dns.QTypes {
-		types = append(types, layers.DNSType(t).String())
+	var qTypeStr string
+	switch len(dns.QTypes) {
+	case 0:
+	case 1:
+		qTypeStr = layers.DNSType(dns.QTypes[0]).String()
+	default:
+		types := make([]string, len(dns.QTypes))
+		for i, t := range dns.QTypes {
+			types[i] = layers.DNSType(t).String()
+		}
+		qTypeStr = strings.Join(types, ",")
 	}
-	qTypeStr := strings.Join(types, ",")
 
 	switch flowType {
 	case accesslog.TypeRequest:
-		return fmt.Sprintf("DNS Query %s %s", dns.Query, qTypeStr)
+		return "DNS Query " + dns.Query + " " + qTypeStr
 	case accesslog.TypeResponse:
 		rcode := layers.DNSResponseCode(dns.RCode)
 
 		var answer string
 		if rcode != layers.DNSResponseCodeNoErr {
-			answer = fmt.Sprintf("RCode: %s", rcode)
+			answer = "RCode: " + rcode.String()
 		} else {
 			parts := make([]string, 0, 2)
 
 			if len(dns.IPs) > 0 {
-				ips := make([]string, 0, len(dns.IPs))
-				for _, ip := range dns.IPs {
-					ips = append(ips, ip.String())
+				if len(dns.IPs) == 1 {
+					parts = append(parts, strconv.Quote(dns.IPs[0].String()))
+				} else {
+					ips := make([]string, len(dns.IPs))
+					for i, ip := range dns.IPs {
+						ips[i] = ip.String()
+					}
+					parts = append(parts, strconv.Quote(strings.Join(ips, ",")))
 				}
-				parts = append(parts, fmt.Sprintf("%q", strings.Join(ips, ",")))
 			}
 
 			if len(dns.CNAMEs) > 0 {
-				parts = append(parts, fmt.Sprintf("CNAMEs: %q", strings.Join(dns.CNAMEs, ",")))
+				parts = append(parts, "CNAMEs: "+strconv.Quote(strings.Join(dns.CNAMEs, ",")))
 			}
 
 			answer = strings.Join(parts, " ")
 		}
 
 		sourceType := "Query"
-		switch dns.ObservationSource {
-		case accesslog.DNSSourceProxy:
+		if dns.ObservationSource == accesslog.DNSSourceProxy {
 			sourceType = "Proxy"
 		}
 
-		return fmt.Sprintf("DNS Answer %s TTL: %d (%s %s %s)", answer, dns.TTL, sourceType, dns.Query, qTypeStr)
+		var buf [160]byte
+		b := buf[:0]
+		b = append(b, "DNS Answer "...)
+		b = append(b, answer...)
+		b = append(b, " TTL: "...)
+		b = strconv.AppendUint(b, uint64(dns.TTL), 10)
+		b = append(b, " ("...)
+		b = append(b, sourceType...)
+		b = append(b, ' ')
+		b = append(b, dns.Query...)
+		b = append(b, ' ')
+		b = append(b, qTypeStr...)
+		b = append(b, ')')
+		return string(b)
 	}
 
 	return ""

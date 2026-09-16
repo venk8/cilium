@@ -153,6 +153,9 @@ func (n *PolicyVerdictNotify) IsTrafficAudited() bool {
 // DataOffset returns the offset from the beginning of PolicyVerdictNotify where the
 // notification data begins.
 func (n *PolicyVerdictNotify) DataOffset() uint {
+	if n.ExtVersion == PolicyVerdictExtensionDisabled {
+		return PolicyVerdictNotifyLen
+	}
 	return PolicyVerdictNotifyLen + policyVerdictExtensionLengthFromVersion[n.ExtVersion]
 }
 

@@ -191,7 +191,21 @@ func (n *DropNotify) IsVXLAN() bool {
 //
 // Returns zero for invalid or unknown DropNotify messages.
 func (n *DropNotify) DataOffset() uint {
-	return dropNotifyLengthFromVersion[n.Version] + dropNotifyExtensionLengthFromVersion[n.ExtVersion]
+	var base uint
+	switch n.Version {
+	case DropNotifyVersion0, DropNotifyVersion1:
+		base = dropNotifyV1Len
+	case DropNotifyVersion2:
+		base = dropNotifyV2Len
+	case DropNotifyVersion3:
+		base = dropNotifyV3Len
+	default:
+		base = dropNotifyLengthFromVersion[n.Version]
+	}
+	if n.ExtVersion == DropNotifyExtensionDisabled {
+		return base
+	}
+	return base + dropNotifyExtensionLengthFromVersion[n.ExtVersion]
 }
 
 // DumpInfo prints a summary of the drop messages.

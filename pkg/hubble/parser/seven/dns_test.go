@@ -89,3 +89,45 @@ func TestDecodeL7DNSRecord(t *testing.T) {
 		Rrtypes:           []string{"A"},
 	}, f.GetL7().GetDns())
 }
+
+func BenchmarkL7DNSDecode(b *testing.B) {
+	lr := &accesslog.LogRecord{
+		Type:                accesslog.TypeResponse,
+		Timestamp:           fakeTimestamp,
+		NodeAddressInfo:     fakeNodeInfo,
+		ObservationPoint:    accesslog.Ingress,
+		SourceEndpoint:      fakeDestinationEndpoint,
+		DestinationEndpoint: fakeSourceEndpoint,
+		IPVersion:           accesslog.VersionIPV6,
+		Verdict:             accesslog.VerdictForwarded,
+		TransportProtocol:   accesslog.TransportProtocol(u8proto.UDP),
+		ServiceInfo:         nil,
+		DropReason:          nil,
+		DNS: &accesslog.LogRecordDNS{
+			Query:             "deathstar.empire.svc.cluster.local.",
+			IPs:               []netip.Addr{netip.MustParseAddr("1.2.3.4")},
+			TTL:               5,
+			ObservationSource: accesslog.DNSSourceProxy,
+			RCode:             0,
+			QTypes:            []uint16{1},
+			AnswerTypes:       []uint16{1},
+		},
+	}
+	lr.SourceEndpoint.Port = 53
+	lr.DestinationEndpoint.Port = 56789
+
+	dnsGetter := &testutils.NoopDNSGetter
+	ipGetter := &testutils.NoopIPGetter
+	serviceGetter := &testutils.NoopServiceGetter
+	endpointGetter := &testutils.NoopEndpointGetter
+
+	parser, err := New(hivetest.Logger(b), dnsGetter, ipGetter, serviceGetter, endpointGetter)
+	require.NoError(b, err)
+
+	f := &flowpb.Flow{}
+	b.ReportAllocs()
+
+	for b.Loop() {
+		_ = parser.Decode(lr, f)
+	}
+}

@@ -4,13 +4,14 @@
 package ipcache
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/netip"
-	"sort"
+	"slices"
 
 	"github.com/cilium/hive/cell"
 	"github.com/cilium/hive/job"
@@ -88,8 +89,8 @@ func (s *IPIdentitySynchronizer) Upsert(ctx context.Context, params *UpsertParam
 			Protocol: u8proto.U8proto(value.Proto).String(),
 		})
 	}
-	sort.Slice(namedPorts, func(i, j int) bool {
-		return namedPorts[i].Name < namedPorts[j].Name
+	slices.SortFunc(namedPorts, func(a, b identity.NamedPort) int {
+		return cmp.Compare(a.Name, b.Name)
 	})
 
 	ipKey := kvstore.JoinKey(IPIdentitiesPath, AddressSpace, params.IP.String())

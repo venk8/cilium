@@ -33,6 +33,12 @@ type Decoder interface {
 	Decode(monitorEvent *observerTypes.MonitorEvent) (*v1.Event, error)
 }
 
+// staticFlowEmitter is a pre-allocated singleton for Hubble flow emitters to avoid per-packet allocation churn.
+var staticFlowEmitter = &pb.Emitter{
+	Name:    v1.FlowEmitter,
+	Version: v1.FlowEmitterVersion,
+}
+
 // Parser for all flows
 type Parser struct {
 	l34  *threefour.Parser
@@ -115,11 +121,8 @@ func (p *Parser) Decode(monitorEvent *observerTypes.MonitorEvent) (*v1.Event, er
 		}
 
 		flow := &pb.Flow{
-			Emitter: &pb.Emitter{
-				Name:    v1.FlowEmitter,
-				Version: v1.FlowEmitterVersion,
-			},
-			Uuid: monitorEvent.UUID.String(),
+			Emitter: staticFlowEmitter,
+			Uuid:    monitorEvent.UUID.String(),
 		}
 		switch payload.Data[0] {
 		case monitorAPI.MessageTypeDebug:
@@ -151,11 +154,8 @@ func (p *Parser) Decode(monitorEvent *observerTypes.MonitorEvent) (*v1.Event, er
 		switch payload.Type {
 		case monitorAPI.MessageTypeAccessLog:
 			flow := &pb.Flow{
-				Emitter: &pb.Emitter{
-					Name:    v1.FlowEmitter,
-					Version: v1.FlowEmitterVersion,
-				},
-				Uuid: monitorEvent.UUID.String(),
+				Emitter: staticFlowEmitter,
+				Uuid:    monitorEvent.UUID.String(),
 			}
 			logrecord, ok := payload.Message.(accesslog.LogRecord)
 			if !ok {

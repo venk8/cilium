@@ -4,10 +4,9 @@
 package seven
 
 import (
-	"fmt"
-	"maps"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 
 	flowpb "github.com/cilium/cilium/api/v1/flow"
@@ -19,10 +18,19 @@ import (
 
 func decodeHTTP(flowType accesslog.FlowType, http *accesslog.LogRecordHTTP, opts *options.Options) *flowpb.Layer7_Http {
 	var headers []*flowpb.HTTPHeader
-	for _, key := range slices.Sorted(maps.Keys(http.Headers)) {
-		for _, value := range http.Headers[key] {
-			filteredValue := filterHeader(key, value, opts.HubbleRedactSettings)
-			headers = append(headers, &flowpb.HTTPHeader{Key: key, Value: filteredValue})
+	if n := len(http.Headers); n > 0 {
+		keys := make([]string, 0, n)
+		for k := range http.Headers {
+			keys = append(keys, k)
+		}
+		if len(keys) > 1 {
+			slices.Sort(keys)
+		}
+		for _, key := range keys {
+			for _, value := range http.Headers[key] {
+				filteredValue := filterHeader(key, value, opts.HubbleRedactSettings)
+				headers = append(headers, &flowpb.HTTPHeader{Key: key, Value: filteredValue})
+			}
 		}
 	}
 	uri := filteredURL(http.URL, opts.HubbleRedactSettings)
@@ -55,9 +63,20 @@ func (p *Parser) httpSummary(flowType accesslog.FlowType, http *accesslog.LogRec
 	httpRequest := http.Method + " " + uri.String()
 	switch flowType {
 	case accesslog.TypeRequest:
-		return fmt.Sprintf("%s %s", http.Protocol, httpRequest)
+		return http.Protocol + " " + httpRequest
 	case accesslog.TypeResponse:
-		return fmt.Sprintf("%s %d %dms (%s)", http.Protocol, http.Code, uint64(time.Duration(flow.GetL7().LatencyNs)/time.Millisecond), httpRequest)
+		ms := uint64(time.Duration(flow.GetL7().LatencyNs) / time.Millisecond)
+		var buf [128]byte
+		b := buf[:0]
+		b = append(b, http.Protocol...)
+		b = append(b, ' ')
+		b = strconv.AppendUint(b, uint64(http.Code), 10)
+		b = append(b, ' ')
+		b = strconv.AppendUint(b, ms, 10)
+		b = append(b, "ms ("...)
+		b = append(b, httpRequest...)
+		b = append(b, ')')
+		return string(b)
 	}
 	return ""
 }
@@ -105,13 +124,22 @@ func filteredURL(uri *url.URL, redactSettings options.HubbleRedactSettings) *url
 		// it.
 		return &url.URL{}
 	}
-	u2 := cloneURL(uri)
-	if redactSettings.RedactHTTPUserInfo && u2.User != nil {
-		if _, ok := u2.User.Password(); ok {
-			u2.User = url.UserPassword(u2.User.Username(), defaults.SensitiveValueRedacted)
+	needsUserRedact := redactSettings.RedactHTTPUserInfo && uri.User != nil
+	if needsUserRedact {
+		if _, ok := uri.User.Password(); !ok {
+			needsUserRedact = false
 		}
 	}
-	if redactSettings.RedactHTTPQuery {
+	needsQueryRedact := redactSettings.RedactHTTPQuery && (uri.RawQuery != "" || uri.Fragment != "")
+	if !needsUserRedact && !needsQueryRedact {
+		return uri
+	}
+
+	u2 := cloneURL(uri)
+	if needsUserRedact {
+		u2.User = url.UserPassword(u2.User.Username(), defaults.SensitiveValueRedacted)
+	}
+	if needsQueryRedact {
 		u2.RawQuery = ""
 		u2.Fragment = ""
 	}

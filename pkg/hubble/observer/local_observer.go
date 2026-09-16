@@ -29,6 +29,7 @@ import (
 	"github.com/cilium/cilium/pkg/hubble/parser"
 	parserErrors "github.com/cilium/cilium/pkg/hubble/parser/errors"
 	"github.com/cilium/cilium/pkg/hubble/parser/fieldmask"
+	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	nodeTypes "github.com/cilium/cilium/pkg/node/types"
 	"github.com/cilium/cilium/pkg/time"
@@ -67,6 +68,8 @@ type LocalObserverServer struct {
 	numObservedFlows atomic.Uint64
 
 	nsManager namespace.Manager
+	nsMu      lock.RWMutex
+	nsCache   map[string]time.Time
 }
 
 // NewLocalServer returns a new local observer server.
@@ -98,6 +101,7 @@ func NewLocalServer(
 		payloadParser: payloadParser,
 		startTime:     time.Now(),
 		nsManager:     nsManager,
+		nsCache:       make(map[string]time.Time),
 		opts:          opts,
 	}
 
@@ -562,6 +566,9 @@ func (s *LocalObserverServer) GetDebugEvents(
 }
 
 func logFilters(filters []*flowpb.FlowFilter) string {
+	if len(filters) == 0 {
+		return "{}"
+	}
 	s := make([]string, 0, len(filters))
 	for _, f := range filters {
 		s = append(s, f.String())
@@ -701,19 +708,45 @@ func (r *eventsReader) Next(ctx context.Context) (*v1.Event, error) {
 	}
 }
 
-func (s *LocalObserverServer) trackNamespaces(flow *flowpb.Flow) {
-	// track namespaces seen.
-	if srcNs := flow.GetSource().GetNamespace(); srcNs != "" {
-		s.nsManager.AddNamespace(&observerpb.Namespace{
-			Namespace: srcNs,
-			Cluster:   nodeTypes.GetClusterName(),
-		})
+func (s *LocalObserverServer) trackNamespace(ns string, now time.Time) {
+	s.nsMu.RLock()
+	last, ok := s.nsCache[ns]
+	if ok && now.Sub(last) < 5*time.Minute {
+		s.nsMu.RUnlock()
+		return
 	}
-	if dstNs := flow.GetDestination().GetNamespace(); dstNs != "" {
-		s.nsManager.AddNamespace(&observerpb.Namespace{
-			Namespace: dstNs,
-			Cluster:   nodeTypes.GetClusterName(),
-		})
+	s.nsMu.RUnlock()
+
+	s.nsMu.Lock()
+	last, ok = s.nsCache[ns]
+	if ok && now.Sub(last) < 5*time.Minute {
+		s.nsMu.Unlock()
+		return
+	}
+	if s.nsCache == nil {
+		s.nsCache = make(map[string]time.Time)
+	}
+	s.nsCache[ns] = now
+	s.nsMu.Unlock()
+
+	s.nsManager.AddNamespace(&observerpb.Namespace{
+		Namespace: ns,
+		Cluster:   nodeTypes.GetClusterName(),
+	})
+}
+
+func (s *LocalObserverServer) trackNamespaces(flow *flowpb.Flow) {
+	srcNs := flow.GetSource().GetNamespace()
+	dstNs := flow.GetDestination().GetNamespace()
+	if srcNs == "" && dstNs == "" {
+		return
+	}
+	now := time.Now()
+	if srcNs != "" {
+		s.trackNamespace(srcNs, now)
+	}
+	if dstNs != "" && dstNs != srcNs {
+		s.trackNamespace(dstNs, now)
 	}
 }
 
