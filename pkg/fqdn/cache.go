@@ -815,7 +815,7 @@ func (c *DNSCache) MarshalJSON() ([]byte, error) {
 // Note: This is destructive to any correct data. Use UpdateFromCache for bulk
 // updates.
 func (c *DNSCache) UnmarshalJSON(raw []byte) error {
-	lookups := make([]*cacheEntry, 0)
+	var lookups []*cacheEntry
 	if err := json.Unmarshal(raw, &lookups); err != nil {
 		return err
 	}
@@ -823,8 +823,8 @@ func (c *DNSCache) UnmarshalJSON(raw []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	c.forward = make(map[string]ipEntries)
-	c.reverse = make(map[netip.Addr]nameEntries)
+	c.forward = make(map[string]ipEntries, len(lookups))
+	c.reverse = make(map[netip.Addr]nameEntries, len(lookups))
 
 	for _, newLookup := range lookups {
 		c.updateWithEntry(newLookup)

@@ -91,7 +91,7 @@ func (m *GatewayAddressStatusManager) SetAddressStatus(ctx context.Context, gw *
 		// IP addresses as we can fit into Status
 		nodes := &corev1.NodeList{}
 
-		ips := make([]netip.Addr, 0)
+		ips := make([]netip.Addr, 0, 16)
 		// for every label that is present, determine if there are any nodes with those labels and
 		// add them to the list of ips
 		for _, s := range m.hostNetworkLabel {
@@ -126,6 +126,7 @@ func (m *GatewayAddressStatusManager) SetAddressStatus(ctx context.Context, gw *
 		if len(ips) > 16 {
 			ips = ips[:16]
 		}
+		addresses = make([]gatewayv1.GatewayStatusAddress, 0, len(ips))
 		for _, ipAddress := range ips {
 			addresses = append(addresses, gatewayv1.GatewayStatusAddress{
 				Type:  GatewayAddressTypePtr(gatewayv1.IPAddressType),
@@ -138,6 +139,7 @@ func (m *GatewayAddressStatusManager) SetAddressStatus(ctx context.Context, gw *
 			// reconciliation should be triggered when the loadbalancer services gets updated.
 			return nil
 		}
+		addresses = make([]gatewayv1.GatewayStatusAddress, 0, len(svc.Status.LoadBalancer.Ingress))
 		for _, s := range svc.Status.LoadBalancer.Ingress {
 			if len(s.IP) != 0 {
 				addresses = append(addresses, gatewayv1.GatewayStatusAddress{

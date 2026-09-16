@@ -676,15 +676,11 @@ func PurgeOrphanNATEntries(ctMapTCP, ctMapAny *Map) *NatGCStats {
 				stats.IngressAlive++
 			}
 		} else if natKey.GetFlags()&tuple.TUPLE_F_OUT == tuple.TUPLE_F_OUT {
-			checkDsr := func(entry *CtEntry) bool {
-				return entry.isDsrInternalEntry()
-			}
-
 			egressCTKey := egressCTKeyFromEgressNatKey(natKey)
 			dsrCTKey := dsrCTKeyFromEgressNatKey(natKey)
 
 			if !ctEntryExist(ctMap, egressCTKey, nil) &&
-				!ctEntryExist(ctMap, dsrCTKey, checkDsr) {
+				!ctEntryExist(ctMap, dsrCTKey, (*CtEntry).isDsrInternalEntry) {
 				// No relevant CT entries were found, delete the orphan egress NAT entry
 				egressEntriesToDelete = append(egressEntriesToDelete, natKey)
 			} else {

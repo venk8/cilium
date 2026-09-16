@@ -246,6 +246,20 @@ func (ipc *IPCache) getHostIPCacheRLocked(ip string) (net.IP, uint8) {
 	return ipKeyPair.IP, ipKeyPair.Key
 }
 
+func (ipc *IPCache) getEntryInfoRLocked(ip string) (id Identity, exists bool, hostIP net.IP, hostKey uint8, epFlags uint8) {
+	id, exists = ipc.ipToIdentityCache[ip]
+	ipKeyPair := ipc.ipToHostIPCache[ip]
+	hostIP, hostKey = ipKeyPair.IP, ipKeyPair.Key
+	epFlags = ipc.ipToEndpointFlags[ip]
+	return
+}
+
+func (ipc *IPCache) getEntryInfo(ip string) (id Identity, exists bool, hostIP net.IP, hostKey uint8, epFlags uint8) {
+	ipc.mutex.RLock()
+	defer ipc.mutex.RUnlock()
+	return ipc.getEntryInfoRLocked(ip)
+}
+
 // GetK8sMetadata returns Kubernetes metadata for the given IP address.
 // The returned pointer should *never* be modified.
 func (ipc *IPCache) GetK8sMetadata(ip netip.Addr) *K8sMetadata {
@@ -574,12 +588,13 @@ func (ipc *IPCache) UpsertMetadataBatch(updates ...MU) (revision uint64) {
 	prefixes := make([]cmtypes.PrefixCluster, 0, len(updates))
 	ipc.metadata.Lock()
 	for _, upd := range updates {
-		if !upd.IsCIDR || ipc.metadata.prefixRefCounter.Add(canonicalPrefix(upd.Prefix)) {
+		pfx := canonicalPrefix(upd.Prefix)
+		if !upd.IsCIDR || ipc.metadata.prefixRefCounter.Add(pfx) {
 			resource := upd.Resource
 			if upd.IsCIDR {
 				resource = cidrResourceID
 			}
-			prefixes = append(prefixes, ipc.metadata.upsertLocked(upd.Prefix, upd.Source, resource, upd.Metadata...)...)
+			prefixes = ipc.metadata.upsertLockedInto(prefixes, pfx, upd.Source, resource, upd.Metadata...)
 		}
 	}
 	ipc.metadata.Unlock()
@@ -609,12 +624,13 @@ func (ipc *IPCache) RemoveMetadataBatch(updates ...MU) (revision uint64) {
 	prefixes := make([]cmtypes.PrefixCluster, 0, len(updates))
 	ipc.metadata.Lock()
 	for _, upd := range updates {
-		if !upd.IsCIDR || ipc.metadata.prefixRefCounter.Delete(canonicalPrefix(upd.Prefix)) {
+		pfx := canonicalPrefix(upd.Prefix)
+		if !upd.IsCIDR || ipc.metadata.prefixRefCounter.Delete(pfx) {
 			resource := upd.Resource
 			if upd.IsCIDR {
 				resource = cidrResourceID
 			}
-			prefixes = append(prefixes, ipc.metadata.remove(upd.Prefix, resource, upd.Metadata...)...)
+			prefixes = ipc.metadata.removeInto(prefixes, pfx, resource, upd.Metadata...)
 		}
 	}
 	ipc.metadata.Unlock()
@@ -883,11 +899,12 @@ func (ipc *IPCache) lookupByIPRLocked(IP string) (Identity, bool) {
 // identity in the provided IPCache, and returns the corresponding security
 // identity as well as whether the entry exists in the IPCache.
 func (ipc *IPCache) LookupByPrefixRLocked(prefix string) (identity Identity, exists bool) {
-	if _, cidr, err := net.ParseCIDR(prefix); err == nil {
-		// If it's a fully specfied prefix, attempt to find the host
-		ones, bits := cidr.Mask.Size()
-		if ones == bits {
-			identity, exists = ipc.ipToIdentityCache[cidr.IP.String()]
+	if p, err := netip.ParsePrefix(prefix); err == nil {
+		// If it's a fully specified prefix, attempt to find the host
+		if p.IsSingleIP() {
+			var buf [64]byte
+			b := p.Addr().AppendTo(buf[:0])
+			identity, exists = ipc.ipToIdentityCache[string(b)]
 			if exists {
 				return
 			}
@@ -918,7 +935,9 @@ func (ipc *IPCache) LookupSecIDByIP(ip netip.Addr) (id Identity, ok bool) {
 	ipc.mutex.RLock()
 	defer ipc.mutex.RUnlock()
 
-	if id, ok = ipc.lookupByIPRLocked(ip.String()); ok {
+	var buf [64]byte
+	b := ip.AppendTo(buf[:0])
+	if id, ok = ipc.ipToIdentityCache[string(b)]; ok {
 		return id, ok
 	}
 
@@ -931,8 +950,12 @@ func (ipc *IPCache) LookupSecIDByIP(ip netip.Addr) (id Identity, ok bool) {
 		// note: we perform a lookup even when `prefixLen == bits`, as some
 		// entries derived by a single address cidr-range will not have been
 		// found by the above lookup
-		cidr, _ := ip.Prefix(prefixLen)
-		if id, ok = ipc.LookupByPrefixRLocked(cidr.String()); ok {
+		cidr, err := ip.Prefix(prefixLen)
+		if err != nil {
+			continue
+		}
+		b = cidr.AppendTo(buf[:0])
+		if id, ok = ipc.ipToIdentityCache[string(b)]; ok {
 			return id, ok
 		}
 	}

@@ -722,21 +722,13 @@ func benchmarkIPCacheUpsert(b *testing.B, num int) {
 		nms[i] = strconv.Itoa(i)
 	}
 
-	ipcs := make([]*IPCache, 0, b.N)
-	for range b.N {
-		ipcache := NewIPCache(&Configuration{
+	for b.Loop() {
+		ipc := NewIPCache(&Configuration{
 			Context: b.Context(),
 			Logger:  logger,
 			//IdentityAllocator: allocator,
 			IdentityUpdater: &mockUpdater{},
 		})
-		ipcs = append(ipcs, ipcache)
-	}
-
-	i := 0
-	for b.Loop() {
-		ipc := ipcs[i]
-		i++
 
 		for j := range num {
 			meta.PodName = nms[j]
