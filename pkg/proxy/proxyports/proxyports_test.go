@@ -373,3 +373,39 @@ func TestReallocateCRDProxyPort(t *testing.T) {
 	require.True(t, exists2)
 	require.True(t, inuse2, "new port should be marked as in use")
 }
+
+func BenchmarkAllocatePort(b *testing.B) {
+	fakeIPTablesManager := iptables.NewManager()
+	config := ProxyPortsConfig{
+		ProxyPortrangeMin:          10000,
+		ProxyPortrangeMax:          20000,
+		RestoredProxyPortsAgeLimit: 0,
+	}
+
+	p := NewProxyPorts(hivetest.Logger(b), config, fakeIPTablesManager)
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		port, err := p.allocatePort(0, 10000, 20000)
+		if err != nil || port < 10000 || port > 20000 {
+			b.Fatalf("failed to allocate port: %v", err)
+		}
+	}
+}
+
+func BenchmarkParseProcNetPort(b *testing.B) {
+	line := []byte("   0: 0835357F:0035 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 29531077 2 0000000000000000 100 0 0 10 0")
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		port, ok := parseProcNetPort(line)
+		if !ok || port != 53 {
+			b.Fatalf("unexpected result: port=%d, ok=%v", port, ok)
+		}
+	}
+}
+
+

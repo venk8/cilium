@@ -4,8 +4,8 @@
 package stats
 
 import (
-	"container/heap"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"iter"
@@ -18,6 +18,7 @@ import (
 	"github.com/cilium/statedb/index"
 	"github.com/cilium/stream"
 
+	"github.com/cilium/cilium/pkg/byteorder"
 	"github.com/cilium/cilium/pkg/loadbalancer"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/maps/nat"
@@ -79,10 +80,14 @@ type NatMapStats struct {
 }
 
 func (s NatMapStats) Key() index.Key {
-	k := index.String(s.Type + " " + s.EgressIP +
-		" " + s.EndpointIP + ":")
-	k = append(k, index.Uint16(s.RemotePort)...)
-	return k
+	k := make(index.Key, 0, len(s.Type)+len(s.EgressIP)+len(s.EndpointIP)+5)
+	k = append(k, s.Type...)
+	k = append(k, ' ')
+	k = append(k, s.EgressIP...)
+	k = append(k, ' ')
+	k = append(k, s.EndpointIP...)
+	k = append(k, ':')
+	return binary.BigEndian.AppendUint16(k, s.RemotePort)
 }
 
 func (s NatMapStats) addrs() (string, string) {
@@ -183,7 +188,7 @@ func newStats(params params) (*Stats, error) {
 	return m, nil
 }
 
-func upsertStat(m *Stats, topk *topk, family nat.IPFamily) error {
+func upsertStat[T SNATTupleAccessor](m *Stats, topk *topk[T], family nat.IPFamily) error {
 	tx := m.db.WriteTxn(m.table)
 	defer tx.Abort()
 
@@ -191,11 +196,11 @@ func upsertStat(m *Stats, topk *topk, family nat.IPFamily) error {
 	for entry := range m.table.All(tx) {
 		if entry.Type == family.String() {
 			_, _, err := m.table.Delete(tx, entry)
-			errors.Join(errs, err)
+			errs = errors.Join(errs, err)
 		}
 	}
 
-	topk.popForEach(func(key SNATTupleAccessor, count, ith int) {
+	topk.popForEach(func(key T, count, ith int) {
 		if ith == 1 {
 			m.metrics.updateLocalPorts(family, count, m.maxPorts)
 		}
@@ -230,14 +235,13 @@ func (m *Stats) countNat(ctx context.Context) error {
 	if m.natMap4 != nil {
 		tupleToPortCount := make(map[SNATTuple4]uint16, 128)
 		_, err := m.natMap4.DumpBatch4(func(k *tuple.TupleKey4, _ *nat.NatEntry4) {
-			key := *k.ToHost().(*tuple.TupleKey4)
-			if flagsIsIn(key.Flags) &&
-				(key.NextHeader == u8proto.TCP || key.NextHeader == u8proto.ICMP ||
-					key.NextHeader == u8proto.UDP) {
+			if flagsIsIn(k.Flags) &&
+				(k.NextHeader == u8proto.TCP || k.NextHeader == u8proto.ICMP ||
+					k.NextHeader == u8proto.UDP) {
+				key := *k
+				key.SourcePort = byteorder.NetworkToHost16(k.SourcePort)
 				key.DestPort = 0
-				ports := tupleToPortCount[SNATTuple4(key)]
-				ports++
-				tupleToPortCount[SNATTuple4(key)] = ports
+				tupleToPortCount[SNATTuple4(key)]++
 			}
 		})
 
@@ -249,25 +253,24 @@ func (m *Stats) countNat(ctx context.Context) error {
 			errs = errors.Join(errs, err)
 		} else {
 			m.next4(toIter(tupleToPortCount))
-			topk := newTopK(m.config.NatMapStatKStoredEntries)
+			topk := newTopK[SNATTuple4](m.config.NatMapStatKStoredEntries)
 			for tupleKey, bucket := range tupleToPortCount {
 				topk.Push(tupleKey, int(bucket))
 			}
-			errors.Join(errs, upsertStat(m, topk, nat.IPv4))
+			errs = errors.Join(errs, upsertStat(m, topk, nat.IPv4))
 		}
 
 	}
 	if m.natMap6 != nil {
 		tupleToPortCount := make(map[SNATTuple6]uint16, 128)
 		_, err := m.natMap6.DumpBatch6(func(k *tuple.TupleKey6, _ *nat.NatEntry6) {
-			key := *k.ToHost().(*tuple.TupleKey6)
-			if flagsIsIn(key.Flags) &&
-				(key.NextHeader == u8proto.TCP || key.NextHeader == u8proto.ICMPv6 ||
-					key.NextHeader == u8proto.UDP) {
+			if flagsIsIn(k.Flags) &&
+				(k.NextHeader == u8proto.TCP || k.NextHeader == u8proto.ICMPv6 ||
+					k.NextHeader == u8proto.UDP) {
+				key := *k
+				key.SourcePort = byteorder.NetworkToHost16(k.SourcePort)
 				key.DestPort = 0
-				ports := tupleToPortCount[SNATTuple6(key)]
-				ports++
-				tupleToPortCount[SNATTuple6(key)] = ports
+				tupleToPortCount[SNATTuple6(key)]++
 			}
 		})
 
@@ -279,69 +282,90 @@ func (m *Stats) countNat(ctx context.Context) error {
 			errs = errors.Join(errs, err)
 		} else {
 			m.next6(toIter(tupleToPortCount))
-			topk := newTopK(m.config.NatMapStatKStoredEntries)
+			topk := newTopK[SNATTuple6](m.config.NatMapStatKStoredEntries)
 			for tupleKey, bucket := range tupleToPortCount {
 				topk.Push(tupleKey, int(bucket))
 			}
-			errors.Join(errs, upsertStat(m, topk, nat.IPv6))
+			errs = errors.Join(errs, upsertStat(m, topk, nat.IPv6))
 		}
 	}
 	return errs
 }
 
-type tupleBucket struct {
-	key   SNATTupleAccessor
+type tupleBucket[T any] struct {
+	key   T
 	count int
 }
 
-type topk struct {
-	mq      *minQueue
-	k, size int
+type topk[T SNATTupleAccessor] struct {
+	mq []tupleBucket[T]
+	k  int
 }
 
-func newTopK(k int) *topk {
-	mq := make(minQueue, 0, k)
-	heap.Init(&mq)
-	return &topk{mq: &mq, k: k}
-}
-
-func (t *topk) Push(key SNATTupleAccessor, count int) {
-	heap.Push(t.mq, tupleBucket{key: key, count: count})
-	t.size++
-	if t.size > t.k {
-		heap.Pop(t.mq)
-		t.size--
+func newTopK[T SNATTupleAccessor](k int) *topk[T] {
+	if k < 0 {
+		k = 0
+	}
+	return &topk[T]{
+		mq: make([]tupleBucket[T], 0, k),
+		k:  k,
 	}
 }
 
-func (t *topk) popForEach(fn func(key SNATTupleAccessor, count, ith int)) {
-	for i := range t.size {
-		tuple := heap.Pop(t.mq).(tupleBucket)
-		fn(tuple.key, tuple.count, t.size-i)
+func (t *topk[T]) Push(key T, count int) {
+	if t.k <= 0 {
+		return
 	}
-	t.size = 0
+	if len(t.mq) < t.k {
+		t.mq = append(t.mq, tupleBucket[T]{key: key, count: count})
+		t.siftUp(len(t.mq) - 1)
+		return
+	}
+	if count <= t.mq[0].count {
+		return
+	}
+	t.mq[0] = tupleBucket[T]{key: key, count: count}
+	t.siftDown(0)
 }
 
-type minQueue []tupleBucket
-
-func (pq minQueue) Len() int { return len(pq) }
-
-func (pq minQueue) Less(i, j int) bool {
-	return pq[i].count < pq[j].count
+func (t *topk[T]) popForEach(fn func(key T, count, ith int)) {
+	initialSize := len(t.mq)
+	for i := range initialSize {
+		min := t.mq[0]
+		lastIdx := len(t.mq) - 1
+		t.mq[0] = t.mq[lastIdx]
+		t.mq = t.mq[:lastIdx]
+		t.siftDown(0)
+		fn(min.key, min.count, initialSize-i)
+	}
 }
 
-func (pq minQueue) Swap(i, j int) {
-	pq[i], pq[j] = pq[j], pq[i]
+func (t *topk[T]) siftUp(i int) {
+	for i > 0 {
+		p := (i - 1) / 2
+		if t.mq[i].count >= t.mq[p].count {
+			break
+		}
+		t.mq[i], t.mq[p] = t.mq[p], t.mq[i]
+		i = p
+	}
 }
 
-func (pq *minQueue) Push(x any) {
-	*pq = append(*pq, x.(tupleBucket))
-}
-
-func (pq *minQueue) Pop() any {
-	old := *pq
-	n := len(old)
-	item := old[n-1]
-	*pq = old[0 : n-1]
-	return item
+func (t *topk[T]) siftDown(i int) {
+	n := len(t.mq)
+	for {
+		left := 2*i + 1
+		if left >= n {
+			break
+		}
+		smallest := left
+		if right := left + 1; right < n && t.mq[right].count < t.mq[left].count {
+			smallest = right
+		}
+		if t.mq[i].count <= t.mq[smallest].count {
+			break
+		}
+		t.mq[i], t.mq[smallest] = t.mq[smallest], t.mq[i]
+		i = smallest
+	}
 }

@@ -4,8 +4,8 @@
 package bwmap
 
 import (
-	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 
 	"github.com/cilium/cilium/pkg/bpf"
@@ -33,7 +33,11 @@ type EdtId struct {
 }
 
 func (k *EdtId) String() string {
-	return fmt.Sprintf("%d, %d", int(k.Id), int(k.Direction))
+	var buf [24]byte
+	b := strconv.AppendUint(buf[:0], uint64(k.Id), 10)
+	b = append(b, ", "...)
+	b = strconv.AppendUint(b, uint64(k.Direction), 10)
+	return string(b)
 }
 
 func (k *EdtId) New() bpf.MapKey { return &EdtId{} }
@@ -48,7 +52,11 @@ type EdtInfo struct {
 }
 
 func (v *EdtInfo) String() string {
-	return fmt.Sprintf("%d, %d", int(v.Bps), int(v.Prio))
+	var buf [32]byte
+	b := strconv.AppendUint(buf[:0], v.Bps, 10)
+	b = append(b, ", "...)
+	b = strconv.AppendUint(b, uint64(v.Prio), 10)
+	return string(b)
 }
 
 func (v *EdtInfo) New() bpf.MapValue { return &EdtInfo{} }

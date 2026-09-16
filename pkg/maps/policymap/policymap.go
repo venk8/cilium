@@ -82,15 +82,10 @@ func (pef policyEntryFlags) getPrefixLen() uint8 {
 
 // String returns the string implementation of policyEntryFlags.
 func (pef policyEntryFlags) String() string {
-	var str []string
-
 	if pef.is(policyFlagDeny) {
-		str = append(str, "Deny")
-	} else {
-		str = append(str, "Allow")
+		return "Deny"
 	}
-
-	return strings.Join(str, ", ")
+	return "Allow"
 }
 
 type policyMap struct {

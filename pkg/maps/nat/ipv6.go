@@ -4,7 +4,7 @@
 package nat
 
 import (
-	"fmt"
+	"strconv"
 	"unsafe"
 
 	"github.com/cilium/cilium/pkg/bpf"
@@ -29,28 +29,39 @@ const SizeofNatEntry6 = int(unsafe.Sizeof(NatEntry6{}))
 
 // String returns the readable format.
 func (n *NatEntry6) String() string {
-	return fmt.Sprintf("Addr=%s Port=%d Created=%d NeedsCT=%d\n",
-		n.Addr,
-		n.Port,
-		n.Created,
-		n.NeedsCT)
+	b := make([]byte, 0, 96)
+	b = append(b, "Addr="...)
+	b = append(b, n.Addr.String()...)
+	b = append(b, " Port="...)
+	b = strconv.AppendUint(b, uint64(n.Port), 10)
+	b = append(b, " Created="...)
+	b = strconv.AppendUint(b, n.Created, 10)
+	b = append(b, " NeedsCT="...)
+	b = strconv.AppendUint(b, n.NeedsCT, 10)
+	b = append(b, '\n')
+	return string(b)
 }
 
 // Dump dumps NAT entry to string.
 func (n *NatEntry6) Dump(key NatKey, toDeltaSecs func(uint64) string) string {
 	var which string
-
 	if key.GetFlags()&tuple.TUPLE_F_IN != 0 {
-		which = "DST"
+		which = "DST ["
 	} else {
-		which = "SRC"
+		which = "SRC ["
 	}
-	return fmt.Sprintf("XLATE_%s [%s]:%d Created=%s NeedsCT=%d\n",
-		which,
-		n.Addr,
-		n.Port,
-		toDeltaSecs(n.Created),
-		n.NeedsCT)
+	b := make([]byte, 0, 96)
+	b = append(b, "XLATE_"...)
+	b = append(b, which...)
+	b = append(b, n.Addr.String()...)
+	b = append(b, "]:"...)
+	b = strconv.AppendUint(b, uint64(n.Port), 10)
+	b = append(b, " Created="...)
+	b = append(b, toDeltaSecs(n.Created)...)
+	b = append(b, " NeedsCT="...)
+	b = strconv.AppendUint(b, n.NeedsCT, 10)
+	b = append(b, '\n')
+	return string(b)
 }
 
 // ToHost converts NatEntry4 ports to host byte order.

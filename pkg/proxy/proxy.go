@@ -364,6 +364,7 @@ func (p *Proxy) GetStatusModel() *models.ProxyStatus {
 		PortRange:      fmt.Sprintf("%d-%d", rangeMin, rangeMax),
 		TotalPorts:     int64(nPorts),
 		TotalRedirects: int64(len(p.redirects)),
+		Redirects:      make([]*models.ProxyRedirect, 0, len(p.redirects)),
 	}
 
 	for name, impl := range p.redirects {

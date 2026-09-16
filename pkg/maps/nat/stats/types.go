@@ -84,7 +84,9 @@ func (t SNATTuple6) GetProto() u8proto.U8proto {
 func toIter[T snatTupleConstraint](s map[T]uint16) TupleCountIterator {
 	return func(yield func(SNATTupleAccessor, uint16) bool) {
 		for k, v := range s {
-			yield(k, v)
+			if !yield(k, v) {
+				return
+			}
 		}
 	}
 }

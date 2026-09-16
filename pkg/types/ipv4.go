@@ -9,7 +9,7 @@ import "net/netip"
 type IPv4 [4]byte
 
 func (v4 IPv4) IsZero() bool {
-	return v4[0] == 0 && v4[1] == 0 && v4[2] == 0 && v4[3] == 0
+	return v4 == IPv4{}
 }
 
 func (v4 IPv4) Addr() netip.Addr {
@@ -20,6 +20,7 @@ func (v4 IPv4) String() string {
 	return v4.Addr().String()
 }
 
+// AppendTo appends the string representation of v4 to b and returns the resulting slice.
 func (v4 IPv4) AppendTo(b []byte) []byte {
 	return v4.Addr().AppendTo(b)
 }
@@ -29,9 +30,8 @@ func (v4 IPv4) AppendTo(b []byte) []byte {
 // including the "invalid ip" value netip.Addr{} will zero the receiver.
 func (v4 *IPv4) FromAddr(addr netip.Addr) {
 	if addr.Is4() {
-		a := IPv4(addr.As4())
-		copy(v4[:], a[:])
+		*v4 = addr.As4()
 	} else {
-		clear(v4[:])
+		*v4 = IPv4{}
 	}
 }

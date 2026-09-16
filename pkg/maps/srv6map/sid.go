@@ -4,7 +4,6 @@
 package srv6map
 
 import (
-	"fmt"
 	"log/slog"
 	"strconv"
 
@@ -33,7 +32,7 @@ func (k *SIDKey) New() bpf.MapKey {
 }
 
 func (k *SIDKey) String() string {
-	return fmt.Sprintf("sid=%s", k.SID.String())
+	return "sid=" + k.SID.String()
 }
 
 // SIDValue is a value for the SIDMap. Implements bpf.MapValue.
@@ -46,7 +45,7 @@ func (v *SIDValue) New() bpf.MapValue {
 }
 
 func (v *SIDValue) String() string {
-	return fmt.Sprintf("vrfid=%d", v.VRFID)
+	return "vrfid=" + strconv.FormatUint(uint64(v.VRFID), 10)
 }
 
 // SIDMap is the internal representation of an SRv6 SID map.

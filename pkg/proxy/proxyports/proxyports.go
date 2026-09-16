@@ -209,15 +209,18 @@ func (p *ProxyPorts) allocatePort(port, min, max uint16) (uint16, error) {
 		return port, nil
 	}
 
-	// TODO: Maybe not create a large permutation each time?
-	portRange := rand.Perm(int(max - min + 1))
+	count := int(max - min + 1)
+	if count <= 0 {
+		return 0, fmt.Errorf("invalid port range [%d, %d]", min, max)
+	}
+	start := rand.N(count)
 
 	// Allow reuse of previously used ports only if no ports are otherwise available.
 	// This allows the same port to be used again by a listener being reconfigured
 	// after deletion.
 	for _, reuse := range []bool{false, true} {
-		for _, r := range portRange {
-			resPort := uint16(r) + min
+		for i := 0; i < count; i++ {
+			resPort := min + uint16((start+i)%count)
 
 			if p.isPortAvailable(openLocalPorts, resPort, reuse) {
 				return resPort, nil
