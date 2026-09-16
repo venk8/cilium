@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"slices"
 	"sync"
 	"syscall"
 
@@ -86,6 +87,9 @@ type linuxNodeHandler struct {
 	nodeIDsByIPs map[string]uint16
 	// reverse map of the above
 	nodeIPsByIDs map[uint16]sets.Set[string]
+
+	cachedLocalIPv4 net.IP
+	cachedLocalIPv6 net.IP
 
 	ipsecMetricCollector prometheus.Collector
 	ipsecMetricOnce      sync.Once
@@ -553,9 +557,25 @@ func (n *linuxNodeHandler) updateDirectRoutes(oldCIDRs, newCIDRs []netip.Prefix,
 
 	var addedCIDRs, removedCIDRs []netip.Prefix
 	if oldIP.Equal(newIP) {
-		oldSet, newSet := sets.New(oldCIDRs...), sets.New(newCIDRs...)
-		addedCIDRs = newSet.Difference(oldSet).UnsortedList()
-		removedCIDRs = oldSet.Difference(newSet).UnsortedList()
+		if slices.Equal(oldCIDRs, newCIDRs) {
+			return nil
+		}
+		if len(oldCIDRs) <= 2 && len(newCIDRs) <= 2 {
+			for _, n := range newCIDRs {
+				if !slices.Contains(oldCIDRs, n) {
+					addedCIDRs = append(addedCIDRs, n)
+				}
+			}
+			for _, o := range oldCIDRs {
+				if !slices.Contains(newCIDRs, o) {
+					removedCIDRs = append(removedCIDRs, o)
+				}
+			}
+		} else {
+			oldSet, newSet := sets.New(oldCIDRs...), sets.New(newCIDRs...)
+			addedCIDRs = newSet.Difference(oldSet).UnsortedList()
+			removedCIDRs = oldSet.Difference(newSet).UnsortedList()
+		}
 	} else {
 		// if the node IP changed, then we need to update all routes with the
 		// new IP, but we also want to remove any of the old routes with the
@@ -660,7 +680,11 @@ func (n *linuxNodeHandler) createNodeRouteSpec(prefix netip.Prefix, isLocalNode 
 			return route.Route{}, fmt.Errorf("IPv4 router address unavailable")
 		}
 
-		local = net.IP(n.nodeConfig.CiliumInternalIPv4.AsSlice())
+		if len(n.cachedLocalIPv4) > 0 {
+			local = n.cachedLocalIPv4
+		} else {
+			local = net.IP(n.nodeConfig.CiliumInternalIPv4.AsSlice())
+		}
 		nexthop = &local
 	} else {
 		if !n.nodeConfig.CiliumInternalIPv6.IsValid() {
@@ -675,7 +699,11 @@ func (n *linuxNodeHandler) createNodeRouteSpec(prefix netip.Prefix, isLocalNode 
 		// with "Error: Gateway can not be a local address". Instead, we have to remove "via"
 		// as "ip r a $cidr dev cilium_host" to make it work.
 		nexthop = nil
-		local = net.IP(n.nodeConfig.CiliumInternalIPv6.AsSlice())
+		if len(n.cachedLocalIPv6) > 0 {
+			local = n.cachedLocalIPv6
+		} else {
+			local = net.IP(n.nodeConfig.CiliumInternalIPv6.AsSlice())
+		}
 	}
 
 	if !isLocalNode {
@@ -964,6 +992,16 @@ func (n *linuxNodeHandler) NodeConfigurationChanged(newConfig config.Config) err
 
 	prevConfig := n.nodeConfig
 	n.nodeConfig = newConfig
+	if newConfig.CiliumInternalIPv4.IsValid() {
+		n.cachedLocalIPv4 = net.IP(newConfig.CiliumInternalIPv4.AsSlice())
+	} else {
+		n.cachedLocalIPv4 = nil
+	}
+	if newConfig.CiliumInternalIPv6.IsValid() {
+		n.cachedLocalIPv6 = net.IP(newConfig.CiliumInternalIPv6.AsSlice())
+	} else {
+		n.cachedLocalIPv6 = nil
+	}
 
 	if err := n.updateOrRemoveNodeRoutes(
 		cslices.Map(prevConfig.AuxiliaryPrefixes, ip.Prefix.Unwrap),

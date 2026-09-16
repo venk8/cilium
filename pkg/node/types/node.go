@@ -132,15 +132,19 @@ func (a Address) AddrType() addressing.AddressType {
 // and returns which type of address it is. "" is returned if addr
 // is not one of the node's IP addresses.
 func (n *Node) IsNodeIP(addr netip.Addr) addressing.AddressType {
-	for _, a := range n.IPAddresses {
-		// for IPv4 this should not allocate memory
-		// this conversion will go away once net.IP is replaced with netip.Addr
-		ip := a.IP.To4()
-		if ip == nil {
-			ip = a.IP
+	if addr.Is4() {
+		addr4 := addr.As4()
+		for _, a := range n.IPAddresses {
+			if ip := a.IP.To4(); ip != nil && *(*[4]byte)(ip) == addr4 {
+				return a.Type
+			}
 		}
-		if na, ok := netip.AddrFromSlice(ip); ok && na == addr {
-			return a.Type
+	} else if addr.Is6() {
+		addr16 := addr.As16()
+		for _, a := range n.IPAddresses {
+			if a.IP.To4() == nil && len(a.IP) == 16 && *(*[16]byte)(a.IP) == addr16 {
+				return a.Type
+			}
 		}
 	}
 
@@ -155,21 +159,47 @@ func (n *Node) IsNodeIP(addr netip.Addr) addressing.AddressType {
 // Nil is returned if GetNodeIP fails to extract an IP from the Node based
 // on the provided address family.
 func (n *Node) GetNodeIP(ipv6 bool) net.IP {
-	return addressing.ExtractNodeIP[Address](n.IPAddresses, ipv6)
+	var backupIP net.IP
+	for _, addr := range n.IPAddresses {
+		ip := addr.IP
+		if ip == nil {
+			continue
+		}
+		if (ipv6 && ip.To4() != nil) || (!ipv6 && ip.To4() == nil) {
+			continue
+		}
+		switch addr.Type {
+		// Ignore CiliumInternalIPs
+		case addressing.NodeCiliumInternalIP:
+			continue
+		// Always prefer a cluster internal IP
+		case addressing.NodeInternalIP:
+			return ip
+		case addressing.NodeExternalIP:
+			// Fall back to external Node IP
+			// if no internal IP could be found
+			backupIP = ip
+		default:
+			// As a last resort, if no internal or external
+			// IP was found, use any node address available
+			if backupIP == nil {
+				backupIP = ip
+			}
+		}
+	}
+	return backupIP
 }
 
 // GetExternalIP returns ExternalIP of k8s Node. If not present, then it
 // returns nil;
 func (n *Node) GetExternalIP(ipv6 bool) net.IP {
 	for _, addr := range n.IPAddresses {
-		if (ipv6 && addr.IP.To4() != nil) || (!ipv6 && addr.IP.To4() == nil) {
-			continue
-		}
 		if addr.Type == addressing.NodeExternalIP {
-			return addr.IP
+			if is4 := addr.IP.To4() != nil; (!ipv6 && is4) || (ipv6 && !is4) {
+				return addr.IP
+			}
 		}
 	}
-
 	return nil
 }
 
@@ -192,28 +222,20 @@ func (n *Node) GetK8sNodeIP() net.IP {
 // GetNodeInternalIP returns the Internal IPv4 of node or nil.
 func (n *Node) GetNodeInternalIPv4() net.IP {
 	for _, addr := range n.IPAddresses {
-		if addr.IP.To4() == nil {
-			continue
-		}
-		if addr.Type == addressing.NodeInternalIP {
+		if addr.Type == addressing.NodeInternalIP && addr.IP.To4() != nil {
 			return addr.IP
 		}
 	}
-
 	return nil
 }
 
 // GetNodeInternalIP returns the Internal IPv6 of node or nil.
 func (n *Node) GetNodeInternalIPv6() net.IP {
 	for _, addr := range n.IPAddresses {
-		if addr.IP.To4() != nil {
-			continue
-		}
-		if addr.Type == addressing.NodeInternalIP {
+		if addr.Type == addressing.NodeInternalIP && addr.IP.To4() == nil {
 			return addr.IP
 		}
 	}
-
 	return nil
 }
 
@@ -221,12 +243,10 @@ func (n *Node) GetNodeInternalIPv6() net.IP {
 // with cilium_host on the node.
 func (n *Node) GetCiliumInternalIP(ipv6 bool) net.IP {
 	for _, addr := range n.IPAddresses {
-		if (ipv6 && addr.IP.To4() != nil) ||
-			(!ipv6 && addr.IP.To4() == nil) {
-			continue
-		}
 		if addr.Type == addressing.NodeCiliumInternalIP {
-			return addr.IP
+			if is4 := addr.IP.To4() != nil; (!ipv6 && is4) || (ipv6 && !is4) {
+				return addr.IP
+			}
 		}
 	}
 	return nil
@@ -252,13 +272,9 @@ func (n *Node) SetNodeInternalIP(newAddr net.IP) {
 }
 
 func (n *Node) RemoveAddresses(typ addressing.AddressType) {
-	newAddresses := []Address{}
-	for _, addr := range n.IPAddresses {
-		if addr.Type != typ {
-			newAddresses = append(newAddresses, addr)
-		}
-	}
-	n.IPAddresses = newAddresses
+	n.IPAddresses = slices.DeleteFunc(n.IPAddresses, func(addr Address) bool {
+		return addr.Type == typ
+	})
 }
 
 func (n *Node) setAddress(typ addressing.AddressType, newIP net.IP) {
@@ -336,18 +352,23 @@ func (n *Node) getPrimaryAddress() *models.NodeAddressing {
 }
 
 func (n *Node) isPrimaryAddress(addr Address, ipv4 bool) bool {
-	return addr.IP.String() == n.GetNodeIP(!ipv4).String()
+	primary := n.GetNodeIP(!ipv4)
+	return primary != nil && primary.Equal(addr.IP)
 }
 
 func (n *Node) getSecondaryAddresses() []*models.NodeAddressingElement {
-	result := []*models.NodeAddressingElement{}
+	primaryV4 := n.GetNodeIP(false)
+	primaryV6 := n.GetNodeIP(true)
+
+	result := make([]*models.NodeAddressingElement, 0, len(n.IPAddresses))
 
 	for _, addr := range n.IPAddresses {
-		ipv4 := false
-		if addr.IP.To4() != nil {
-			ipv4 = true
+		isV4 := addr.IP.To4() != nil
+		primary := primaryV4
+		if !isV4 {
+			primary = primaryV6
 		}
-		if !n.isPrimaryAddress(addr, ipv4) {
+		if primary == nil || !primary.Equal(addr.IP) {
 			result = append(result, &models.NodeAddressingElement{
 				IP: addr.IP.String(),
 			})
@@ -437,7 +458,15 @@ func (n *Node) IsLocal() bool {
 	return n != nil && n.Name == GetName() && n.Cluster == getCluster()
 }
 
+var emptyPrefixes = []netip.Prefix{}
+
 func (n *Node) GetIPv4AllocCIDRs() []netip.Prefix {
+	if len(n.IPv4SecondaryAllocCIDRs) == 0 {
+		if n.IPv4AllocCIDR.IsValid() {
+			return []netip.Prefix{n.IPv4AllocCIDR.Prefix.Prefix}
+		}
+		return emptyPrefixes
+	}
 	result := make([]netip.Prefix, 0, len(n.IPv4SecondaryAllocCIDRs)+1)
 	if n.IPv4AllocCIDR.IsValid() {
 		result = append(result, n.IPv4AllocCIDR.Prefix.Prefix)
@@ -451,6 +480,12 @@ func (n *Node) GetIPv4AllocCIDRs() []netip.Prefix {
 }
 
 func (n *Node) GetIPv6AllocCIDRs() []netip.Prefix {
+	if len(n.IPv6SecondaryAllocCIDRs) == 0 {
+		if n.IPv6AllocCIDR.IsValid() {
+			return []netip.Prefix{n.IPv6AllocCIDR.Prefix.Prefix}
+		}
+		return emptyPrefixes
+	}
 	result := make([]netip.Prefix, 0, len(n.IPv6SecondaryAllocCIDRs)+1)
 	if n.IPv6AllocCIDR.IsValid() {
 		result = append(result, n.IPv6AllocCIDR.Prefix.Prefix)

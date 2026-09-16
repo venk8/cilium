@@ -4,6 +4,8 @@
 package linux
 
 import (
+	"fmt"
+	"net"
 	"net/netip"
 	"testing"
 
@@ -122,3 +124,81 @@ func TestPrivilegedLocalRule(t *testing.T) {
 		return nil
 	})
 }
+
+func BenchmarkGetNodeIDForIP(b *testing.B) {
+	dpConfig := DatapathConfiguration{HostDevice: "host_device"}
+	lns := node.NewTestLocalNodeStore(node.LocalNode{})
+	nodeHandler := newNodeHandler(hivetest.Logger(b), dpConfig, nil, kpr.KPRConfig{}, &fakeipsec.Agent{}, fakeipsec.Config{}, lns, newNodePolicy())
+	nodeHandler.NodeConfigurationChanged(nodeConfig)
+
+	targetIP := netip.MustParseAddr("192.0.2.10")
+	nodeHandler.nodeIDsByIPs[targetIP.String()] = 42
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		id, ok := nodeHandler.getNodeIDForIP(targetIP)
+		if !ok || id != 42 {
+			b.Fatalf("unexpected result: id=%d ok=%v", id, ok)
+		}
+	}
+}
+
+func BenchmarkDumpNodeIDs(b *testing.B) {
+	dpConfig := DatapathConfiguration{HostDevice: "host_device"}
+	lns := node.NewTestLocalNodeStore(node.LocalNode{})
+	nodeHandler := newNodeHandler(hivetest.Logger(b), dpConfig, nil, kpr.KPRConfig{}, &fakeipsec.Agent{}, fakeipsec.Config{}, lns, newNodePolicy())
+	nodeHandler.NodeConfigurationChanged(nodeConfig)
+
+	for i := 1; i <= 50; i++ {
+		ip := fmt.Sprintf("192.0.2.%d", i)
+		nodeHandler.nodeIDsByIPs[ip] = uint16(i)
+		setIPsByIDsMapping(nodeHandler.nodeIPsByIDs, uint16(i), ip)
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		dump := nodeHandler.DumpNodeIDs()
+		if len(dump) != 50 {
+			b.Fatalf("unexpected dump length: %d", len(dump))
+		}
+	}
+}
+
+func BenchmarkCreateNodeRouteSpec(b *testing.B) {
+	dpConfig := DatapathConfiguration{HostDevice: "host_device"}
+	lns := node.NewTestLocalNodeStore(node.LocalNode{})
+	nodeHandler := newNodeHandler(hivetest.Logger(b), dpConfig, nil, kpr.KPRConfig{}, &fakeipsec.Agent{}, fakeipsec.Config{}, lns, newNodePolicy())
+	nodeHandler.NodeConfigurationChanged(nodeConfig)
+
+	c1 := netip.MustParsePrefix("10.10.0.0/16")
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_, err := nodeHandler.createNodeRouteSpec(c1, false)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkUpdateDirectRoutes_Identical(b *testing.B) {
+	dpConfig := DatapathConfiguration{HostDevice: "host_device"}
+	lns := node.NewTestLocalNodeStore(node.LocalNode{})
+	nodeHandler := newNodeHandler(hivetest.Logger(b), dpConfig, nil, kpr.KPRConfig{}, &fakeipsec.Agent{}, fakeipsec.Config{}, lns, newNodePolicy())
+	nodeHandler.NodeConfigurationChanged(nodeConfig)
+
+	cidrs := []netip.Prefix{netip.MustParsePrefix("10.1.0.0/16")}
+	nodeIP := net.ParseIP("192.0.2.1")
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		err := nodeHandler.updateDirectRoutes(cidrs, cidrs, nodeIP, nodeIP, false, true, false)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+

@@ -6,9 +6,10 @@
 package node
 
 import (
+	"cmp"
 	"fmt"
 	"net"
-	"sort"
+	"slices"
 
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
@@ -77,8 +78,8 @@ retryScope:
 
 		// Just make sure that we always return the same one and not a
 		// random one. More info in the issue GH-7637.
-		sort.SliceStable(ipsPublic, func(i, j int) bool {
-			return ipsPublic[i].LinkIndex < ipsPublic[j].LinkIndex
+		slices.SortStableFunc(ipsPublic, func(a, b netlink.Addr) int {
+			return cmp.Compare(a.LinkIndex, b.LinkIndex)
 		})
 
 		return ipsPublic[0].IP, nil
@@ -90,8 +91,8 @@ retryScope:
 		}
 
 		// Same stable order, see above ipsPublic.
-		sort.SliceStable(ipsPrivate, func(i, j int) bool {
-			return ipsPrivate[i].LinkIndex < ipsPrivate[j].LinkIndex
+		slices.SortStableFunc(ipsPrivate, func(a, b netlink.Addr) int {
+			return cmp.Compare(a.LinkIndex, b.LinkIndex)
 		})
 
 		return ipsPrivate[0].IP, nil

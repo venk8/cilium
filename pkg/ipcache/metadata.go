@@ -144,7 +144,7 @@ func (m *metadata) dequeuePrefixUpdates() (modifiedPrefixes []cmtypes.PrefixClus
 	for p := range m.queuedPrefixes {
 		modifiedPrefixes = append(modifiedPrefixes, p)
 	}
-	m.queuedPrefixes = make(map[cmtypes.PrefixCluster]struct{})
+	clear(m.queuedPrefixes)
 	revision = m.queuedRevision
 	m.queuedRevision++ // Increment, as any newly-queued prefixes are now subject to the next revision cycle
 	m.queuedChangesMU.Unlock()

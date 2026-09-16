@@ -4,9 +4,11 @@
 package route
 
 import (
+	"cmp"
 	"fmt"
 	"log/slog"
 	"net"
+	"slices"
 
 	"github.com/vishvananda/netlink"
 
@@ -57,6 +59,15 @@ func (a ByMask) Less(i, j int) bool {
 
 func (a ByMask) Swap(i, j int) {
 	a[i], a[j] = a[j], a[i]
+}
+
+// Sort sorts the routes in-place by mask, narrow (longer prefix) first.
+func (a ByMask) Sort() {
+	slices.SortFunc(a, func(x, y Route) int {
+		lenX, _ := x.Prefix.Mask.Size()
+		lenY, _ := y.Prefix.Mask.Size()
+		return cmp.Compare(lenY, lenX)
+	})
 }
 
 // ToIPCommand converts the route into a full "ip route ..." command

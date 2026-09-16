@@ -519,7 +519,8 @@ func (m *manager) NodeUpdated(n nodeTypes.Node) {
 	resource := ipcacheTypes.NewResourceID(ipcacheTypes.ResourceKindNode, "", n.Name)
 	nodeLabels := m.nodeIdentityLabels(n)
 
-	var nodeIPsAdded, healthIPsAdded, ingressIPsAdded, podCIDRsAdded []netip.Prefix
+	var healthIPsAdded, ingressIPsAdded, podCIDRsAdded []netip.Prefix
+	nodeIPsAdded := make([]netip.Prefix, 0, len(n.IPAddresses))
 
 	for _, address := range n.IPAddresses {
 		prefix := ip.IPToNetPrefix(address.IP)
@@ -600,7 +601,7 @@ func (m *manager) NodeUpdated(n nodeTypes.Node) {
 		m.ipcache.UpsertMetadataBatch(mu...)
 	}
 
-	for _, address := range []netip.Addr{n.IPv4HealthIP.Addr, n.IPv6HealthIP.Addr} {
+	for _, address := range [...]netip.Addr{n.IPv4HealthIP.Addr, n.IPv6HealthIP.Addr} {
 		prefix := netip.PrefixFrom(address, address.BitLen())
 		if !prefix.IsValid() {
 			continue
@@ -619,7 +620,7 @@ func (m *manager) NodeUpdated(n nodeTypes.Node) {
 		healthIPsAdded = append(healthIPsAdded, prefixCluster.AsPrefix())
 	}
 
-	for _, address := range []netip.Addr{n.IPv4IngressIP.Addr, n.IPv6IngressIP.Addr} {
+	for _, address := range [...]netip.Addr{n.IPv4IngressIP.Addr, n.IPv6IngressIP.Addr} {
 		prefix := netip.PrefixFrom(address, address.BitLen())
 		if !prefix.IsValid() {
 			continue
@@ -831,7 +832,7 @@ func (m *manager) removeNodeFromIPCache(oldNode nodeTypes.Node, resource ipcache
 	}
 
 	// Delete the old health IP addresses if they have changed in this node.
-	for _, address := range []netip.Addr{oldNode.IPv4HealthIP.Addr, oldNode.IPv6HealthIP.Addr} {
+	for _, address := range [...]netip.Addr{oldNode.IPv4HealthIP.Addr, oldNode.IPv6HealthIP.Addr} {
 		prefix := netip.PrefixFrom(address, address.BitLen())
 		if !prefix.IsValid() || slices.Contains(healthIPsAdded, prefix) {
 			continue
@@ -845,7 +846,7 @@ func (m *manager) removeNodeFromIPCache(oldNode nodeTypes.Node, resource ipcache
 	}
 
 	// Delete the old ingress IP addresses if they have changed in this node.
-	for _, address := range []netip.Addr{oldNode.IPv4IngressIP.Addr, oldNode.IPv6IngressIP.Addr} {
+	for _, address := range [...]netip.Addr{oldNode.IPv4IngressIP.Addr, oldNode.IPv6IngressIP.Addr} {
 		prefix := netip.PrefixFrom(address, address.BitLen())
 		if !prefix.IsValid() || slices.Contains(ingressIPsAdded, prefix) {
 			continue

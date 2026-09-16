@@ -127,6 +127,16 @@ func TestNetsByRange(t *testing.T) {
 		checkRangesEqual(ranges[k], expectedRanges[k], t)
 	}
 
+	// Test sorting when last IPs are equal and first IPs are reversed.
+	ranges = []*netWithRange{createIPRange("10.255.255.254", "10.255.255.255"),
+		createIPRange("10.0.0.0", "10.255.255.255")}
+	expectedRanges = []*netWithRange{createIPRange("10.0.0.0", "10.255.255.255"),
+		createIPRange("10.255.255.254", "10.255.255.255")}
+	NetsByRange(ranges).Sort()
+	require.Len(t, ranges, len(expectedRanges))
+	for k := range ranges {
+		checkRangesEqual(ranges[k], expectedRanges[k], t)
+	}
 }
 
 func TestCoalesceCIDRs(t *testing.T) {

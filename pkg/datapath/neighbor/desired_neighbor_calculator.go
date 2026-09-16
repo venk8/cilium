@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"iter"
 	"net/netip"
-	"slices"
 
 	"github.com/cilium/hive/cell"
 	"github.com/cilium/hive/job"
@@ -21,6 +20,7 @@ import (
 	"github.com/cilium/cilium/pkg/datapath/tables"
 	"github.com/cilium/cilium/pkg/rate"
 	"github.com/cilium/cilium/pkg/time"
+	"go4.org/netipx"
 )
 
 type desiredNeighborCalculatorParams struct {
@@ -115,23 +115,6 @@ func (c *desiredNeighborCalculator) Run(ctx context.Context, health cell.Health)
 		// Get all L2 devices
 		l2Devs, l2DevWatch := l2Devices(c.DeviceTable, rx)
 
-		// Get all permutations of forwardable IPs and L2 devices
-		type fipWithDev struct {
-			fip *ForwardableIP
-			dev *tables.Device
-		}
-		permutations := iter.Seq[fipWithDev](func(yield func(fipWithDev) bool) {
-			for fip, rev := range fipSeq {
-				for _, dev := range l2Devs {
-					// Store the last revision we processed
-					fipRev = rev
-					if !yield(fipWithDev{fip: fip, dev: dev}) {
-						return
-					}
-				}
-			}
-		})
-
 		// Add a watch for the routes table as it was at the start of the
 		// transaction. We will be querying the FIB for next hops via netlink.
 		// We do this since netlink applies the exact same logic as the datapath does when
@@ -143,23 +126,26 @@ func (c *desiredNeighborCalculator) Run(ctx context.Context, health cell.Health)
 		uniqueDesiredNeighbors := make(map[DesiredNeighborKey]struct{})
 
 		var errs error
-		// Find next hop routes for each forwardable IP
-		for fipDev := range permutations {
-			nextHop, err := c.getNextHopIP(fipDev.fip.IP, fipDev.dev.Index)
-			if err != nil {
-				if errors.Is(err, errNodeIPNotRoutable) {
-					// If the node IP is not routable, we don't need to do anything
+		// Find next hop routes for each forwardable IP across L2 devices
+		for fip, rev := range fipSeq {
+			fipRev = rev
+			for _, dev := range l2Devs {
+				nextHop, err := c.getNextHopIP(fip.IP, dev.Index)
+				if err != nil {
+					if errors.Is(err, errNodeIPNotRoutable) {
+						// If the node IP is not routable, we don't need to do anything
+						continue
+					}
+
+					errs = errors.Join(errs, fmt.Errorf("failed to get next hop IP: %w", err))
 					continue
 				}
 
-				errs = errors.Join(errs, fmt.Errorf("failed to get next hop IP: %w", err))
-				continue
+				uniqueDesiredNeighbors[DesiredNeighborKey{
+					IP:      nextHop,
+					IfIndex: dev.Index,
+				}] = struct{}{}
 			}
-
-			uniqueDesiredNeighbors[DesiredNeighborKey{
-				IP:      nextHop,
-				IfIndex: fipDev.dev.Index,
-			}] = struct{}{}
 		}
 
 		errs = errors.Join(errs, c.commitDesiredNeighbors(rx, needFullSyn, uniqueDesiredNeighbors))
@@ -273,12 +259,10 @@ func (c *desiredNeighborCalculator) getNextHopIP(fip netip.Addr, ifindex int) (n
 			// nodeIP. NOTE: We currently don't handle multipath, so only one gw
 			// can be used.
 
-			if route.Gw.To4() == nil {
-				nextHopIP, _ = netip.AddrFromSlice(route.Gw.To16())
-			} else {
-				nextHopIP, _ = netip.AddrFromSlice(route.Gw.To4())
+			if gw, ok := netipx.FromStdIP(route.Gw); ok {
+				nextHopIP = gw
+				break
 			}
-			break
 		}
 
 		// Select a gw for the specified link if there are multi paths to the nodeIP
@@ -294,12 +278,10 @@ func (c *desiredNeighborCalculator) getNextHopIP(fip netip.Addr, ifindex int) (n
 		if route.MultiPath != nil {
 			for _, mp := range route.MultiPath {
 				if mp.LinkIndex == ifindex {
-					if mp.Gw.To4() == nil {
-						nextHopIP, _ = netip.AddrFromSlice(mp.Gw.To16())
-					} else {
-						nextHopIP, _ = netip.AddrFromSlice(mp.Gw.To4())
+					if gw, ok := netipx.FromStdIP(mp.Gw); ok {
+						nextHopIP = gw
+						break
 					}
-					break
 				}
 			}
 		}
@@ -310,14 +292,11 @@ func (c *desiredNeighborCalculator) getNextHopIP(fip netip.Addr, ifindex int) (n
 
 func l2Devices(tbl statedb.Table[*tables.Device], rx statedb.ReadTxn) ([]*tables.Device, <-chan struct{}) {
 	devIter, watch := tbl.ListWatch(rx, tables.DevicesBySelected(true))
-
-	return slices.Collect(func(yield func(*tables.Device) bool) {
-		for dev := range devIter {
-			if len(dev.HardwareAddr) != 0 {
-				if !yield(dev) {
-					return
-				}
-			}
+	var devs []*tables.Device
+	for dev := range devIter {
+		if len(dev.HardwareAddr) != 0 {
+			devs = append(devs, dev)
 		}
-	}), watch
+	}
+	return devs, watch
 }

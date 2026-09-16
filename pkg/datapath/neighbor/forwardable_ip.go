@@ -57,7 +57,7 @@ type ForwardableIPOwner struct {
 }
 
 func (fip ForwardableIPOwner) String() string {
-	return fmt.Sprintf("%s:%s", fip.Type, fip.ID)
+	return fip.Type.String() + ":" + fip.ID
 }
 
 type ForwardableIP struct {

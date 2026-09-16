@@ -343,3 +343,101 @@ func TestNodeCIDRFieldsUnmarshalLegacy(t *testing.T) {
 	//nolint:testifylint // byte-exact wire format matters for kvstore compat, JSONEq would ignore key order.
 	assert.Equal(t, `{"IP":"10.244.1.0","Mask":"////AA=="}`, string(raw["IPv4AllocCIDR"]))
 }
+
+func BenchmarkGetModel(b *testing.B) {
+	n := Node{
+		Name:    "node-1",
+		Cluster: "default",
+		IPAddresses: []Address{
+			{IP: net.ParseIP("192.0.2.3"), Type: addressing.NodeInternalIP},
+			{IP: net.ParseIP("198.51.100.2"), Type: addressing.NodeExternalIP},
+			{IP: net.ParseIP("10.0.0.1"), Type: addressing.NodeCiliumInternalIP},
+			{IP: net.ParseIP("2001:db8::1"), Type: addressing.NodeInternalIP},
+			{IP: net.ParseIP("2001:db8::2"), Type: addressing.NodeExternalIP},
+		},
+		IPv4AllocCIDR: PrefixFrom(netip.MustParsePrefix("10.244.1.0/24")),
+		IPv6AllocCIDR: PrefixFrom(netip.MustParsePrefix("fd00::/64")),
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = n.GetModel()
+	}
+}
+
+func BenchmarkGetIPv4AllocCIDRs(b *testing.B) {
+	n := Node{
+		IPv4AllocCIDR: PrefixFrom(netip.MustParsePrefix("10.244.1.0/24")),
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = n.GetIPv4AllocCIDRs()
+	}
+}
+
+func BenchmarkGetNodeInternalIPv4(b *testing.B) {
+	n := Node{
+		Name:    "node-1",
+		Cluster: "default",
+		IPAddresses: []Address{
+			{IP: net.ParseIP("192.0.2.3"), Type: addressing.NodeInternalIP},
+			{IP: net.ParseIP("198.51.100.2"), Type: addressing.NodeExternalIP},
+			{IP: net.ParseIP("10.0.0.1"), Type: addressing.NodeCiliumInternalIP},
+			{IP: net.ParseIP("2001:db8::1"), Type: addressing.NodeInternalIP},
+			{IP: net.ParseIP("2001:db8::2"), Type: addressing.NodeExternalIP},
+		},
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = n.GetNodeInternalIPv4()
+	}
+}
+
+func BenchmarkIsNodeIP(b *testing.B) {
+	n := Node{
+		Name:    "node-1",
+		Cluster: "default",
+		IPAddresses: []Address{
+			{IP: net.ParseIP("192.0.2.3"), Type: addressing.NodeInternalIP},
+			{IP: net.ParseIP("198.51.100.2"), Type: addressing.NodeExternalIP},
+			{IP: net.ParseIP("10.0.0.1"), Type: addressing.NodeCiliumInternalIP},
+			{IP: net.ParseIP("2001:db8::1"), Type: addressing.NodeInternalIP},
+			{IP: net.ParseIP("2001:db8::2"), Type: addressing.NodeExternalIP},
+		},
+	}
+	target := netip.MustParseAddr("10.0.0.1")
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = n.IsNodeIP(target)
+	}
+}
+
+func BenchmarkGetNodeIP(b *testing.B) {
+	n := Node{
+		Name:    "node-1",
+		Cluster: "default",
+		IPAddresses: []Address{
+			{IP: net.ParseIP("192.0.2.3"), Type: addressing.NodeInternalIP},
+			{IP: net.ParseIP("198.51.100.2"), Type: addressing.NodeExternalIP},
+			{IP: net.ParseIP("10.0.0.1"), Type: addressing.NodeCiliumInternalIP},
+			{IP: net.ParseIP("2001:db8::1"), Type: addressing.NodeInternalIP},
+			{IP: net.ParseIP("2001:db8::2"), Type: addressing.NodeExternalIP},
+		},
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = n.GetNodeIP(false)
+	}
+}
+
+
+

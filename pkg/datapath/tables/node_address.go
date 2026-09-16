@@ -10,7 +10,6 @@ import (
 	"net"
 	"net/netip"
 	"slices"
-	"sort"
 	"strings"
 
 	"github.com/cilium/hive/cell"
@@ -648,22 +647,22 @@ func PreferredIPv4Address(addrs []DeviceAddress) netip.Addr {
 // the 'NodePort' address (when --nodeport-addresses is not specified).
 func SortedAddresses(addrs []DeviceAddress) []DeviceAddress {
 	addrs = slices.Clone(addrs)
-	sort.SliceStable(addrs, func(i, j int) bool {
+	slices.SortStableFunc(addrs, func(a, b DeviceAddress) int {
 		switch {
-		case !addrs[i].Secondary && addrs[j].Secondary:
-			return true
-		case addrs[i].Secondary && !addrs[j].Secondary:
-			return false
-		case addrs[i].Scope < addrs[j].Scope:
-			return true
-		case addrs[i].Scope > addrs[j].Scope:
-			return false
-		case ip.IsPublicAddr(addrs[i].Addr.AsSlice()) && !ip.IsPublicAddr(addrs[j].Addr.AsSlice()):
-			return true
-		case !ip.IsPublicAddr(addrs[i].Addr.AsSlice()) && ip.IsPublicAddr(addrs[j].Addr.AsSlice()):
-			return false
+		case !a.Secondary && b.Secondary:
+			return -1
+		case a.Secondary && !b.Secondary:
+			return 1
+		case a.Scope < b.Scope:
+			return -1
+		case a.Scope > b.Scope:
+			return 1
+		case ip.IsPublicAddr(a.Addr.AsSlice()) && !ip.IsPublicAddr(b.Addr.AsSlice()):
+			return -1
+		case !ip.IsPublicAddr(a.Addr.AsSlice()) && ip.IsPublicAddr(b.Addr.AsSlice()):
+			return 1
 		default:
-			return addrs[i].Addr.Less(addrs[j].Addr)
+			return a.Addr.Compare(b.Addr)
 		}
 	})
 	return addrs
