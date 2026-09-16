@@ -5,7 +5,6 @@ package policy
 
 import (
 	"slices"
-	"sort"
 	"sync"
 
 	"github.com/hashicorp/go-hclog"
@@ -157,8 +156,8 @@ func (i *identitySelector) Selects(nid identity.NumericIdentity) bool {
 		return true
 	}
 	nids := i.GetSelections()
-	idx := sort.Search(len(nids), func(i int) bool { return nids[i] >= nid })
-	return idx < len(nids) && nids[idx] == nid
+	_, found := slices.BinarySearch(nids, nid)
+	return found
 }
 
 // IsWildcard returns true if the endpoint selector selects all

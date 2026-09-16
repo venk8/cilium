@@ -4,6 +4,8 @@
 package lock
 
 import (
+	"cmp"
+	"slices"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -63,7 +65,9 @@ func (s SortableMutexes) Swap(i int, j int) {
 // Lock sorts the mutexes, and then locks them in order. If any lock cannot be acquired,
 // this will block while holding the locks with a lower sequence number.
 func (s SortableMutexes) Lock() {
-	sort.Sort(s)
+	slices.SortFunc(s, func(a, b SortableMutex) int {
+		return cmp.Compare(a.Seq(), b.Seq())
+	})
 	for _, mu := range s {
 		mu.Lock()
 	}

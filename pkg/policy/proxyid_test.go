@@ -4,8 +4,6 @@
 package policy
 
 import (
-	"math/rand/v2"
-	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -33,21 +31,53 @@ func TestProxyID(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func BenchmarkProxyID(b *testing.B) {
-	id := uint16(rand.IntN(65535))
-	port := uint16(rand.IntN(65535))
+func TestProxyStatsKey(t *testing.T) {
+	key := ProxyStatsKey(true, "TCP", 80, 8080)
+	require.Equal(t, "ingress:TCP:80:8080", key)
 
+	key = ProxyStatsKey(false, "UDP", 53, 5353)
+	require.Equal(t, "egress:UDP:53:5353", key)
+}
+
+func TestParseProxyID_Errors(t *testing.T) {
+	_, _, _, _, _, err := ParseProxyID("123:ingress:TCP:8080")
+	require.Error(t, err)
+
+	_, _, _, _, _, err = ParseProxyID("123:ingress:TCP:8080:listener:extra")
+	require.Error(t, err)
+
+	_, _, _, _, _, err = ParseProxyID("abc:ingress:TCP:8080:")
+	require.Error(t, err)
+
+	_, _, _, _, _, err = ParseProxyID("70000:ingress:TCP:8080:")
+	require.Error(t, err)
+
+	_, _, _, _, _, err = ParseProxyID("123:ingress:TCP:xyz:")
+	require.Error(t, err)
+
+	_, _, _, _, _, err = ParseProxyID("123:ingress:TCP:70000:")
+	require.Error(t, err)
+}
+
+func BenchmarkProxyID(b *testing.B) {
 	b.ReportAllocs()
-	for range 1000 {
-		b.StartTimer()
-		proxyID := ProxyID(id, true, "TCP", port, "")
-		if proxyID != strconv.FormatInt(int64(id), 10)+"ingress:TCP:8080:" {
-			b.Failed()
-		}
-		_, _, _, _, _, err := ParseProxyID(proxyID)
-		if err != nil {
-			b.Failed()
-		}
-		b.StopTimer()
+	for b.Loop() {
+		_ = ProxyID(12345, true, "TCP", 8080, "envoy-listener")
+	}
+}
+
+func BenchmarkProxyStatsKey(b *testing.B) {
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = ProxyStatsKey(true, "TCP", 8080, 18080)
+	}
+}
+
+func BenchmarkParseProxyID(b *testing.B) {
+	id := ProxyID(12345, true, "TCP", 8080, "envoy-listener")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		_, _, _, _, _, _ = ParseProxyID(id)
 	}
 }

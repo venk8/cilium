@@ -618,3 +618,54 @@ func BenchmarkFindReserved_WithReserved(b *testing.B) {
 		_ = lbls.FindReserved()
 	}
 }
+
+func TestCompareExtendedKey(t *testing.T) {
+	testCases := []struct {
+		l1, l2 Label
+	}{
+		{Label{Source: "k8s", Key: "app"}, Label{Source: "k8s", Key: "app"}},
+		{Label{Source: "k8s", Key: "app"}, Label{Source: "k8s", Key: "env"}},
+		{Label{Source: "k8s", Key: "env"}, Label{Source: "k8s", Key: "app"}},
+		{Label{Source: "any", Key: "foo"}, Label{Source: "k8s", Key: "baz"}},
+		{Label{Source: "k8s", Key: "baz"}, Label{Source: "any", Key: "foo"}},
+		{Label{Source: "foo", Key: "bar"}, Label{Source: "foobar", Key: "baz"}},
+		{Label{Source: "foobar", Key: "baz"}, Label{Source: "foo", Key: "bar"}},
+		{Label{Source: "foo", Key: "bar"}, Label{Source: "foo-bar", Key: "baz"}},
+		{Label{Source: "foo-bar", Key: "baz"}, Label{Source: "foo", Key: "bar"}},
+		{Label{Source: "foo", Key: "bar"}, Label{Source: "foo:bar", Key: "baz"}},
+		{Label{Source: "foo:bar", Key: "baz"}, Label{Source: "foo", Key: "bar"}},
+		{Label{Source: "", Key: ""}, Label{Source: "", Key: ""}},
+		{Label{Source: "", Key: "a"}, Label{Source: "a", Key: ""}},
+		{Label{Source: "reserved", Key: "host"}, Label{Source: "reserved", Key: "world"}},
+	}
+
+	for _, tc := range testCases {
+		expected := strings.Compare(tc.l1.GetExtendedKey(), tc.l2.GetExtendedKey())
+		got := tc.l1.CompareExtendedKey(&tc.l2)
+		// Signs must match
+		if (expected < 0 && got >= 0) || (expected > 0 && got <= 0) || (expected == 0 && got != 0) {
+			t.Errorf("CompareExtendedKey mismatch for %v vs %v: expected sign of %d, got %d",
+				tc.l1.GetExtendedKey(), tc.l2.GetExtendedKey(), expected, got)
+		}
+	}
+}
+
+func BenchmarkCompareExtendedKey(b *testing.B) {
+	l1 := Label{Source: "k8s", Key: "io.kubernetes.pod.namespace"}
+	l2 := Label{Source: "k8s", Key: "io.cilium.k8s.policy.cluster"}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = l1.CompareExtendedKey(&l2)
+	}
+}
+
+func BenchmarkCompareExtendedKey_Concat(b *testing.B) {
+	l1 := Label{Source: "k8s", Key: "io.kubernetes.pod.namespace"}
+	l2 := Label{Source: "k8s", Key: "io.cilium.k8s.policy.cluster"}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = strings.Compare(l1.GetExtendedKey(), l2.GetExtendedKey())
+	}
+}

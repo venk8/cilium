@@ -11,7 +11,6 @@ import (
 	"log/slog"
 	"math/bits"
 	"slices"
-	"sort"
 	"strconv"
 	"sync/atomic"
 
@@ -348,7 +347,7 @@ func (l7 L7DataMap) MarshalJSON() ([]byte, error) {
 	for cs := range l7 {
 		selectors = append(selectors, cs)
 	}
-	sort.Sort(selectors)
+	selectors.Sort()
 
 	/* Now we can iterate the slice and generate JSON entries. */
 	var err error

@@ -22,7 +22,8 @@ import (
 )
 
 var (
-	podNamespaceLabel = labels.NewLabel(k8sConst.PodNamespaceLabel, "", labels.LabelSourceK8s)
+	podNamespaceLabel     = labels.NewLabel(k8sConst.PodNamespaceLabel, "", labels.LabelSourceK8s)
+	defaultNamespaceSlice = []string{""}
 )
 
 // scIdentity is the information we need about a an identity that rules can select
@@ -179,7 +180,7 @@ func (m *selectorMap) Set(key string, sel *identitySelector) {
 	namespaces := sel.source.SelectedNamespaces()
 	if len(namespaces) == 0 {
 		// use empty namespace string for selectors without namespace requirements
-		namespaces = []string{""}
+		namespaces = defaultNamespaceSlice
 	}
 	for _, ns := range namespaces {
 		idx, exists := m.selectorsByNamespace[ns]
@@ -196,7 +197,7 @@ func (m *selectorMap) Delete(sel *identitySelector) {
 	if len(namespaces) == 0 {
 		// use empty namespace string for selectors without namespace
 		// requirements
-		namespaces = []string{""}
+		namespaces = defaultNamespaceSlice
 	}
 	for _, ns := range namespaces {
 		idx, exists := m.selectorsByNamespace[ns]
@@ -768,7 +769,8 @@ func (sc *SelectorCache) updateSelections(sel *identitySelector, added identity.
 func (sc *SelectorCache) UpdateIdentities(added, deleted identity.IdentityMap, wg *sync.WaitGroup) (mutated bool) {
 	// Map of namespaces to scan for updates with added identities in the map value. All
 	// identities are matched against selectors that have no namespace requirements.
-	namespaces := map[string]identity.NumericIdentitySlice{"": {}}
+	namespaces := make(map[string]identity.NumericIdentitySlice, 1+len(added)+len(deleted))
+	namespaces[""] = make(identity.NumericIdentitySlice, 0, len(added))
 
 	start := time.Now()
 	sc.mutex.Lock()

@@ -546,6 +546,38 @@ func (l *Label) GetExtendedKey() string {
 	return l.Source + SourceDelimiter + l.Key
 }
 
+// CompareExtendedKey compares the extended keys of l and other (equivalent to
+// strings.Compare(l.GetExtendedKey(), other.GetExtendedKey())) without allocating
+// intermediate strings on the heap.
+func (l *Label) CompareExtendedKey(other *Label) int {
+	if l.Source == other.Source {
+		return strings.Compare(l.Key, other.Key)
+	}
+	minLen := min(len(l.Source), len(other.Source))
+	for i := 0; i < minLen; i++ {
+		if l.Source[i] != other.Source[i] {
+			if l.Source[i] < other.Source[i] {
+				return -1
+			}
+			return 1
+		}
+	}
+	if len(l.Source) < len(other.Source) {
+		if ':' < other.Source[len(l.Source)] {
+			return -1
+		} else if ':' > other.Source[len(l.Source)] {
+			return 1
+		}
+		return strings.Compare(l.GetExtendedKey(), other.GetExtendedKey())
+	}
+	if l.Source[len(other.Source)] < ':' {
+		return -1
+	} else if l.Source[len(other.Source)] > ':' {
+		return 1
+	}
+	return strings.Compare(l.GetExtendedKey(), other.GetExtendedKey())
+}
+
 // Map2Labels transforms in the form: map[key(string)]value(string) into Labels. The
 // source argument will overwrite the source written in the key of the given map.
 // Example:

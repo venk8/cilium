@@ -6,7 +6,7 @@ package types
 import (
 	"iter"
 	"net/netip"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -63,7 +63,14 @@ func (rs Requirements) WriteString(sb *strings.Builder) {
 func (rs Requirements) Len() int      { return len(rs) }
 func (rs Requirements) Swap(i, j int) { rs[i], rs[j] = rs[j], rs[i] }
 func (rs Requirements) Less(i, j int) bool {
-	return rs[i].key.GetExtendedKey() < rs[j].key.GetExtendedKey()
+	return rs[i].key.CompareExtendedKey(&rs[j].key) < 0
+}
+
+// Sort sorts the Requirements slice in place using zero-allocation key comparison.
+func (rs Requirements) Sort() {
+	slices.SortFunc(rs, func(a, b Requirement) int {
+		return a.key.CompareExtendedKey(&b.key)
+	})
 }
 
 // LabelSelectorToRequirements turns a kubernetes Selector into a slice of
@@ -105,8 +112,7 @@ func LabelSelectorToRequirements(labelSelector *slim_metav1.LabelSelector) Requi
 		requirements = append(requirements, NewRequirement(expr.Key, op, expr.Values))
 	}
 
-	// TODO: Probably not required to sort here but retaining old behavior for now.
-	sort.Sort(requirements)
+	requirements.Sort()
 	return requirements
 }
 

@@ -4,7 +4,8 @@
 package endpoint
 
 import (
-	"sort"
+	"cmp"
+	"slices"
 
 	"github.com/cilium/cilium/api/v1/models"
 	"github.com/cilium/cilium/pkg/lock"
@@ -102,12 +103,12 @@ func (p statusTypeSlice) Swap(i, j int) { p[i], p[j] = p[j], p[i] }
 
 // sortByPriority returns a statusLog ordered from highest priority to lowest.
 func (ps componentStatus) sortByPriority() statusLog {
-	prs := statusTypeSlice{}
+	prs := make(statusTypeSlice, 0, len(ps))
 	for k := range ps {
 		prs = append(prs, k)
 	}
-	sort.Sort(prs)
-	slogSorted := statusLog{}
+	slices.SortFunc(prs, func(a, b StatusType) int { return cmp.Compare(b, a) })
+	slogSorted := make(statusLog, 0, len(prs))
 	for _, pr := range prs {
 		slogSorted = append(slogSorted, ps[pr])
 	}

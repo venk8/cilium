@@ -703,6 +703,13 @@ func (s CachedSelectorSlice) Less(i, j int) bool {
 	return strings.Compare(s[i].String(), s[j].String()) < 0
 }
 
+// Sort sorts the CachedSelectorSlice in place without interface boxing.
+func (s CachedSelectorSlice) Sort() {
+	slices.SortFunc(s, func(a, b CachedSelector) int {
+		return strings.Compare(a.String(), b.String())
+	})
+}
+
 // SelectsAllEndpoints returns whether the CachedSelectorSlice selects all
 // endpoints, which is true if the wildcard endpoint selector is present in the
 // slice.

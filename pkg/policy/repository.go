@@ -417,8 +417,14 @@ func (p *Repository) computePolicyEnforcementAndRules(securityIdentity *identity
 		return false, false, false, false, nil, nil
 	}
 
-	rulesIngress = []*rule{}
-	rulesEgress = []*rule{}
+	namespace, _ := lbls.LookupLabel(&podNamespaceLabel)
+	expectedRules := len(p.rulesByNamespace[""])
+	if namespace != "" {
+		expectedRules += len(p.rulesByNamespace[namespace])
+	}
+
+	rulesIngress = make([]*rule, 0, expectedRules)
+	rulesEgress = make([]*rule, 0, expectedRules)
 
 	var hasIngressPassVerdict, hasEgressPassVerdict bool
 
@@ -466,7 +472,6 @@ func (p *Repository) computePolicyEnforcementAndRules(securityIdentity *identity
 	//    insert an additional allow-all rule. We must do this, even if all traffic is
 	//    allowed, because rules may have additional effects such as enabling L7 proxy.
 	//    The wildcard rule is inserted to the last tier and priority.
-	namespace, _ := lbls.LookupLabel(&podNamespaceLabel)
 	if namespace != "" {
 		for rKey := range p.rulesByNamespace[namespace] {
 			processKey(rKey)

@@ -67,3 +67,19 @@ func TestSortableMutex_Chaos(t *testing.T) {
 
 	wg.Wait()
 }
+
+func BenchmarkSortableMutexes_LockUnlock(b *testing.B) {
+	smus := SortableMutexes{
+		NewSortableMutex(),
+		NewSortableMutex(),
+		NewSortableMutex(),
+		NewSortableMutex(),
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		smus.Lock()
+		smus.Unlock()
+	}
+}
