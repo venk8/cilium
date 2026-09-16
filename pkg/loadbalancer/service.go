@@ -8,7 +8,6 @@ import (
 	"maps"
 	"net/netip"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -284,7 +283,7 @@ func (svc *Service) TableRow() []string {
 	}
 
 	// Collapse the more rarely set fields into a single "Flags" column
-	var flags []string
+	flags := make([]string, 0, 16)
 
 	if svc.SessionAffinity {
 		flags = append(flags, "SessionAffinity="+svc.SessionAffinityTimeout.String())
@@ -331,7 +330,7 @@ func (svc *Service) TableRow() []string {
 		flags = append(flags, "LoadBalancerClass="+*svc.LoadBalancerClass)
 	}
 
-	sort.Strings(flags)
+	slices.Sort(flags)
 
 	return []string{
 		svc.Name.String(),

@@ -160,14 +160,20 @@ func NewService4Key(ip net.IP, port uint16, proto u8proto.U8proto, scope uint8, 
 }
 
 func (k *Service4Key) String() string {
-	kHost := k.ToHost().(*Service4Key)
-	addr := net.JoinHostPort(kHost.Address.String(), fmt.Sprintf("%d", kHost.Port))
-	addr += fmt.Sprintf("/%s", u8proto.U8proto(kHost.Proto).String())
-	if kHost.Scope == loadbalancer.ScopeInternal {
-		addr += "/i"
+	var buf [64]byte
+	b := buf[:0]
+	b = k.Address.AppendTo(b)
+	b = append(b, ':')
+	b = strconv.AppendUint(b, uint64(byteorder.NetworkToHost16(k.Port)), 10)
+	b = append(b, '/')
+	b = append(b, u8proto.U8proto(k.Proto).String()...)
+	if k.Scope == loadbalancer.ScopeInternal {
+		b = append(b, "/i"...)
 	}
-	addr = fmt.Sprintf("%s (%d)", addr, kHost.BackendSlot)
-	return addr
+	b = append(b, " ("...)
+	b = strconv.AppendUint(b, uint64(k.BackendSlot), 10)
+	b = append(b, ')')
+	return string(b)
 }
 
 func (k *Service4Key) New() bpf.MapKey { return &Service4Key{} }
@@ -215,8 +221,21 @@ type Service4Value struct {
 func (s *Service4Value) New() bpf.MapValue { return &Service4Value{} }
 
 func (s *Service4Value) String() string {
-	sHost := s.ToHost().(*Service4Value)
-	return fmt.Sprintf("%d %d[%d] (%d) [0x%x 0x%x]", sHost.BackendID, sHost.Count, sHost.QCount, sHost.RevNat, sHost.Flags, sHost.Flags2)
+	var buf [64]byte
+	b := buf[:0]
+	b = strconv.AppendUint(b, uint64(s.BackendID), 10)
+	b = append(b, ' ')
+	b = strconv.AppendUint(b, uint64(s.Count), 10)
+	b = append(b, '[')
+	b = strconv.AppendUint(b, uint64(s.QCount), 10)
+	b = append(b, "] ("...)
+	b = strconv.AppendUint(b, uint64(byteorder.NetworkToHost16(s.RevNat)), 10)
+	b = append(b, ") [0x"...)
+	b = strconv.AppendUint(b, uint64(s.Flags), 16)
+	b = append(b, " 0x"...)
+	b = strconv.AppendUint(b, uint64(s.Flags2), 16)
+	b = append(b, ']')
+	return string(b)
 }
 
 func (s *Service4Value) SetCount(count int)   { s.Count = uint16(count) }
@@ -320,12 +339,21 @@ func NewService6Key(ip net.IP, port uint16, proto u8proto.U8proto, scope uint8, 
 }
 
 func (k *Service6Key) String() string {
-	kHost := k.ToHost().(*Service6Key)
-	if kHost.Scope == loadbalancer.ScopeInternal {
-		return fmt.Sprintf("[%s]:%d/%s/i (%d)", kHost.Address, kHost.Port, u8proto.U8proto(kHost.Proto).String(), kHost.BackendSlot)
-	} else {
-		return fmt.Sprintf("[%s]:%d/%s (%d)", kHost.Address, kHost.Port, u8proto.U8proto(kHost.Proto).String(), kHost.BackendSlot)
+	var buf [96]byte
+	b := buf[:0]
+	b = append(b, '[')
+	b = k.Address.AppendTo(b)
+	b = append(b, "]:"...)
+	b = strconv.AppendUint(b, uint64(byteorder.NetworkToHost16(k.Port)), 10)
+	b = append(b, '/')
+	b = append(b, u8proto.U8proto(k.Proto).String()...)
+	if k.Scope == loadbalancer.ScopeInternal {
+		b = append(b, "/i"...)
 	}
+	b = append(b, " ("...)
+	b = strconv.AppendUint(b, uint64(k.BackendSlot), 10)
+	b = append(b, ')')
+	return string(b)
 }
 
 func (k *Service6Key) New() bpf.MapKey { return &Service6Key{} }
@@ -373,8 +401,21 @@ type Service6Value struct {
 func (s *Service6Value) New() bpf.MapValue { return &Service6Value{} }
 
 func (s *Service6Value) String() string {
-	sHost := s.ToHost().(*Service6Value)
-	return fmt.Sprintf("%d %d[%d] (%d) [0x%x 0x%x]", sHost.BackendID, sHost.Count, sHost.QCount, sHost.RevNat, sHost.Flags, sHost.Flags2)
+	var buf [64]byte
+	b := buf[:0]
+	b = strconv.AppendUint(b, uint64(s.BackendID), 10)
+	b = append(b, ' ')
+	b = strconv.AppendUint(b, uint64(s.Count), 10)
+	b = append(b, '[')
+	b = strconv.AppendUint(b, uint64(s.QCount), 10)
+	b = append(b, "] ("...)
+	b = strconv.AppendUint(b, uint64(byteorder.NetworkToHost16(s.RevNat)), 10)
+	b = append(b, ") [0x"...)
+	b = strconv.AppendUint(b, uint64(s.Flags), 16)
+	b = append(b, " 0x"...)
+	b = strconv.AppendUint(b, uint64(s.Flags2), 16)
+	b = append(b, ']')
+	return string(b)
 }
 
 func (s *Service6Value) SetCount(count int)   { s.Count = uint16(count) }
@@ -526,7 +567,7 @@ func NewBackend4KeyV3(id loadbalancer.BackendID) *Backend4KeyV3 {
 	return &Backend4KeyV3{ID: id}
 }
 
-func (k *Backend4KeyV3) String() string                  { return fmt.Sprintf("%d", k.ID) }
+func (k *Backend4KeyV3) String() string                  { return strconv.FormatUint(uint64(k.ID), 10) }
 func (k *Backend4KeyV3) New() bpf.MapKey                 { return &Backend4KeyV3{} }
 func (k *Backend4KeyV3) SetID(id loadbalancer.BackendID) { k.ID = id }
 func (k *Backend4KeyV3) GetID() loadbalancer.BackendID   { return k.ID }
@@ -569,11 +610,18 @@ func NewBackend4ValueV3(addrCluster cmtypes.AddrCluster, port uint16, proto u8pr
 }
 
 func (v *Backend4ValueV3) String() string {
-	vHost := v.ToHost().(*Backend4ValueV3)
+	var buf [64]byte
+	b := buf[:0]
+	b = append(b, v.Proto.String()...)
+	b = append(b, "://"...)
+	ac := cmtypes.AddrClusterFrom(v.Address.Addr(), uint32(v.ClusterID))
+	b = ac.AppendTo(b)
 	if v.Zone != 0 {
-		return fmt.Sprintf("%s://%s[%s]", vHost.Proto, cmtypes.AddrClusterFrom(vHost.Address.Addr(), uint32(vHost.ClusterID)).String(), option.Config.GetZone(v.Zone))
+		b = append(b, '[')
+		b = append(b, option.Config.GetZone(v.Zone)...)
+		b = append(b, ']')
 	}
-	return fmt.Sprintf("%s://%s", vHost.Proto, cmtypes.AddrClusterFrom(vHost.Address.Addr(), uint32(vHost.ClusterID)).String())
+	return string(b)
 }
 
 func (b *Backend4ValueV3) New() bpf.MapValue { return &Backend4ValueV3{} }
@@ -628,7 +676,7 @@ func NewBackend6KeyV3(id loadbalancer.BackendID) *Backend6KeyV3 {
 	return &Backend6KeyV3{ID: id}
 }
 
-func (k *Backend6KeyV3) String() string                  { return fmt.Sprintf("%d", k.ID) }
+func (k *Backend6KeyV3) String() string                  { return strconv.FormatUint(uint64(k.ID), 10) }
 func (k *Backend6KeyV3) New() bpf.MapKey                 { return &Backend6KeyV3{} }
 func (k *Backend6KeyV3) SetID(id loadbalancer.BackendID) { k.ID = id }
 func (k *Backend6KeyV3) GetID() loadbalancer.BackendID   { return k.ID }
@@ -658,10 +706,11 @@ func NewBackend6ValueV3(addrCluster cmtypes.AddrCluster, port uint16, proto u8pr
 	flags := loadbalancer.NewBackendFlags(state)
 
 	val := Backend6ValueV3{
-		Port:  port,
-		Proto: proto,
-		Flags: flags,
-		Zone:  zone,
+		Port:      port,
+		Proto:     proto,
+		Flags:     flags,
+		ClusterID: uint16(addrCluster.ClusterID()),
+		Zone:      zone,
 	}
 
 	ipv6Array := addr.As16()
@@ -671,11 +720,18 @@ func NewBackend6ValueV3(addrCluster cmtypes.AddrCluster, port uint16, proto u8pr
 }
 
 func (v *Backend6ValueV3) String() string {
-	vHost := v.ToHost().(*Backend6ValueV3)
+	var buf [96]byte
+	b := buf[:0]
+	b = append(b, v.Proto.String()...)
+	b = append(b, "://"...)
+	ac := cmtypes.AddrClusterFrom(v.Address.Addr(), uint32(v.ClusterID))
+	b = ac.AppendTo(b)
 	if v.Zone != 0 {
-		return fmt.Sprintf("%s://%s[%s]", vHost.Proto, cmtypes.AddrClusterFrom(vHost.Address.Addr(), uint32(vHost.ClusterID)), option.Config.GetZone(v.Zone))
+		b = append(b, '[')
+		b = append(b, option.Config.GetZone(v.Zone)...)
+		b = append(b, ']')
 	}
-	return fmt.Sprintf("%s://%s", vHost.Proto, cmtypes.AddrClusterFrom(vHost.Address.Addr(), uint32(vHost.ClusterID)))
+	return string(b)
 }
 
 func (v *Backend6ValueV3) New() bpf.MapValue { return &Backend6ValueV3{} }
@@ -769,7 +825,9 @@ func NewRevNat4Key(id loadbalancer.ServiceID) *RevNat4Key {
 	return &RevNat4Key{uint16(id)}
 }
 
-func (k *RevNat4Key) String() string                 { return fmt.Sprintf("%d", k.ToHost().(*RevNat4Key).Key) }
+func (k *RevNat4Key) String() string {
+	return strconv.FormatUint(uint64(byteorder.NetworkToHost16(k.Key)), 10)
+}
 func (k *RevNat4Key) New() bpf.MapKey                { return &RevNat4Key{} }
 func (v *RevNat4Key) GetKey() loadbalancer.ServiceID { return loadbalancer.ServiceID(v.Key) }
 
@@ -807,8 +865,12 @@ func (k *RevNat4Value) ToHost() RevNatValue {
 }
 
 func (v *RevNat4Value) String() string {
-	vHost := v.ToHost().(*RevNat4Value)
-	return net.JoinHostPort(vHost.Address.String(), fmt.Sprintf("%d", vHost.Port))
+	var buf [32]byte
+	b := buf[:0]
+	b = v.Address.AppendTo(b)
+	b = append(b, ':')
+	b = strconv.AppendUint(b, uint64(byteorder.NetworkToHost16(v.Port)), 10)
+	return string(b)
 }
 
 func (v *RevNat4Value) New() bpf.MapValue { return &RevNat4Value{} }
@@ -821,7 +883,9 @@ func NewRevNat6Key(value uint16) *RevNat6Key {
 	return &RevNat6Key{value}
 }
 
-func (v *RevNat6Key) String() string                 { return fmt.Sprintf("%d", v.ToHost().(*RevNat6Key).Key) }
+func (v *RevNat6Key) String() string {
+	return strconv.FormatUint(uint64(byteorder.NetworkToHost16(v.Key)), 10)
+}
 func (v *RevNat6Key) New() bpf.MapKey                { return &RevNat6Key{} }
 func (v *RevNat6Key) GetKey() loadbalancer.ServiceID { return loadbalancer.ServiceID(v.Key) }
 
@@ -845,8 +909,13 @@ type RevNat6Value struct {
 }
 
 func (v *RevNat6Value) String() string {
-	vHost := v.ToHost().(*RevNat6Value)
-	return net.JoinHostPort(vHost.Address.String(), fmt.Sprintf("%d", vHost.Port))
+	var buf [64]byte
+	b := buf[:0]
+	b = append(b, '[')
+	b = v.Address.AppendTo(b)
+	b = append(b, "]:"...)
+	b = strconv.AppendUint(b, uint64(byteorder.NetworkToHost16(v.Port)), 10)
+	return string(b)
 }
 
 func (v *RevNat6Value) New() bpf.MapValue { return &RevNat6Value{} }
@@ -892,8 +961,12 @@ type AffinityMatchValue struct {
 
 // String converts the key into a human readable string format
 func (k *AffinityMatchKey) String() string {
-	kHost := k.ToHost()
-	return fmt.Sprintf("%d %d", kHost.BackendID, kHost.RevNATID)
+	var buf [32]byte
+	b := buf[:0]
+	b = strconv.AppendUint(b, uint64(k.BackendID), 10)
+	b = append(b, ' ')
+	b = strconv.AppendUint(b, uint64(byteorder.NetworkToHost16(k.RevNATID)), 10)
+	return string(b)
 }
 
 func (k *AffinityMatchKey) New() bpf.MapKey { return &AffinityMatchKey{} }
@@ -945,7 +1018,14 @@ type AffinityValue struct {
 
 // String converts the key into a human readable string format.
 func (k *Affinity4Key) String() string {
-	return fmt.Sprintf("%d %d %d", k.ClientID, k.NetNSCookie, k.RevNATID)
+	var buf [48]byte
+	b := buf[:0]
+	b = strconv.AppendUint(b, k.ClientID, 10)
+	b = append(b, ' ')
+	b = strconv.AppendUint(b, uint64(k.NetNSCookie), 10)
+	b = append(b, ' ')
+	b = strconv.AppendUint(b, uint64(k.RevNATID), 10)
+	return string(b)
 }
 
 func (k *Affinity4Key) New() bpf.MapKey { return &Affinity4Key{} }
@@ -958,7 +1038,14 @@ func (k *Affinity6Key) String() string {
 func (k *Affinity6Key) New() bpf.MapKey { return &Affinity6Key{} }
 
 // String converts the value into a human readable string format.
-func (v *AffinityValue) String() string    { return fmt.Sprintf("%d %d", v.BackendID, v.LastUsed) }
+func (v *AffinityValue) String() string {
+	var buf [32]byte
+	b := buf[:0]
+	b = strconv.AppendUint(b, uint64(v.BackendID), 10)
+	b = append(b, ' ')
+	b = strconv.AppendUint(b, v.LastUsed, 10)
+	return string(b)
+}
 func (v *AffinityValue) New() bpf.MapValue { return &AffinityValue{} }
 
 //
@@ -1014,14 +1101,30 @@ func NewSockRevNat4Key(cookie uint64, addr net.IP, port uint16) *SockRevNat4Key 
 
 // String converts the key into a human readable string format.
 func (k *SockRevNat4Key) String() string {
-	return fmt.Sprintf("[%s]:%d, %d", k.Address, k.Port, k.Cookie)
+	var buf [48]byte
+	b := buf[:0]
+	b = append(b, '[')
+	b = k.Address.AppendTo(b)
+	b = append(b, "]:"...)
+	b = strconv.AppendInt(b, int64(k.Port), 10)
+	b = append(b, ", "...)
+	b = strconv.AppendUint(b, k.Cookie, 10)
+	return string(b)
 }
 
 func (k *SockRevNat4Key) New() bpf.MapKey { return &SockRevNat4Key{} }
 
 // String converts the value into a human readable string format.
 func (v *SockRevNat4Value) String() string {
-	return fmt.Sprintf("[%s]:%d, %d", v.Address, v.Port, v.RevNatIndex)
+	var buf [48]byte
+	b := buf[:0]
+	b = append(b, '[')
+	b = v.Address.AppendTo(b)
+	b = append(b, "]:"...)
+	b = strconv.AppendInt(b, int64(v.Port), 10)
+	b = append(b, ", "...)
+	b = strconv.AppendUint(b, uint64(v.RevNatIndex), 10)
+	return string(b)
 }
 
 func (v *SockRevNat4Value) New() bpf.MapValue { return &SockRevNat4Value{} }
@@ -1061,14 +1164,30 @@ func NewSockRevNat6Key(cookie uint64, addr net.IP, port uint16) *SockRevNat6Key 
 
 // String converts the key into a human readable string format.
 func (k *SockRevNat6Key) String() string {
-	return fmt.Sprintf("[%s]:%d, %d", k.Address, k.Port, k.Cookie)
+	var buf [80]byte
+	b := buf[:0]
+	b = append(b, '[')
+	b = k.Address.AppendTo(b)
+	b = append(b, "]:"...)
+	b = strconv.AppendInt(b, int64(k.Port), 10)
+	b = append(b, ", "...)
+	b = strconv.AppendUint(b, k.Cookie, 10)
+	return string(b)
 }
 
 func (k *SockRevNat6Key) New() bpf.MapKey { return &SockRevNat6Key{} }
 
 // String converts the value into a human readable string format.
 func (v *SockRevNat6Value) String() string {
-	return fmt.Sprintf("[%s]:%d, %d", v.Address, v.Port, v.RevNatIndex)
+	var buf [80]byte
+	b := buf[:0]
+	b = append(b, '[')
+	b = v.Address.AppendTo(b)
+	b = append(b, "]:"...)
+	b = strconv.AppendInt(b, int64(v.Port), 10)
+	b = append(b, ", "...)
+	b = strconv.AppendUint(b, uint64(v.RevNatIndex), 10)
+	return string(b)
 }
 
 func (v *SockRevNat6Value) New() bpf.MapValue { return &SockRevNat6Value{} }
@@ -1097,7 +1216,7 @@ type MaglevOuterKey struct {
 
 // New and String implement bpf.MapKey
 func (k *MaglevOuterKey) New() bpf.MapKey { return &MaglevOuterKey{} }
-func (k *MaglevOuterKey) String() string  { return fmt.Sprintf("%d", k.RevNatID) }
+func (k *MaglevOuterKey) String() string  { return strconv.FormatUint(uint64(k.RevNatID), 10) }
 
 var _ bpf.MapKey = &MaglevOuterKey{}
 
@@ -1131,7 +1250,7 @@ type MaglevInnerKey struct {
 
 // New and String implement bpf.MapKey
 func (k *MaglevInnerKey) New() bpf.MapKey { return &MaglevInnerKey{} }
-func (k *MaglevInnerKey) String() string  { return fmt.Sprintf("%d", k.Zero) }
+func (k *MaglevInnerKey) String() string  { return strconv.FormatUint(uint64(k.Zero), 10) }
 
 // MaglevInnerVal is the value of a maglev inner map.
 type MaglevInnerVal struct {
@@ -1175,8 +1294,13 @@ type SourceRangeKey4 struct {
 }
 
 func (k *SourceRangeKey4) String() string {
-	kHost := k.ToHost().(*SourceRangeKey4)
-	return fmt.Sprintf("%s (%d)", kHost.GetPrefix(), kHost.GetRevNATID())
+	var buf [48]byte
+	b := buf[:0]
+	b = k.GetPrefix().AppendTo(b)
+	b = append(b, " ("...)
+	b = strconv.AppendUint(b, uint64(byteorder.NetworkToHost16(k.RevNATID)), 10)
+	b = append(b, ')')
+	return string(b)
 }
 
 func (k *SourceRangeKey4) New() bpf.MapKey { return &SourceRangeKey4{} }
@@ -1212,8 +1336,13 @@ type SourceRangeKey6 struct {
 }
 
 func (k *SourceRangeKey6) String() string {
-	kHost := k.ToHost().(*SourceRangeKey6)
-	return fmt.Sprintf("%s (%d)", kHost.GetPrefix(), kHost.GetRevNATID())
+	var buf [64]byte
+	b := buf[:0]
+	b = k.GetPrefix().AppendTo(b)
+	b = append(b, " ("...)
+	b = strconv.AppendUint(b, uint64(byteorder.NetworkToHost16(k.RevNATID)), 10)
+	b = append(b, ')')
+	return string(b)
 }
 
 func (k *SourceRangeKey6) New() bpf.MapKey { return &SourceRangeKey6{} }

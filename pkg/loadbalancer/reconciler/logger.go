@@ -4,6 +4,7 @@
 package reconciler
 
 import (
+	"context"
 	"log/slog"
 
 	"github.com/cilium/cilium/pkg/logging"
@@ -31,6 +32,10 @@ func newRateLimitingLogger(log *slog.Logger) rateLimitingLogger {
 		log:     log,
 		limiter: logging.NewLimiter(logRateInterval, logRateBurst),
 	}
+}
+
+func (log rateLimitingLogger) Enabled(ctx context.Context, level slog.Level) bool {
+	return log.log.Enabled(ctx, level)
 }
 
 func (log rateLimitingLogger) Debug(msg string, args ...any) {

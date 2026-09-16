@@ -25,6 +25,10 @@ func (v6 IPv6) String() string {
 	return v6.Addr().String()
 }
 
+func (v6 IPv6) AppendTo(b []byte) []byte {
+	return v6.Addr().AppendTo(b)
+}
+
 // FromAddr will populate the receiver with the specified address if and only
 // if the provided address is a valid IPv6 address. Any other address,
 // including the "invalid ip" value netip.Addr{} will zero the receiver.

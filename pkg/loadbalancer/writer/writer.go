@@ -363,6 +363,10 @@ func (w *Writer) UpsertServiceAndFrontends(txn WriteTxn, svc *loadbalancer.Servi
 	}
 	fes = filtered
 
+	for i := range fes {
+		fes[i].ServiceName = svc.Name
+	}
+
 	if err := w.validateFrontends(txn, fes...); err != nil {
 		return err
 	}
@@ -378,22 +382,49 @@ func (w *Writer) UpsertServiceAndFrontends(txn WriteTxn, svc *loadbalancer.Servi
 		}
 	}
 
-	addrs := sets.New[loadbalancer.L3n4Addr]()
-
 	// Upsert the new frontends
 	for _, params := range fes {
 		params.ServiceName = svc.Name
 		if _, err := w.upsertFrontendParams(txn, params, svc); err != nil {
 			return err
 		}
-		addrs.Insert(params.Address)
 	}
 
 	// Delete orphan frontends
-	for fe := range w.fes.List(txn, loadbalancer.FrontendByServiceName(svc.Name)) {
-		if !addrs.Has(fe.Address) {
-			if _, _, err := w.fes.Delete(txn, fe); err != nil {
-				return err
+	if len(fes) == 1 {
+		singleAddr := fes[0].Address
+		for fe := range w.fes.List(txn, loadbalancer.FrontendByServiceName(svc.Name)) {
+			if fe.Address != singleAddr {
+				if _, _, err := w.fes.Delete(txn, fe); err != nil {
+					return err
+				}
+			}
+		}
+	} else if len(fes) <= 4 {
+		for fe := range w.fes.List(txn, loadbalancer.FrontendByServiceName(svc.Name)) {
+			found := false
+			for i := range fes {
+				if fes[i].Address == fe.Address {
+					found = true
+					break
+				}
+			}
+			if !found {
+				if _, _, err := w.fes.Delete(txn, fe); err != nil {
+					return err
+				}
+			}
+		}
+	} else {
+		addrs := make(sets.Set[loadbalancer.L3n4Addr], len(fes))
+		for _, params := range fes {
+			addrs.Insert(params.Address)
+		}
+		for fe := range w.fes.List(txn, loadbalancer.FrontendByServiceName(svc.Name)) {
+			if !addrs.Has(fe.Address) {
+				if _, _, err := w.fes.Delete(txn, fe); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -716,11 +747,6 @@ func (w *Writer) SetBackends(txn WriteTxn, name loadbalancer.ServiceName, source
 // SetBackendsOfCluster sets the backends associated with a service from the specified cluster. It will
 // not affect the backends from other clusters associated with the service.
 func (w *Writer) SetBackendsOfCluster(txn WriteTxn, name loadbalancer.ServiceName, source source.Source, clusterID uint32, bes ...loadbalancer.Backend) error {
-	addrs := sets.New[loadbalancer.L3n4Addr]()
-	for _, be := range bes {
-		addrs.Insert(be.Address)
-	}
-
 	_, err := w.updateBackends(txn, name, source, clusterID, slices.Values(bes))
 	if err != nil {
 		return err
@@ -729,15 +755,53 @@ func (w *Writer) SetBackendsOfCluster(txn WriteTxn, name loadbalancer.ServiceNam
 	// Release orphaned backends, e.g. all backends from this source referencing this
 	// service that were not updated, i.e. have old revision.
 	serviceBackends, _ := loadbalancer.ListBackendsByServiceName(txn, w.bes, name)
-	for be := range serviceBackends {
-		if addrs.Has(be.Address) {
-			continue
+	if len(bes) == 1 {
+		singleAddr := bes[0].Address
+		for be := range serviceBackends {
+			if be.Address == singleAddr {
+				continue
+			}
+			if be.Source != source || be.ClusterID != clusterID {
+				continue
+			}
+			if _, _, err := w.bes.Delete(txn, be); err != nil {
+				return err
+			}
 		}
-		if be.Source != source || be.ClusterID != clusterID {
-			continue
+	} else if len(bes) <= 4 {
+		for be := range serviceBackends {
+			found := false
+			for i := range bes {
+				if bes[i].Address == be.Address {
+					found = true
+					break
+				}
+			}
+			if found {
+				continue
+			}
+			if be.Source != source || be.ClusterID != clusterID {
+				continue
+			}
+			if _, _, err := w.bes.Delete(txn, be); err != nil {
+				return err
+			}
 		}
-		if _, _, err := w.bes.Delete(txn, be); err != nil {
-			return err
+	} else {
+		addrs := make(sets.Set[loadbalancer.L3n4Addr], len(bes))
+		for _, be := range bes {
+			addrs.Insert(be.Address)
+		}
+		for be := range serviceBackends {
+			if addrs.Has(be.Address) {
+				continue
+			}
+			if be.Source != source || be.ClusterID != clusterID {
+				continue
+			}
+			if _, _, err := w.bes.Delete(txn, be); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -761,21 +825,38 @@ func (w *Writer) updateBackends(txn WriteTxn, serviceName loadbalancer.ServiceNa
 		}
 
 		if old, _, ok := w.bes.Get(txn, loadbalancer.BackendByKey(key)); ok {
-			// Preserve health information.
-			be.Unhealthy = old.Unhealthy
-			be.UnhealthyUpdatedAt = old.UnhealthyUpdatedAt
-			if old.DeepEqual(&be) {
+			// Fast-path: check if parameters have changed without taking address of `be`
+			// which would cause `be` to escape to the heap.
+			if old.Weight == be.Weight &&
+				old.State == be.State &&
+				old.NodeName == be.NodeName &&
+				slices.Equal(old.PortNames, be.PortNames) &&
+				zoneEqual(old.Zone, be.Zone) {
 				// None of the parameters have changed. Skip the update.
 				continue
 			}
+			// Preserve health information.
+			be.Unhealthy = old.Unhealthy
+			be.UnhealthyUpdatedAt = old.UnhealthyUpdatedAt
 		}
 
 		changed = true
-		if _, _, err := w.bes.Insert(txn, &be); err != nil {
+		beInsert := be
+		if _, _, err := w.bes.Insert(txn, &beInsert); err != nil {
 			return false, err
 		}
 	}
 	return changed, nil
+}
+
+func zoneEqual(a, b *loadbalancer.BackendZone) bool {
+	if a == b {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return a.Zone == b.Zone && slices.Equal(a.ForZones, b.ForZones)
 }
 
 func (w *Writer) DeleteBackendsOfService(txn WriteTxn, name loadbalancer.ServiceName, src source.Source) error {
