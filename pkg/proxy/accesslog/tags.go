@@ -45,7 +45,8 @@ func (logTags) Verdict(v FlowVerdict, info string) LogTag {
 // Timestamp overwrites the starting timestamp of the log record
 func (logTags) Timestamp(ts time.Time) LogTag {
 	return func(lr *LogRecord, _ EndpointInfoRegistry) {
-		lr.Timestamp = ts.UTC().Format(time.RFC3339Nano)
+		var buf [35]byte
+		lr.Timestamp = string(ts.UTC().AppendFormat(buf[:0], time.RFC3339Nano))
 	}
 }
 

@@ -6,10 +6,11 @@ package ctmap
 import (
 	"context"
 	"errors"
-	"fmt"
+	"log/slog"
 	"math"
 	"net/netip"
 	"reflect"
+	"strconv"
 	"strings"
 
 	"github.com/cilium/ebpf"
@@ -262,7 +263,11 @@ func DumpEntriesWithTimeDiff(m CtMap, clockSource *models.ClockSource) (string, 
 		toRemSecs = func(t uint32) string {
 			tsec := tsConverter(uint64(t))
 			diff := int64(tsec) - int64(tsecNow)
-			return fmt.Sprintf("remaining: %d sec(s)", diff)
+			var b [32]byte
+			n := copy(b[:], "remaining: ")
+			b2 := strconv.AppendInt(b[:n], diff, 10)
+			b2 = append(b2, " sec(s)"...)
+			return string(b2)
 		}
 	}
 
@@ -527,13 +532,15 @@ func (m *Map) cleanup(filter GCFilter, natMap *nat.Map, stats *gcStats, next fun
 			err := m.purgeCtEntry(ctKey, entry, natMap, next, countFailedFn)
 			if err != nil {
 				if errors.Is(err, ebpf.ErrKeyNotExist) {
-					m.Logger.Debug("key is missing, likely due to lru eviction - skipping",
-						logfields.Error, err,
-						logfields.Key, ctKey.ToHost(),
-					)
+					if m.Logger.Enabled(context.Background(), slog.LevelDebug) {
+						m.Logger.Debug("key is missing, likely due to lru eviction - skipping",
+							logfields.Error, err,
+							logfields.Key, ctKey.ToHost(),
+						)
+					}
 					stats.skipped++
 				} else {
-					m.Logger.Error("key is missing, likely due to lru eviction - skipping",
+					m.Logger.Error("failed to delete key during conntrack GC",
 						logfields.Error, err,
 						logfields.Key, ctKey.ToHost(),
 					)
@@ -654,8 +661,8 @@ func PurgeOrphanNATEntries(ctMapTCP, ctMapAny *Map) *NatGCStats {
 	}
 	stats := newNatGCStats(natMap, family, ctMapTCP.clusterID)
 	defer stats.finish()
-	var egressEntriesToDelete []nat.NatKey
-	var ingressEntriesToDelete []nat.NatKey
+	egressEntriesToDelete := make([]nat.NatKey, 0, 32)
+	ingressEntriesToDelete := make([]nat.NatKey, 0, 32)
 
 	cb := func(key bpf.MapKey, value bpf.MapValue) {
 		natKey := key.(nat.NatKey)

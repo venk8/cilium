@@ -397,6 +397,21 @@ func BenchmarkUpdateIPs(b *testing.B) {
 	}
 }
 
+func BenchmarkDNSCacheDump(b *testing.B) {
+	ips := makeIPs(10)
+	cache := NewDNSCache(0)
+	now := time.Now()
+	for i := range 1000 {
+		cache.Update(now, fmt.Sprintf("domain-%d.com", i), ips, 86400)
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = cache.Dump()
+	}
+}
+
 // JSON Marshal/Unmarshal benchmarks
 var numIPsPerEntry = 10 // number of IPs to generate in each entry
 

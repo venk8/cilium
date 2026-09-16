@@ -5,6 +5,7 @@ package encrypt
 
 import (
 	"fmt"
+	"strconv"
 
 	"github.com/cilium/hive/cell"
 	"golang.org/x/sys/unix"
@@ -32,15 +33,16 @@ type EncryptValue struct {
 
 // String pretty print the EncryptKey
 func (k EncryptKey) String() string {
-	return fmt.Sprintf("%d", k.Key)
+	return strconv.FormatUint(uint64(k.Key), 10)
 }
 
 func (k EncryptKey) New() bpf.MapKey { return &EncryptKey{} }
 
 // String pretty print the EncryptValue.
 func (v EncryptValue) String() string {
-	return fmt.Sprintf("%d", v.KeyID)
+	return strconv.FormatUint(uint64(v.KeyID), 10)
 }
+
 
 func (v EncryptValue) New() bpf.MapValue { return &EncryptValue{} }
 

@@ -18,3 +18,4 @@ func (*TestMonitorAgent) RemoveListener(ml listener.MonitorListener)            
 func (*TestMonitorAgent) RegisterNewConsumer(newConsumer consumer.MonitorConsumer) {}
 func (*TestMonitorAgent) RemoveConsumer(mc consumer.MonitorConsumer)               {}
 func (*TestMonitorAgent) State() *models.MonitorStatus                             { return nil }
+func (*TestMonitorAgent) HasSubscribers() bool                                        { return false }

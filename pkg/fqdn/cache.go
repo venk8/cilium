@@ -12,7 +12,6 @@ import (
 	"net/netip"
 	"regexp"
 	"slices"
-	"unsafe"
 
 	"k8s.io/apimachinery/pkg/util/sets"
 
@@ -245,11 +244,7 @@ func (c *DNSCache) addNameToCleanup(entry *cacheEntry) {
 		c.lastCleanup = entry.ExpirationTime
 	}
 	expiration := entry.ExpirationTime.Unix()
-	expiredEntries, exists := c.cleanup[expiration]
-	if !exists {
-		expiredEntries = []string{}
-	}
-	c.cleanup[expiration] = append(expiredEntries, entry.Name)
+	c.cleanup[expiration] = append(c.cleanup[expiration], entry.Name)
 }
 
 // cleanupExpiredEntries cleans all the expired entries since lastCleanup up to
@@ -744,31 +739,33 @@ func (c *DNSCache) Dump() (lookups []*cacheEntry) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	// Collect all the still-valid entries
+	// Collect all the still-valid entries, deduplicated per DNS name.
+	// Since each cacheEntry has a unique Name and is stored exclusively under
+	// c.forward[entry.Name], deduplicating within each name guarantees global uniqueness.
 	lookups = make([]*cacheEntry, 0, len(c.forward))
 	for _, entries := range c.forward {
-		for _, entry := range entries {
-			lookups = append(lookups, entry)
+		switch len(entries) {
+		case 0:
+			continue
+		case 1:
+			for _, entry := range entries {
+				lookups = append(lookups, entry)
+			}
+		default:
+			nameStart := len(lookups)
+		entriesLoop:
+			for _, entry := range entries {
+				for i := nameStart; i < len(lookups); i++ {
+					if lookups[i] == entry {
+						continue entriesLoop
+					}
+				}
+				lookups = append(lookups, entry)
+			}
 		}
 	}
 
-	// Dedup the entries. They are created once and are immutable so the address
-	// is a unique identifier.
-	// We iterate through the list, keeping unique pointers. This is correct
-	// because the list is sorted and, if two consecutive entries are the same,
-	// it is safe to overwrite the second duplicate.
-	slices.SortFunc(lookups, func(a, b *cacheEntry) int {
-		return cmp.Compare(uintptr(unsafe.Pointer(a)), uintptr(unsafe.Pointer(b)))
-	})
-
-	deduped := lookups[:0] // len==0 but cap==cap(lookups)
-	for readIdx, lookup := range lookups {
-		if readIdx == 0 || deduped[len(deduped)-1] != lookups[readIdx] {
-			deduped = append(deduped, lookup)
-		}
-	}
-
-	return deduped
+	return lookups
 }
 
 func (c *DNSCache) DumpNames() sets.Set[string] {

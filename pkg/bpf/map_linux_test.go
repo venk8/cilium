@@ -6,6 +6,7 @@ package bpf
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -1081,3 +1082,53 @@ func TestPrivilegedBatchIterator(t *testing.T) {
 		}
 	}
 }
+
+func startingChunkSizeOrig(maxEntries int) int {
+	bucketSize := math.Sqrt(float64(maxEntries * 2))
+	nearest2 := math.Log2(bucketSize)
+	return int(math.Pow(2, math.Ceil(nearest2)))
+}
+
+func TestStartingChunkSize(t *testing.T) {
+	for entries := 1; entries <= 100000; entries++ {
+		expected := startingChunkSizeOrig(entries)
+		actual := startingChunkSize(entries)
+		require.Equalf(t, expected, actual, "mismatch for maxEntries=%d: expected %d, got %d", entries, expected, actual)
+	}
+	assert.Equal(t, 0, startingChunkSize(0))
+	assert.Equal(t, 0, startingChunkSize(-5))
+}
+
+func BenchmarkStartingChunkSize_Orig(b *testing.B) {
+	entries := []int{10, 100, 1024, 4096, 65536, 1048576}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		for _, e := range entries {
+			_ = startingChunkSizeOrig(e)
+		}
+	}
+}
+
+func BenchmarkStartingChunkSize_Bitwise(b *testing.B) {
+	entries := []int{10, 100, 1024, 4096, 65536, 1048576}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		for _, e := range entries {
+			_ = startingChunkSize(e)
+		}
+	}
+}
+
+func BenchmarkDeleteMapEvent_Uncached(b *testing.B) {
+	m := &Map{}
+	key := &TestKey{Key: 42}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		m.deleteMapEvent(key, nil)
+	}
+}
+
+

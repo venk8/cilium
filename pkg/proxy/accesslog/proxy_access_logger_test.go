@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/gob"
+	"net"
 	"net/netip"
 	"strings"
 	"sync"
@@ -23,6 +24,7 @@ import (
 	"github.com/cilium/cilium/pkg/monitor/agent/listener"
 	"github.com/cilium/cilium/pkg/monitor/api"
 	"github.com/cilium/cilium/pkg/monitor/payload"
+	"github.com/cilium/cilium/pkg/node"
 	"github.com/cilium/cilium/pkg/time"
 	"github.com/cilium/cilium/pkg/u8proto"
 )
@@ -133,6 +135,9 @@ func NewMockLogNotifier(monitor agent.Agent) *MockLogNotifier {
 
 // NewProxyLogRecord sends the event to the monitor agent to notify the listeners.
 func (n *MockLogNotifier) NewProxyLogRecord(l *LogRecord) error {
+	if !n.monitorAgent.HasSubscribers() {
+		return nil
+	}
 	return n.monitorAgent.SendEvent(api.MessageTypeAccessLog, *l)
 }
 
@@ -315,5 +320,41 @@ func TestGetLogFields(t *testing.T) {
 	fields := pal.getLogFields(lr)
 	require.NotEmpty(t, fields)
 	require.Equal(t, 16, len(fields))
+}
+
+func BenchmarkNewLogRecord_NoLocalNodeStore(b *testing.B) {
+	ctx := context.Background()
+	logger := NewProxyAccessLogger(hivetest.Logger(b), ProxyAccessLoggerConfig{}, nil, nil, nil)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		_, _ = logger.NewLogRecord(ctx, TypeRequest, true)
+	}
+}
+
+func BenchmarkNewLogRecord_WithLocalNodeStore(b *testing.B) {
+	ctx := context.Background()
+	mockNode := node.LocalNode{}
+	mockNode.SetNodeInternalIP(net.ParseIP("192.168.1.10"))
+	lns := node.NewTestLocalNodeStore(mockNode)
+	logger := NewProxyAccessLogger(hivetest.Logger(b), ProxyAccessLoggerConfig{}, nil, nil, lns)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		_, _ = logger.NewLogRecord(ctx, TypeRequest, true)
+	}
+}
+
+func BenchmarkMockLogRecord(b *testing.B) {
+	ctx := context.Background()
+	mockNode := node.LocalNode{}
+	mockNode.SetNodeInternalIP(net.ParseIP("192.168.1.10"))
+	lns := node.NewTestLocalNodeStore(mockNode)
+	logger := NewProxyAccessLogger(hivetest.Logger(b), ProxyAccessLoggerConfig{}, nil, nil, lns)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		_, _ = mockLogRecord(ctx, logger)
+	}
 }
 

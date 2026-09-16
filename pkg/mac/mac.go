@@ -25,13 +25,32 @@ const EthHdrLen = 14
 // +kubebuilder:validation:Format=mac
 type MAC [6]byte
 
+const hexDigit = "0123456789abcdef"
+
+// AppendTo appends the string representation of m to b and returns the resulting slice.
+func (m MAC) AppendTo(b []byte) []byte {
+	if !m.IsValid() {
+		return b
+	}
+	return append(b,
+		hexDigit[m[0]>>4], hexDigit[m[0]&0xf], ':',
+		hexDigit[m[1]>>4], hexDigit[m[1]&0xf], ':',
+		hexDigit[m[2]>>4], hexDigit[m[2]&0xf], ':',
+		hexDigit[m[3]>>4], hexDigit[m[3]&0xf], ':',
+		hexDigit[m[4]>>4], hexDigit[m[4]&0xf], ':',
+		hexDigit[m[5]>>4], hexDigit[m[5]&0xf],
+	)
+}
+
 // String returns the string representation of m, or the empty string if m is
 // unset.
 func (m MAC) String() string {
 	if !m.IsValid() {
 		return ""
 	}
-	return m.HardwareAddr().String()
+	var buf [17]byte
+	b := m.AppendTo(buf[:0])
+	return string(b)
 }
 
 // IsValid reports whether m is set. Devices without a layer 2 address, such as

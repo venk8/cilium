@@ -4,9 +4,9 @@
 package signalmap
 
 import (
-	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/perf"
@@ -30,12 +30,13 @@ type Value struct {
 }
 
 // String converts the key into a human readable string format.
-func (k *Key) String() string  { return fmt.Sprintf("%d", k.Index) }
+func (k *Key) String() string  { return strconv.FormatUint(uint64(k.Index), 10) }
 func (k *Key) New() bpf.MapKey { return &Key{} }
 
 // String converts the value into a human readable string format.
-func (v *Value) String() string    { return fmt.Sprintf("%d", v.ProgID) }
+func (v *Value) String() string    { return strconv.FormatUint(uint64(v.ProgID), 10) }
 func (v *Value) New() bpf.MapValue { return &Value{} }
+
 
 type signalMap struct {
 	logger     *slog.Logger

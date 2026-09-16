@@ -19,6 +19,9 @@ func newMonitorAgentLogRecordNotifier(monitorAgent monitoragent.Agent) LogRecord
 }
 
 func (m *monitorAgentLogRecordNotifier) NewProxyLogRecord(l *LogRecord) error {
+	if !m.monitorAgent.HasSubscribers() {
+		return nil
+	}
 	// Note: important to pass the event as value
 	if err := m.monitorAgent.SendEvent(monitorAPI.MessageTypeAccessLog, *l); err != nil {
 		return fmt.Errorf("failed to send log record to monitor agent: %w", err)

@@ -4,9 +4,10 @@
 package subnet
 
 import (
-	"fmt"
 	"net/netip"
+	"strconv"
 	"unsafe"
+
 
 	"github.com/cilium/hive/cell"
 	"golang.org/x/sys/unix"
@@ -94,8 +95,12 @@ type SubnetMapValue struct {
 }
 
 func (v *SubnetMapValue) String() string {
-	return fmt.Sprintf("identity=%d", v.Identity)
+	var buf [24]byte
+	b := append(buf[:0], "identity="...)
+	b = strconv.AppendUint(b, uint64(v.Identity), 10)
+	return string(b)
 }
+
 
 func (v *SubnetMapValue) New() bpf.MapValue { return &SubnetMapValue{} }
 

@@ -12,7 +12,7 @@ import (
 	"io/fs"
 	"iter"
 	"log/slog"
-	"math"
+	"math/bits"
 	"os"
 	"path"
 	"reflect"
@@ -455,7 +455,7 @@ func (m *Map) UpdatePressureMetricWithSize(size int32) (pvalue float64) {
 func (m *Map) updatePressureMetric() {
 	// Skipping pressure metric gauge updates for LRU map as the cache size
 	// does not accurately represent the actual map size.
-	if m.spec != nil && m.spec.Type == ebpf.LRUHash {
+	if (m.spec != nil && m.spec.Type == ebpf.LRUHash) || m.pressureGauge == nil {
 		return
 	}
 	_ = m.UpdatePressureMetricWithSize(int32(len(m.cache)))
@@ -1070,9 +1070,13 @@ func CountAll[KT, VT any, KP KeyPointer[KT], VP ValuePointer[VT]](ctx context.Co
 }
 
 func startingChunkSize(maxEntries int) int {
-	bucketSize := math.Sqrt(float64(maxEntries * 2))
-	nearest2 := math.Log2(bucketSize)
-	return int(math.Pow(2, math.Ceil(nearest2)))
+	if maxEntries <= 0 {
+		return 0
+	}
+	target := uint(maxEntries) * 2
+	bitsNeeded := bits.Len(target - 1)
+	shift := (bitsNeeded + 1) / 2
+	return 1 << shift
 }
 
 // IterateAll returns an iterate Seq2 type which can be used to iterate a map
@@ -1180,7 +1184,8 @@ func (bi *BatchIterator[KT, VT, KP, VP]) IterateAll(ctx context.Context, opts ..
 func (m *Map) Dump(hash map[string][]string) error {
 	callback := func(key MapKey, value MapValue) {
 		// No need to deep copy since we are creating strings.
-		hash[key.String()] = append(hash[key.String()], value.String())
+		k := key.String()
+		hash[k] = append(hash[k], value.String())
 	}
 
 	if err := m.DumpWithCallback(callback); err != nil {
@@ -1255,17 +1260,23 @@ func (m *Map) Update(key MapKey, value MapValue) error {
 	defer m.lock.Unlock()
 
 	defer func() {
+		if !m.eventsBufferEnabled && m.cache == nil {
+			return
+		}
+
 		desiredAction := OK
 		if err != nil {
 			desiredAction = Insert
 		}
-		entry := &cacheEntry{
-			Key:           key,
-			Value:         value,
-			DesiredAction: desiredAction,
-			LastError:     err,
+
+		if m.eventsBufferEnabled {
+			m.addToEventsLocked(MapUpdate, cacheEntry{
+				Key:           key,
+				Value:         value,
+				DesiredAction: desiredAction,
+				LastError:     err,
+			})
 		}
-		m.addToEventsLocked(MapUpdate, *entry)
 
 		if m.cache == nil {
 			return
@@ -1309,15 +1320,23 @@ func (m *Map) Update(key MapKey, value MapValue) error {
 // If cache is enabled, it will update the cache to reflect the delete.
 // As well, if event buffer is enabled, it adds a new event to the buffer.
 func (m *Map) deleteMapEvent(key MapKey, err error) {
-	m.addToEventsLocked(MapDelete, cacheEntry{
-		Key:           key,
-		DesiredAction: Delete,
-		LastError:     err,
-	})
+	if !m.eventsBufferEnabled && m.cache == nil {
+		return
+	}
+	if m.eventsBufferEnabled {
+		m.addToEventsLocked(MapDelete, cacheEntry{
+			Key:           key,
+			DesiredAction: Delete,
+			LastError:     err,
+		})
+	}
 	m.deleteCacheEntry(key, err)
 }
 
 func (m *Map) deleteAllMapEvent() {
+	if !m.eventsBufferEnabled {
+		return
+	}
 	m.addToEventsLocked(MapDeleteAll, cacheEntry{})
 }
 
@@ -1632,7 +1651,9 @@ func (m *Map) resolveErrors(ctx context.Context) error {
 				nerr++
 			}
 			m.cache[k] = e
-			m.addToEventsLocked(MapUpdate, *e)
+			if m.eventsBufferEnabled {
+				m.addToEventsLocked(MapUpdate, *e)
+			}
 		case Delete:
 			// Holding lock, issue direct delete on map.
 			err := m.m.Delete(e.Key)
@@ -1649,7 +1670,9 @@ func (m *Map) resolveErrors(ctx context.Context) error {
 				m.cache[k] = e
 			}
 
-			m.addToEventsLocked(MapDelete, *e)
+			if m.eventsBufferEnabled {
+				m.addToEventsLocked(MapDelete, *e)
+			}
 		}
 
 		// bail out if maximum errors are reached to relax the map lock

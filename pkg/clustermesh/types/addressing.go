@@ -207,17 +207,7 @@ func (in *AddrCluster) DeepCopy() *AddrCluster {
 	return out
 }
 
-// String returns the string representation of the AddrCluster. If
-// AddrCluster.clusterID = 0, it returns bare IP address string. Otherwise, it
-// returns IP string + "@" + ClusterID (e.g. 10.0.0.1@1)
-func (ac AddrCluster) String() string {
-	if ac.clusterID == 0 {
-		return ac.addr.String()
-	}
-	return ac.addr.String() + "@" + strconv.FormatUint(uint64(ac.clusterID), 10)
-}
-
-// AppendTo appends the string representation of AddrCluster to b and returns the extended slice.
+// AppendTo appends the string representation of the AddrCluster to b and returns the resulting slice.
 func (ac AddrCluster) AppendTo(b []byte) []byte {
 	b = ac.addr.AppendTo(b)
 	if ac.clusterID != 0 {
@@ -225,6 +215,18 @@ func (ac AddrCluster) AppendTo(b []byte) []byte {
 		b = strconv.AppendUint(b, uint64(ac.clusterID), 10)
 	}
 	return b
+}
+
+// String returns the string representation of the AddrCluster. If
+// AddrCluster.clusterID = 0, it returns bare IP address string. Otherwise, it
+// returns IP string + "@" + ClusterID (e.g. 10.0.0.1@1)
+func (ac AddrCluster) String() string {
+	if ac.clusterID == 0 {
+		return ac.addr.String()
+	}
+	b := make([]byte, 0, 16+1+5)
+	b = ac.AppendTo(b)
+	return string(b)
 }
 
 // Is4 reports whether IP address part of AddrCluster is an IPv4 address.
@@ -379,12 +381,25 @@ func (pc PrefixCluster) ClusterID() uint32 {
 	return pc.clusterID
 }
 
+// AppendTo appends the string representation of the PrefixCluster to b and returns the resulting slice.
+func (pc PrefixCluster) AppendTo(b []byte) []byte {
+	b = pc.prefix.AppendTo(b)
+	if pc.clusterID != 0 {
+		b = append(b, '@')
+		b = strconv.AppendUint(b, uint64(pc.clusterID), 10)
+	}
+	return b
+}
+
 func (pc PrefixCluster) String() string {
 	if pc.clusterID == 0 {
 		return pc.prefix.String()
 	}
-	return pc.prefix.String() + "@" + strconv.FormatUint(uint64(pc.clusterID), 10)
+	b := make([]byte, 0, 64)
+	b = pc.AppendTo(b)
+	return string(b)
 }
+
 
 // AsPrefix returns the IP prefix part of PrefixCluster as a netip.Prefix type.
 // This function exists for keeping backward compatibility between the existing

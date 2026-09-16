@@ -6,9 +6,11 @@ package configmap
 import (
 	"fmt"
 	"log/slog"
+	"strconv"
 
 	"github.com/cilium/cilium/pkg/bpf"
 )
+
 
 const (
 	// MapName name of map used to pin map for datapath
@@ -44,8 +46,9 @@ func (k *Index) New() bpf.MapKey { return new(Index) }
 
 // String pretty print the config Value.
 func (v *Value) String() string {
-	return fmt.Sprintf("%d", uint64(*v))
+	return strconv.FormatUint(uint64(*v), 10)
 }
+
 
 func (v *Value) New() bpf.MapValue { return new(Value) }
 

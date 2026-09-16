@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sync/atomic"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/perf"
@@ -49,6 +50,7 @@ type Agent interface {
 	RegisterNewConsumer(newConsumer consumer.MonitorConsumer)
 	RemoveConsumer(mc consumer.MonitorConsumer)
 	State() *models.MonitorStatus
+	HasSubscribers() bool
 }
 
 // Agent structure for centralizing the responsibilities of the main events
@@ -75,6 +77,9 @@ type agent struct {
 	listeners map[listener.MonitorListener]struct{}
 	// consumers are internal clients which receive decoded messages
 	consumers map[consumer.MonitorConsumer]struct{}
+
+	numListeners atomic.Int32
+	numConsumers atomic.Int32
 
 	events        *ebpf.Map
 	monitorEvents *perf.Reader
@@ -147,10 +152,12 @@ func (a *agent) SendEvent(typ int, event any) error {
 	// While we want to avoid marshalling events if there are no active
 	// listeners, there's no need to check for active consumers ahead of time.
 
-	a.notifyAgentEvent(typ, event)
+	if a.numConsumers.Load() > 0 {
+		a.notifyAgentEvent(typ, event)
+	}
 
 	// do not marshal notifications if there are no active listeners
-	if !a.hasListeners() {
+	if a.numListeners.Load() == 0 {
 		return nil
 	}
 
@@ -188,12 +195,19 @@ func (a *agent) hasSubscribersLocked() bool {
 	return len(a.listeners)+len(a.consumers) != 0
 }
 
+// HasSubscribers returns true if there are any listeners or consumers
+// subscribed to the agent right now.
+func (a *agent) HasSubscribers() bool {
+	if a == nil {
+		return false
+	}
+	return a.numListeners.Load() > 0 || a.numConsumers.Load() > 0
+}
+
 // hasListeners returns true if there are listeners subscribed to the
 // agent right now.
 func (a *agent) hasListeners() bool {
-	a.Lock()
-	defer a.Unlock()
-	return len(a.listeners) != 0
+	return a.numListeners.Load() > 0
 }
 
 // startPerfReaderLocked starts the perf reader. This should only be
@@ -238,6 +252,7 @@ func (a *agent) RegisterNewListener(newListener listener.MonitorListener) {
 	switch newListener.Version() {
 	case listener.Version1_2:
 		a.listeners[newListener] = struct{}{}
+		a.numListeners.Store(int32(len(a.listeners)))
 
 	default:
 		newListener.Close()
@@ -263,6 +278,7 @@ func (a *agent) RemoveListener(ml listener.MonitorListener) {
 
 	// Remove the listener and close it.
 	delete(a.listeners, ml)
+	a.numListeners.Store(int32(len(a.listeners)))
 	a.logger.Debug(
 		"Removed listener",
 		logfields.Count, len(a.listeners),
@@ -299,6 +315,7 @@ func (a *agent) RegisterNewConsumer(newConsumer consumer.MonitorConsumer) {
 		a.startPerfReaderLocked()
 	}
 	a.consumers[newConsumer] = struct{}{}
+	a.numConsumers.Store(int32(len(a.consumers)))
 }
 
 // RemoveConsumer deletes the MonitorConsumer from the list, closes its queue,
@@ -312,6 +329,7 @@ func (a *agent) RemoveConsumer(mc consumer.MonitorConsumer) {
 	defer a.Unlock()
 
 	delete(a.consumers, mc)
+	a.numConsumers.Store(int32(len(a.consumers)))
 	if !a.hasSubscribersLocked() {
 		a.perfReaderCancel()
 	}

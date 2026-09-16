@@ -6,8 +6,10 @@ package netdev
 import (
 	"fmt"
 	"net"
+	"strconv"
 
 	"github.com/cilium/cilium/pkg/bpf"
+
 	"github.com/cilium/cilium/pkg/ebpf"
 	"github.com/cilium/cilium/pkg/mac"
 )
@@ -92,7 +94,7 @@ func (k *Index) New() bpf.MapKey {
 }
 
 func (k *Index) String() string {
-	return fmt.Sprintf("%d", uint32(*k))
+	return strconv.FormatUint(uint64(*k), 10)
 }
 
 // DeviceState matches struct device_state in bpf/lib/network_device.h.
@@ -125,5 +127,10 @@ func (s *DeviceState) New() bpf.MapValue {
 }
 
 func (s *DeviceState) String() string {
-	return fmt.Sprintf("%s %b", s.MAC.String(), s.L3)
+	var buf [32]byte
+	b := s.MAC.AppendTo(buf[:0])
+	b = append(b, ' ')
+	b = strconv.AppendUint(b, uint64(s.L3), 2)
+	return string(b)
 }
+

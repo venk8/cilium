@@ -4,8 +4,8 @@
 package tuple
 
 import (
-	"fmt"
 	"net/netip"
+	"strconv"
 	"strings"
 
 	"github.com/cilium/cilium/pkg/bpf"
@@ -73,7 +73,17 @@ func (k *TupleKey4) GetFlags() uint8 {
 
 // String returns the tuple's string representation, doh.
 func (k *TupleKey4) String() string {
-	return fmt.Sprintf("%s:%d, %d, %d, %d", k.DestAddr, k.SourcePort, k.DestPort, k.NextHeader, k.Flags)
+	b := make([]byte, 0, 48)
+	b = k.DestAddr.AppendTo(b)
+	b = append(b, ':')
+	b = strconv.AppendUint(b, uint64(k.SourcePort), 10)
+	b = append(b, ", "...)
+	b = strconv.AppendUint(b, uint64(k.DestPort), 10)
+	b = append(b, ", "...)
+	b = strconv.AppendUint(b, uint64(k.NextHeader), 10)
+	b = append(b, ", "...)
+	b = strconv.AppendUint(b, uint64(k.Flags), 10)
+	return string(b)
 }
 
 func (k *TupleKey4) New() bpf.MapKey { return &TupleKey4{} }
@@ -81,29 +91,34 @@ func (k *TupleKey4) New() bpf.MapKey { return &TupleKey4{} }
 // Dump writes the contents of key to sb and returns true if the value for next
 // header in the key is nonzero.
 func (k TupleKey4) Dump(sb *strings.Builder, reverse bool) bool {
-	var addrDest string
-
 	if k.NextHeader == 0 {
 		return false
 	}
 
-	// Addresses swapped, see issue #5848
+	sb.WriteString(k.NextHeader.String())
+
+	addrDest := k.DestAddr
 	if reverse {
-		addrDest = k.SourceAddr.String()
-	} else {
-		addrDest = k.DestAddr.String()
+		addrDest = k.SourceAddr
 	}
 
+	var buf [32]byte
 	if k.Flags&TUPLE_F_IN != 0 {
-		sb.WriteString(fmt.Sprintf("%s IN %s %d:%d ",
-			k.NextHeader.String(), addrDest, k.SourcePort,
-			k.DestPort),
-		)
+		sb.WriteString(" IN ")
+		sb.Write(addrDest.AppendTo(buf[:0]))
+		sb.WriteByte(' ')
+		sb.Write(strconv.AppendUint(buf[:0], uint64(k.SourcePort), 10))
+		sb.WriteByte(':')
+		sb.Write(strconv.AppendUint(buf[:0], uint64(k.DestPort), 10))
+		sb.WriteByte(' ')
 	} else {
-		sb.WriteString(fmt.Sprintf("%s OUT %s %d:%d ",
-			k.NextHeader.String(), addrDest, k.DestPort,
-			k.SourcePort),
-		)
+		sb.WriteString(" OUT ")
+		sb.Write(addrDest.AppendTo(buf[:0]))
+		sb.WriteByte(' ')
+		sb.Write(strconv.AppendUint(buf[:0], uint64(k.DestPort), 10))
+		sb.WriteByte(':')
+		sb.Write(strconv.AppendUint(buf[:0], uint64(k.SourcePort), 10))
+		sb.WriteByte(' ')
 	}
 
 	if k.Flags&TUPLE_F_RELATED != 0 {
@@ -137,7 +152,19 @@ func (k *TupleKey4Global) GetFlags() uint8 {
 
 // String returns the tuple's string representation, doh.
 func (k *TupleKey4Global) String() string {
-	return fmt.Sprintf("%s:%d --> %s:%d, %d, %d", k.SourceAddr, k.SourcePort, k.DestAddr, k.DestPort, k.NextHeader, k.Flags)
+	b := make([]byte, 0, 64)
+	b = k.SourceAddr.AppendTo(b)
+	b = append(b, ':')
+	b = strconv.AppendUint(b, uint64(k.SourcePort), 10)
+	b = append(b, " --> "...)
+	b = k.DestAddr.AppendTo(b)
+	b = append(b, ':')
+	b = strconv.AppendUint(b, uint64(k.DestPort), 10)
+	b = append(b, ", "...)
+	b = strconv.AppendUint(b, uint64(k.NextHeader), 10)
+	b = append(b, ", "...)
+	b = strconv.AppendUint(b, uint64(k.Flags), 10)
+	return string(b)
 }
 
 // ToNetwork converts ports to network byte order.
@@ -165,32 +192,32 @@ func (k *TupleKey4Global) ToHost() TupleKey {
 // Dump writes the contents of key to sb and returns true if the
 // value for next header in the key is nonzero.
 func (k TupleKey4Global) Dump(sb *strings.Builder, reverse bool) bool {
-	var addrSource, addrDest string
-
 	if k.NextHeader == 0 {
 		return false
 	}
 
-	// Addresses swapped, see issue #5848
+	sb.WriteString(k.NextHeader.String())
+
+	addrSource := k.SourceAddr
+	addrDest := k.DestAddr
 	if reverse {
-		addrSource = k.DestAddr.String()
-		addrDest = k.SourceAddr.String()
-	} else {
-		addrSource = k.SourceAddr.String()
-		addrDest = k.DestAddr.String()
+		addrSource, addrDest = addrDest, addrSource
 	}
 
+	var buf [32]byte
 	if k.Flags&TUPLE_F_IN != 0 {
-		sb.WriteString(fmt.Sprintf("%s IN %s:%d -> %s:%d ",
-			k.NextHeader.String(), addrSource, k.SourcePort,
-			addrDest, k.DestPort),
-		)
+		sb.WriteString(" IN ")
 	} else {
-		sb.WriteString(fmt.Sprintf("%s OUT %s:%d -> %s:%d ",
-			k.NextHeader.String(), addrSource, k.SourcePort,
-			addrDest, k.DestPort),
-		)
+		sb.WriteString(" OUT ")
 	}
+	sb.Write(addrSource.AppendTo(buf[:0]))
+	sb.WriteByte(':')
+	sb.Write(strconv.AppendUint(buf[:0], uint64(k.SourcePort), 10))
+	sb.WriteString(" -> ")
+	sb.Write(addrDest.AppendTo(buf[:0]))
+	sb.WriteByte(':')
+	sb.Write(strconv.AppendUint(buf[:0], uint64(k.DestPort), 10))
+	sb.WriteByte(' ')
 
 	if k.Flags&TUPLE_F_RELATED != 0 {
 		sb.WriteString("related ")

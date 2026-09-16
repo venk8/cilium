@@ -113,7 +113,7 @@ type RetriesKey struct {
 	Key uint32
 }
 
-func (k *RetriesKey) String() string { return fmt.Sprintf("%d", k.Key) }
+func (k *RetriesKey) String() string { return strconv.FormatUint(uint64(k.Key), 10) }
 
 func (k *RetriesKey) New() bpf.MapKey { return &RetriesKey{} }
 
@@ -123,7 +123,7 @@ type RetriesValue struct {
 
 type RetriesValues []RetriesValue
 
-func (k *RetriesValue) String() string { return fmt.Sprintf("%d", k.Value) }
+func (k *RetriesValue) String() string { return strconv.FormatUint(uint64(k.Value), 10) }
 
 func (k *RetriesValue) New() bpf.MapValue { return &RetriesValue{} }
 

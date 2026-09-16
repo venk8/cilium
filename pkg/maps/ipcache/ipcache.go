@@ -4,11 +4,13 @@
 package ipcache
 
 import (
-	"fmt"
 	"net/netip"
+	"strconv"
 	"strings"
 	"sync"
 	"unsafe"
+
+
 
 	"golang.org/x/sys/unix"
 
@@ -60,8 +62,9 @@ func (k Key) String() string {
 	prefixLen := int(k.Prefixlen - staticPrefixBits)
 	clusterID := uint32(k.ClusterID)
 
-	return cmtypes.PrefixClusterFrom(netip.PrefixFrom(addr, prefixLen), cmtypes.WithClusterID(clusterID)).String()
+	return cmtypes.NewPrefixCluster(netip.PrefixFrom(addr, prefixLen), clusterID).String()
 }
+
 
 func (k *Key) New() bpf.MapKey { return &Key{} }
 
@@ -94,11 +97,13 @@ func NewKey(prefix netip.Prefix, clusterID uint16) Key {
 	}
 
 	addr := prefix.Addr()
-	copy(result.IP[:], addr.AsSlice())
 	if addr.Is4() {
 		result.Family = bpf.EndpointKeyIPv4
+		a4 := addr.As4()
+		copy(result.IP[:4], a4[:])
 	} else if addr.Is6() {
 		result.Family = bpf.EndpointKeyIPv6
+		result.IP = addr.As16()
 	}
 
 	return result
@@ -108,11 +113,45 @@ func NewKey(prefix netip.Prefix, clusterID uint16) Key {
 // remote endpoints in the IPCache.
 type RemoteEndpointInfoFlags uint8
 
+// remoteEndpointFlagStrings precomputes all 16 possible combinations of RemoteEndpointInfoFlags.
+var remoteEndpointFlagStrings = [16]string{
+	0:  "<none>",
+	1:  "skiptunnel",
+	2:  "hastunnel",
+	3:  "skiptunnel,hastunnel",
+	4:  "ipv6tunnel",
+	5:  "skiptunnel,ipv6tunnel",
+	6:  "hastunnel,ipv6tunnel",
+	7:  "skiptunnel,hastunnel,ipv6tunnel",
+	8:  "remotecluster",
+	9:  "skiptunnel,remotecluster",
+	10: "hastunnel,remotecluster",
+	11: "skiptunnel,hastunnel,remotecluster",
+	12: "ipv6tunnel,remotecluster",
+	13: "skiptunnel,ipv6tunnel,remotecluster",
+	14: "hastunnel,ipv6tunnel,remotecluster",
+	15: "skiptunnel,hastunnel,ipv6tunnel,remotecluster",
+}
+
 // String returns a human-readable representation of the flags present in the
 // RemoteEndpointInfoFlags.
 // The output format is the string name of each flag contained in the flag set,
 // separated by a comma. If no flags are set, then "<none>" is returned.
 func (f RemoteEndpointInfoFlags) String() string {
+	if int(f) < len(remoteEndpointFlagStrings) {
+		return remoteEndpointFlagStrings[f]
+	}
+	return f.formatSlow()
+}
+
+func (f RemoteEndpointInfoFlags) appendFlags(b []byte) []byte {
+	if int(f) < len(remoteEndpointFlagStrings) {
+		return append(b, remoteEndpointFlagStrings[f]...)
+	}
+	return append(b, f.formatSlow()...)
+}
+
+func (f RemoteEndpointInfoFlags) formatSlow() string {
 	flags := ""
 	if f&FlagSkipTunnel != 0 {
 		flags += "skiptunnel,"
@@ -161,9 +200,18 @@ type RemoteEndpointInfo struct {
 }
 
 func (v *RemoteEndpointInfo) String() string {
-	return fmt.Sprintf("identity=%d encryptkey=%d tunnelendpoint=%s flags=%s",
-		v.SecurityIdentity, v.Key, v.GetTunnelEndpoint(), v.Flags)
+	b := make([]byte, 0, 96)
+	b = append(b, "identity="...)
+	b = strconv.AppendUint(b, uint64(v.SecurityIdentity), 10)
+	b = append(b, " encryptkey="...)
+	b = strconv.AppendUint(b, uint64(v.Key), 10)
+	b = append(b, " tunnelendpoint="...)
+	b = v.GetTunnelEndpoint().AppendTo(b)
+	b = append(b, " flags="...)
+	b = v.Flags.appendFlags(b)
+	return string(b)
 }
+
 
 func (v *RemoteEndpointInfo) GetTunnelEndpoint() netip.Addr {
 	if v.Flags&FlagIPv6TunnelEndpoint == 0 {
@@ -189,9 +237,12 @@ func NewValue(secID uint32, tunnelEndpoint netip.Addr, key uint8, flags RemoteEn
 	}
 
 	result.Flags |= FlagHasTunnelEndpoint
-	copy(result.TunnelEndpoint[:], tunnelEndpoint.AsSlice())
-	if tunnelEndpoint.Is6() {
+	if tunnelEndpoint.Is4() {
+		a4 := tunnelEndpoint.As4()
+		copy(result.TunnelEndpoint[:4], a4[:])
+	} else if tunnelEndpoint.Is6() {
 		result.Flags |= FlagIPv6TunnelEndpoint
+		result.TunnelEndpoint = tunnelEndpoint.As16()
 	}
 
 	return result

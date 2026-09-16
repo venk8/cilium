@@ -7,6 +7,7 @@ import (
 	"context"
 	"log/slog"
 	"slices"
+	"sync/atomic"
 
 	"github.com/cilium/hive/cell"
 	"github.com/cilium/hive/job"
@@ -71,6 +72,9 @@ type LocalNodeStore struct {
 	nodes  statedb.RWTable[*LocalNode]
 	sync   LocalNodeSynchronizer
 	writer *Writer
+
+	cachedLocalNode atomic.Pointer[LocalNode]
+	isInitialized   atomic.Bool
 }
 
 // NewNodeTableAndLocalNodeStore constructs [LocalNodeStore] and the node table.
@@ -102,7 +106,7 @@ func NewNodeTableAndLocalNodeStore(params LocalNodeStoreParams) (
 		})
 	wtxn.Commit()
 
-	s := &LocalNodeStore{params.DB, nodeTable, params.Sync, params.NodeWriter}
+	s := &LocalNodeStore{db: params.DB, nodes: nodeTable, sync: params.Sync, writer: params.NodeWriter}
 
 	params.Lifecycle.Append(cell.Hook{
 		OnStart: func(ctx cell.HookContext) error {
@@ -117,7 +121,9 @@ func NewNodeTableAndLocalNodeStore(params LocalNodeStoreParams) (
 				reconcilerNames(s.writer.getRequiredReconcilers(wtxn))...,
 			)
 			nodeTable.Insert(wtxn, n)
+			s.cachedLocalNode.Store(n)
 			initDone(wtxn)
+			s.isInitialized.Store(true)
 			wtxn.Commit()
 
 			if err != nil {
@@ -207,15 +213,23 @@ func (s *LocalNodeStore) Observe(ctx context.Context, next func(LocalNode), comp
 // e.g. in API handlers. Do not assume the value does not change over time.
 // Blocks until the store has been initialized.
 func (s *LocalNodeStore) Get(ctx context.Context) (LocalNode, error) {
+	if s.isInitialized.Load() {
+		if ln := s.cachedLocalNode.Load(); ln != nil {
+			return *ln, nil
+		}
+	}
+
 	txn, err := WaitForLocalNodeInit(ctx, s.db, s.nodes)
 	if err != nil {
 		return LocalNode{}, err
 	}
+	s.isInitialized.Store(true)
 
 	ln, _, found := s.nodes.Get(txn, LocalNodeQuery)
 	if !found {
 		panic("BUG: No local node exists")
 	}
+	s.cachedLocalNode.Store(ln)
 
 	return *ln, nil
 }
@@ -249,6 +263,7 @@ func (s *LocalNodeStore) Update(update func(*LocalNode)) {
 	}
 
 	s.nodes.Insert(txn, ln)
+	s.cachedLocalNode.Store(ln)
 	txn.Commit()
 }
 
@@ -268,7 +283,10 @@ func NewTestLocalNodeStore(mockNode LocalNode) *LocalNodeStore {
 	txn := db.WriteTxn(tbl)
 	tbl.Insert(txn, &mockNode)
 	txn.Commit()
-	return &LocalNodeStore{db, tbl, nil, nil}
+	s := &LocalNodeStore{db: db, nodes: tbl, sync: nil, writer: nil}
+	s.cachedLocalNode.Store(&mockNode)
+	s.isInitialized.Store(true)
+	return s
 }
 
 // LocalNodeStoreTestCell is a convenience for tests that provides a no-op
