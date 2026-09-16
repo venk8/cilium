@@ -262,6 +262,8 @@ func NewAPILimiter(logger *slog.Logger, name string, p APILimiterParameters, met
 		parallelRequests:      p.ParallelRequests,
 		parallelWaitSemaphore: semaphore.NewWeighted(waitSemaphoreResolution),
 		metrics:               metrics,
+		processingDurations:   make([]time.Duration, 0, p.MeanOver),
+		waitDurations:         make([]time.Duration, 0, p.MeanOver),
 	}
 
 	if p.RateLimit != 0 {
@@ -475,22 +477,28 @@ func (l *APILimiter) requestFinished(r *limitedRequest, err error, code int) {
 
 	totalDuration := time.Since(r.scheduleTime)
 
-	scopedLog := l.logger.With(
-		logAPICallName, l.name,
-		logUUID, r.uuid,
-		logProcessingDuration, processingDuration,
-		logTotalDuration, totalDuration,
-		logWaitDurationTotal, r.waitDuration,
-	)
+	shouldLog := l.params.Log || (l.logger != nil && l.logger.Enabled(context.Background(), slog.LevelDebug))
+	if shouldLog {
+		if r.uuid == "" {
+			r.uuid = uuid.New().String()
+		}
+		scopedLog := l.logger.With(
+			logAPICallName, l.name,
+			logUUID, r.uuid,
+			logProcessingDuration, processingDuration,
+			logTotalDuration, totalDuration,
+			logWaitDurationTotal, r.waitDuration,
+		)
 
-	if err != nil {
-		scopedLog = scopedLog.With(logfields.Error, err)
-	}
+		if err != nil {
+			scopedLog = scopedLog.With(logfields.Error, err)
+		}
 
-	if l.params.Log {
-		scopedLog.Info("API call has been processed")
-	} else {
-		scopedLog.Debug("API call has been processed")
+		if l.params.Log {
+			scopedLog.Info("API call has been processed")
+		} else {
+			scopedLog.Debug("API call has been processed")
+		}
 	}
 
 	if r.waitSemaphoreWeight != 0 {
@@ -506,15 +514,19 @@ func (l *APILimiter) requestFinished(r *limitedRequest, err error, code int) {
 
 	// Only auto-adjust ratelimiter using metrics from successful API requests
 	if err == nil {
-		l.processingDurations = append(l.processingDurations, processingDuration)
-		if exceed := len(l.processingDurations) - l.params.MeanOver; exceed > 0 {
-			l.processingDurations = l.processingDurations[exceed:]
+		if len(l.processingDurations) < l.params.MeanOver {
+			l.processingDurations = append(l.processingDurations, processingDuration)
+		} else {
+			copy(l.processingDurations, l.processingDurations[1:])
+			l.processingDurations[len(l.processingDurations)-1] = processingDuration
 		}
 		l.meanProcessingDuration = calcMeanDuration(l.processingDurations)
 
-		l.waitDurations = append(l.waitDurations, r.waitDuration)
-		if exceed := len(l.waitDurations) - l.params.MeanOver; exceed > 0 {
-			l.waitDurations = l.waitDurations[exceed:]
+		if len(l.waitDurations) < l.params.MeanOver {
+			l.waitDurations = append(l.waitDurations, r.waitDuration)
+		} else {
+			copy(l.waitDurations, l.waitDurations[1:])
+			l.waitDurations[len(l.waitDurations)-1] = r.waitDuration
 		}
 		l.meanWaitDuration = calcMeanDuration(l.waitDurations)
 
@@ -559,11 +571,14 @@ func (l *APILimiter) requestFinished(r *limitedRequest, err error, code int) {
 
 // calcMeanDuration returns the mean duration in seconds
 func calcMeanDuration(durations []time.Duration) float64 {
-	total := 0.0
-	for _, t := range durations {
-		total += t.Seconds()
+	if len(durations) == 0 {
+		return 0.0
 	}
-	return total / float64(len(durations))
+	var total time.Duration
+	for _, t := range durations {
+		total += t
+	}
+	return total.Seconds() / float64(len(durations))
 }
 
 // LimitedRequest represents a request that is being limited. It is returned
@@ -630,30 +645,37 @@ func (l *APILimiter) wait(ctx context.Context) (req *limitedRequest, err error) 
 	req = &limitedRequest{
 		limiter:      l,
 		scheduleTime: time.Now(),
-		uuid:         uuid.New().String(),
+	}
+
+	shouldLog := l.params.Log || (l.logger != nil && l.logger.Enabled(ctx, slog.LevelDebug))
+	if shouldLog {
+		req.uuid = uuid.New().String()
 	}
 
 	l.mutex.Lock()
 
 	l.requestsScheduled++
 
-	scopedLog := l.logger.With(
-		logAPICallName, l.name,
-		logUUID, req.uuid,
-		logParallelRequests, l.parallelRequests,
-	)
+	var scopedLog *slog.Logger
+	if shouldLog {
+		scopedLog = l.logger.With(
+			logAPICallName, l.name,
+			logUUID, req.uuid,
+			logParallelRequests, l.parallelRequests,
+		)
 
-	if l.params.MaxWaitDuration > 0 {
-		scopedLog = scopedLog.With(logMaxWaitDuration, l.params.MaxWaitDuration)
-	}
+		if l.params.MaxWaitDuration > 0 {
+			scopedLog = scopedLog.With(logMaxWaitDuration, l.params.MaxWaitDuration)
+		}
 
-	if l.params.MinWaitDuration > 0 {
-		scopedLog = scopedLog.With(logMinWaitDuration, l.params.MinWaitDuration)
+		if l.params.MinWaitDuration > 0 {
+			scopedLog = scopedLog.With(logMinWaitDuration, l.params.MinWaitDuration)
+		}
 	}
 
 	select {
 	case <-ctx.Done():
-		if l.params.Log {
+		if l.params.Log && scopedLog != nil {
 			scopedLog.Warn("Not processing API request due to cancelled context")
 		}
 		l.mutex.Unlock()
@@ -664,7 +686,7 @@ func (l *APILimiter) wait(ctx context.Context) (req *limitedRequest, err error) 
 	}
 
 	skip := l.params.SkipInitial > 0 && l.requestsScheduled <= int64(l.params.SkipInitial)
-	if skip {
+	if skip && shouldLog {
 		scopedLog = scopedLog.With(logSkipped, skip)
 	}
 
@@ -672,10 +694,12 @@ func (l *APILimiter) wait(ctx context.Context) (req *limitedRequest, err error) 
 	meanProcessingDuration := l.meanProcessingDuration
 	l.mutex.Unlock()
 
-	if l.params.Log {
-		scopedLog.Info("Processing API request with rate limiter")
-	} else {
-		scopedLog.Debug("Processing API request with rate limiter")
+	if shouldLog {
+		if l.params.Log {
+			scopedLog.Info("Processing API request with rate limiter")
+		} else {
+			scopedLog.Debug("Processing API request with rate limiter")
+		}
 	}
 
 	if skip {
@@ -692,7 +716,7 @@ func (l *APILimiter) wait(ctx context.Context) (req *limitedRequest, err error) 
 		w := int64(waitSemaphoreResolution / parallelRequests)
 		err2 := l.parallelWaitSemaphore.Acquire(waitCtx, w)
 		if err2 != nil {
-			if l.params.Log {
+			if l.params.Log && scopedLog != nil {
 				scopedLog.Warn("Not processing API request. Wait duration for maximum parallel requests exceeds maximum", logfields.Error, err2)
 			}
 			req.outcome = outcomeParallelMaxWait
@@ -708,12 +732,14 @@ func (l *APILimiter) wait(ctx context.Context) (req *limitedRequest, err error) 
 		r = l.limiter.Reserve()
 		limitWaitDuration = r.Delay()
 
-		scopedLog = scopedLog.With(
-			logLimit, fmt.Sprintf("%.2f/s", l.limiter.Limit()),
-			logBurst, l.limiter.Burst(),
-			logWaitDurationLimit, limitWaitDuration,
-			logMaxWaitDurationLimiter, l.params.MaxWaitDuration-req.waitDuration,
-		)
+		if shouldLog {
+			scopedLog = scopedLog.With(
+				logLimit, fmt.Sprintf("%.2f/s", l.limiter.Limit()),
+				logBurst, l.limiter.Burst(),
+				logWaitDurationLimit, limitWaitDuration,
+				logMaxWaitDurationLimiter, l.params.MaxWaitDuration-req.waitDuration,
+			)
+		}
 	}
 	l.mutex.Unlock()
 
@@ -722,7 +748,7 @@ func (l *APILimiter) wait(ctx context.Context) (req *limitedRequest, err error) 
 	}
 
 	if (l.params.MaxWaitDuration > 0 && (limitWaitDuration+req.waitDuration) > l.params.MaxWaitDuration) || limitWaitDuration == rate.InfDuration {
-		if l.params.Log {
+		if l.params.Log && scopedLog != nil {
 			scopedLog.Warn("Not processing API request. Wait duration exceeds maximum")
 		}
 
@@ -751,7 +777,7 @@ func (l *APILimiter) wait(ctx context.Context) (req *limitedRequest, err error) 
 		select {
 		case <-time.After(limitWaitDuration):
 		case <-ctx.Done():
-			if l.params.Log {
+			if l.params.Log && scopedLog != nil {
 				scopedLog.Warn("Not processing API request due to cancelled context while waiting")
 			}
 			// The rate limiter should only consider a reservation
@@ -774,12 +800,13 @@ skipRateLimiter:
 	l.currentRequestsInFlight++
 	l.mutex.Unlock()
 
-	scopedLog = scopedLog.With(logWaitDurationTotal, req.waitDuration)
-
-	if l.params.Log {
-		scopedLog.Info("API request released by rate limiter")
-	} else {
-		scopedLog.Debug("API request released by rate limiter")
+	if shouldLog {
+		scopedLog = scopedLog.With(logWaitDurationTotal, req.waitDuration)
+		if l.params.Log {
+			scopedLog.Info("API request released by rate limiter")
+		} else {
+			scopedLog.Debug("API request released by rate limiter")
+		}
 	}
 
 	req.startTime = time.Now()

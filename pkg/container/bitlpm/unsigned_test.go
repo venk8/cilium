@@ -871,3 +871,33 @@ func BenchmarkMapDelete(b *testing.B) {
 	}
 
 }
+
+func BenchmarkUintTrieOperations(b *testing.B) {
+	tri := NewUintTrie[uint32, int]()
+	for i := uint32(0); i < 10000; i++ {
+		tri.Upsert(32, i, int(i))
+	}
+
+	b.Run("ExactLookup", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			tri.ExactLookup(32, 5000)
+		}
+	})
+
+	b.Run("LongestPrefixMatch", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			tri.LongestPrefixMatch(5000)
+		}
+	})
+
+	b.Run("Ancestors", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			tri.Ancestors(32, 5000, func(prefix uint, key uint32, value int) bool {
+				return true
+			})
+		}
+	})
+}

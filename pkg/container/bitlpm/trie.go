@@ -3,10 +3,7 @@
 
 package bitlpm
 
-import (
-	"container/heap"
-	"slices"
-)
+
 
 // Trie is a [non-preemptive] [binary] [trie] that indexes arbitrarily long
 // bit-based keys with associated prefix lengths indexed from [most significant bit]
@@ -122,13 +119,17 @@ type trie[K Key[K], T any] struct {
 	entries   uint
 }
 
+func newTrie[K Key[K], T any](maxPrefix uint) *trie[K, T] {
+	return &trie[K, T]{
+		maxPrefix: maxPrefix,
+	}
+}
+
 // NewTrie returns a Trie that accepts the Key[K any] interface
 // as its key argument. This enables the user of this Trie to
 // define their own bit-key.
 func NewTrie[K Key[K], T any](maxPrefix uint) Trie[K, T] {
-	return &trie[K, T]{
-		maxPrefix: maxPrefix,
-	}
+	return newTrie[K, T](maxPrefix)
 }
 
 // node represents a specific key and prefix in the trie
@@ -147,26 +148,37 @@ type node[K Key[K], T any] struct {
 // prefix, it will be set to the Trie's maximum prefix.
 func (t *trie[K, T]) ExactLookup(prefixLen uint, k K) (ret T, found bool) {
 	prefixLen = min(prefixLen, t.maxPrefix)
-	t.traverse(prefixLen, k, func(currentNode *node[K, T]) bool {
-		// Only copy node value if exact prefix length is found
-		if currentNode.prefixLen == prefixLen {
-			ret = currentNode.value
-			found = true
-			return false // no need to continue
+	for currentNode := t.root; currentNode != nil; currentNode = currentNode.children[k.BitValueAt(currentNode.prefixLen)] {
+		matchLen := currentNode.prefixMatch(prefixLen, k)
+		if matchLen < currentNode.prefixLen {
+			return ret, false
 		}
-		return true
-	})
-	return ret, found
+		if !currentNode.intermediate && currentNode.prefixLen == prefixLen {
+			return currentNode.value, true
+		}
+		if matchLen == t.maxPrefix {
+			return ret, false
+		}
+	}
+	return ret, false
 }
 
 // LongestPrefixMatch returns the value for the key with the
 // longest prefix match of the argument key.
 func (t *trie[K, T]) LongestPrefixMatch(k K) (key K, value T, ok bool) {
 	var lpmNode *node[K, T]
-	t.traverse(t.maxPrefix, k, func(currentNode *node[K, T]) bool {
-		lpmNode = currentNode
-		return true
-	})
+	for currentNode := t.root; currentNode != nil; currentNode = currentNode.children[k.BitValueAt(currentNode.prefixLen)] {
+		matchLen := currentNode.prefixMatch(t.maxPrefix, k)
+		if matchLen < currentNode.prefixLen {
+			break
+		}
+		if !currentNode.intermediate {
+			lpmNode = currentNode
+		}
+		if matchLen == t.maxPrefix {
+			break
+		}
+	}
 	if lpmNode != nil {
 		return lpmNode.key, lpmNode.value, true
 	}
@@ -182,9 +194,18 @@ func (t *trie[K, T]) LongestPrefixMatch(k K) (key K, value T, ok bool) {
 // trie.
 func (t *trie[K, T]) Ancestors(prefixLen uint, k K, fn func(prefix uint, key K, value T) bool) {
 	prefixLen = min(prefixLen, t.maxPrefix)
-	t.traverse(prefixLen, k, func(currentNode *node[K, T]) bool {
-		return fn(currentNode.prefixLen, currentNode.key, currentNode.value)
-	})
+	for currentNode := t.root; currentNode != nil; currentNode = currentNode.children[k.BitValueAt(currentNode.prefixLen)] {
+		matchLen := currentNode.prefixMatch(prefixLen, k)
+		if matchLen < currentNode.prefixLen {
+			return
+		}
+		if currentNode.intermediate {
+			continue
+		}
+		if !fn(currentNode.prefixLen, currentNode.key, currentNode.value) || matchLen == t.maxPrefix {
+			return
+		}
+	}
 }
 
 // ancestorIterator implements Iteraror for ancestor iteration
@@ -484,9 +505,8 @@ const nPointersOnCacheline = 8
 
 // treverse is like traverse, but it calls 'fn' in reverse order, starting from the most specific match
 func (t *trie[K, T]) treverse(prefixLen uint, k K, fn func(currentNode *node[K, T]) bool) {
-	// stack is used to reverse the order in which nodes are visited.
-	// Preallocate space for some pointers to reduce allocations and copies.
-	stack := make([]*node[K, T], 0, nPointersOnCacheline)
+	var buf [32]*node[K, T]
+	stack := buf[:0]
 
 	for currentNode := t.root; currentNode != nil; currentNode = currentNode.children[k.BitValueAt(currentNode.prefixLen)] {
 		matchLen := currentNode.prefixMatch(prefixLen, k)
@@ -505,8 +525,8 @@ func (t *trie[K, T]) treverse(prefixLen uint, k K, fn func(currentNode *node[K, 
 	}
 
 	// Call the function for stacked nodes in reverse order, i.e., longest-prefix-match first
-	for _, node := range slices.Backward(stack) {
-		if !fn(node) {
+	for i := len(stack) - 1; i >= 0; i-- {
+		if !fn(stack[i]) {
 			return
 		}
 	}
@@ -875,11 +895,56 @@ func (nodes *nodes[K, T]) push(n *node[K, T]) {
 
 // convenience wrappers
 func (nodes *nodes[K, T]) pushHeap(n *node[K, T]) {
-	heap.Push(nodes, n)
+	*nodes = append(*nodes, n)
+	nodes.siftUp(len(*nodes) - 1)
 }
 
 func (nodes *nodes[K, T]) popHeap() *node[K, T] {
-	return heap.Pop(nodes).(*node[K, T])
+	old := *nodes
+	n := len(old)
+	item := old[0]
+	last := old[n-1]
+	old[n-1] = nil
+	*nodes = old[:n-1]
+	if n > 1 {
+		(*nodes)[0] = last
+		nodes.siftDown(0)
+	}
+	return item
+}
+
+func (nodes nodes[K, T]) siftUp(child int) {
+	for child > 0 {
+		parent := (child - 1) / 2
+		if nodes[child].prefixLen >= nodes[parent].prefixLen {
+			break
+		}
+		nodes[child], nodes[parent] = nodes[parent], nodes[child]
+		child = parent
+	}
+}
+
+func (nodes nodes[K, T]) siftDown(parent int) {
+	n := len(nodes)
+	for {
+		left := 2*parent + 1
+		if left >= n {
+			break
+		}
+		smallest := parent
+		if nodes[left].prefixLen < nodes[smallest].prefixLen {
+			smallest = left
+		}
+		right := left + 1
+		if right < n && nodes[right].prefixLen < nodes[smallest].prefixLen {
+			smallest = right
+		}
+		if smallest == parent {
+			break
+		}
+		nodes[parent], nodes[smallest] = nodes[smallest], nodes[parent]
+		parent = smallest
+	}
 }
 
 // forEachShortestPrefixFirst calls the argument function for each key and value in
@@ -892,7 +957,8 @@ func (n *node[K, T]) forEachShortestPrefixFirst(fn func(prefix uint, key K, valu
 	// nodes is a heap used to track the heads of each unvisited subtree. Each node in the heap
 	// has the shortest prefix length of any node in the subtree it represents.
 	// Preallocate space for some pointers to reduce allocations and copies.
-	nodes := make(nodes[K, T], 0, nPointersOnCacheline)
+	var buf [16]*node[K, T]
+	nodes := nodes[K, T](buf[:0])
 	nodes.pushHeap(n)
 
 	for nodes.Len() > 0 {

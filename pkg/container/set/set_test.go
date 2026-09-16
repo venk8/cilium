@@ -315,3 +315,48 @@ func TestSet_String(t *testing.T) {
 		})
 	}
 }
+
+func BenchmarkNewSingleSet(b *testing.B) {
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		_ = NewSingleSet("test-value")
+	}
+}
+
+func BenchmarkNewSetMulti(b *testing.B) {
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		_ = NewSet("val1", "val2", "val3")
+	}
+}
+
+func BenchmarkSetHasSingle(b *testing.B) {
+	s := NewSingleSet("test-value")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		_ = s.Has("test-value")
+	}
+}
+
+func BenchmarkSetAsSliceSingle(b *testing.B) {
+	s := NewSingleSet("test-value")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		_ = s.AsSlice()
+	}
+}
+
+func BenchmarkSetMembersSingle(b *testing.B) {
+	s := NewSingleSet("test-value")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		for m := range s.Members() {
+			_ = m
+		}
+	}
+}

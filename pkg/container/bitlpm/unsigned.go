@@ -17,7 +17,7 @@ type Unsigned interface {
 // UintTrie uses all unsigned integer types
 // except for uintptr and uint.
 type UintTrie[K Unsigned, V any] struct {
-	trie    Trie[unsignedKey[K], V]
+	trie    *trie[unsignedKey[K], V]
 	keySize uint
 }
 
@@ -27,7 +27,7 @@ func NewUintTrie[K Unsigned, T any]() *UintTrie[K, T] {
 	var k K
 	size := uint(unsafe.Sizeof(k))
 	return &UintTrie[K, T]{
-		trie:    NewTrie[unsignedKey[K], T](size * 8),
+		trie:    newTrie[unsignedKey[K], T](size * 8),
 		keySize: size,
 	}
 }
@@ -54,9 +54,20 @@ func (ut *UintTrie[K, T]) LongestPrefixMatch(k K) (K, T, bool) {
 }
 
 func (ut *UintTrie[K, T]) Ancestors(prefix uint, k K, fn func(prefix uint, key K, value T) bool) {
-	ut.trie.Ancestors(prefix, unsignedKey[K]{value: k}, func(prefix uint, k unsignedKey[K], v T) bool {
-		return fn(prefix, k.value, v)
-	})
+	prefix = min(prefix, ut.trie.maxPrefix)
+	key := unsignedKey[K]{value: k}
+	for currentNode := ut.trie.root; currentNode != nil; currentNode = currentNode.children[key.BitValueAt(currentNode.prefixLen)] {
+		matchLen := currentNode.prefixMatch(prefix, key)
+		if matchLen < currentNode.prefixLen {
+			return
+		}
+		if currentNode.intermediate {
+			continue
+		}
+		if !fn(currentNode.prefixLen, currentNode.key.value, currentNode.value) || matchLen == ut.trie.maxPrefix {
+			return
+		}
+	}
 }
 
 func (ut *UintTrie[K, T]) Descendants(prefix uint, k K, fn func(prefix uint, key K, value T) bool) {
@@ -80,37 +91,29 @@ type unsignedKey[U Unsigned] struct {
 }
 
 func (u unsignedKey[U]) CommonPrefix(v unsignedKey[U]) uint {
-	switch any(u.value).(type) {
-	case uint8:
+	switch unsafe.Sizeof(u.value) {
+	case 1:
 		return uint(bits.LeadingZeros8(uint8(u.value ^ v.value)))
-	case uint16:
+	case 2:
 		return uint(bits.LeadingZeros16(uint16(u.value ^ v.value)))
-	case uint32:
+	case 4:
 		return uint(bits.LeadingZeros32(uint32(u.value ^ v.value)))
-	case uint64:
+	case 8:
 		return uint(bits.LeadingZeros64(uint64(u.value ^ v.value)))
 	}
 	return 0
 }
 
 func (u unsignedKey[U]) BitValueAt(i uint) uint8 {
-	switch any(u.value).(type) {
-	case uint8:
-		if u.value&(1<<(7-i)) == 0 {
-			return 0
-		}
-	case uint16:
-		if u.value&(1<<(15-i)) == 0 {
-			return 0
-		}
-	case uint32:
-		if u.value&(1<<(31-i)) == 0 {
-			return 0
-		}
-	case uint64:
-		if u.value&(1<<(63-i)) == 0 {
-			return 0
-		}
+	switch unsafe.Sizeof(u.value) {
+	case 1:
+		return uint8((uint8(u.value) >> (7 - i)) & 1)
+	case 2:
+		return uint8((uint16(u.value) >> (15 - i)) & 1)
+	case 4:
+		return uint8((uint32(u.value) >> (31 - i)) & 1)
+	case 8:
+		return uint8((uint64(u.value) >> (63 - i)) & 1)
 	}
-	return 1
+	return 0
 }

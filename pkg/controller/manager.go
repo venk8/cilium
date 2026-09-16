@@ -4,9 +4,10 @@
 package controller
 
 import (
+	"context"
 	"errors"
 	"fmt"
-	"maps"
+	"log/slog"
 
 	"github.com/go-openapi/strfmt"
 	"github.com/google/uuid"
@@ -66,8 +67,6 @@ func (m *Manager) UpdateController(name string, params ControllerParams) {
 }
 
 func (m *Manager) updateController(name string, params ControllerParams) *managedController {
-	start := time.Now()
-
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
@@ -77,7 +76,12 @@ func (m *Manager) updateController(name string, params ControllerParams) *manage
 
 	ctrl := m.lookupLocked(name)
 	if ctrl != nil {
-		ctrl.logger.Debug("Updating existing controller")
+		debugEnabled := ctrl.logger.Enabled(context.Background(), slog.LevelDebug)
+		var start time.Time
+		if debugEnabled {
+			ctrl.logger.Debug("Updating existing controller")
+			start = time.Now()
+		}
 		ctrl.SetParams(params)
 
 		// Notify the goroutine of the params update.
@@ -86,7 +90,9 @@ func (m *Manager) updateController(name string, params ControllerParams) *manage
 		default:
 		}
 
-		ctrl.logger.Debug("Controller update time", logfields.Duration, time.Since(start))
+		if debugEnabled {
+			ctrl.logger.Debug("Controller update time", logfields.Duration, time.Since(start))
+		}
 	} else {
 		ctrl = m.createControllerLocked(name, params)
 	}
@@ -217,15 +223,14 @@ func (m *Manager) RemoveControllerAndWait(name string) error {
 }
 
 func (m *Manager) removeAll() []*managedController {
-	ctrls := []*managedController{}
-
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
-	if m.controllers == nil {
-		return ctrls
+	if len(m.controllers) == 0 {
+		return []*managedController{}
 	}
 
+	ctrls := make([]*managedController, 0, len(m.controllers))
 	for _, ctrl := range m.controllers {
 		m.removeController(ctrl)
 		ctrls = append(ctrls, ctrl)
@@ -250,15 +255,22 @@ func (m *Manager) RemoveAllAndWait() {
 
 // GetStatusModel returns the status of all controllers as models.ControllerStatuses
 func (m *Manager) GetStatusModel() models.ControllerStatuses {
-	// Create a copy of pointers to current controller so we can unlock the
-	// manager mutex quickly again
-	controllers := controllerMap{}
 	m.mutex.RLock()
-	maps.Copy(controllers, m.controllers)
+	n := len(m.controllers)
+	if n == 0 {
+		m.mutex.RUnlock()
+		return models.ControllerStatuses{}
+	}
+	// Create a copy of pointers to current controllers so we can unlock the
+	// manager mutex quickly again without allocating an intermediate map.
+	ctrls := make([]*managedController, 0, n)
+	for _, c := range m.controllers {
+		ctrls = append(ctrls, c)
+	}
 	m.mutex.RUnlock()
 
-	statuses := models.ControllerStatuses{}
-	for _, c := range controllers {
+	statuses := make(models.ControllerStatuses, 0, n)
+	for _, c := range ctrls {
 		statuses = append(statuses, c.GetStatusModel())
 	}
 
