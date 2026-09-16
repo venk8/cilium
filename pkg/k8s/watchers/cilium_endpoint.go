@@ -141,53 +141,33 @@ func (k *K8sCiliumEndpointsWatcher) ciliumEndpointsInit(ctx context.Context) {
 	}()
 }
 
-func (k *K8sCiliumEndpointsWatcher) endpointUpdated(oldEndpoint, endpoint *types.CiliumEndpoint) {
-	var namedPortsChanged bool
-	defer func() {
-		if namedPortsChanged {
-			k.policyManager.TriggerPolicyUpdates("Named ports added or updated")
+func endpointHasIP(ep *types.CiliumEndpoint, ip string) bool {
+	if ep == nil || ep.Networking == nil {
+		return false
+	}
+	for _, pair := range ep.Networking.Addressing {
+		if pair.IPV4 == ip || pair.IPV6 == ip {
+			return true
 		}
-	}()
-	var ipsAdded []string
-	if oldEndpoint != nil && oldEndpoint.Networking != nil {
-		// Delete the old IP addresses from the IP cache
-		defer func() {
-			for _, oldPair := range oldEndpoint.Networking.Addressing {
-				v4Added, v6Added := false, false
-				for _, ipAdded := range ipsAdded {
-					if ipAdded == oldPair.IPV4 {
-						v4Added = true
-					}
-					if ipAdded == oldPair.IPV6 {
-						v6Added = true
-					}
-				}
-				if !v4Added {
-					portsChanged := k.ipcache.DeleteOnMetadataMatch(oldPair.IPV4, source.CustomResource, oldEndpoint.Namespace, oldEndpoint.Name, oldEndpoint.GetPodUID())
-					if portsChanged {
-						namedPortsChanged = true
-					}
-				}
-				if !v6Added {
-					portsChanged := k.ipcache.DeleteOnMetadataMatch(oldPair.IPV6, source.CustomResource, oldEndpoint.Namespace, oldEndpoint.Name, oldEndpoint.GetPodUID())
-					if portsChanged {
-						namedPortsChanged = true
-					}
-				}
-			}
-		}()
 	}
+	return false
+}
 
-	ln, err := k.localNodeStore.Get(context.TODO())
-	if err != nil {
-		logging.Fatal(k.logger, "getLocalNode: unexpected error", logfields.Error, err)
-	}
-
-	// default to the standard key
-	encryptionKey := node.GetEndpointEncryptKeyIndex(ln, k.wgConfig.Enabled(), k.ipsecConfig.Enabled())
-
-	if endpoint.Encryption != nil {
+func (k *K8sCiliumEndpointsWatcher) endpointUpdated(oldEndpoint, endpoint *types.CiliumEndpoint) {
+	var encryptionKey uint8
+	switch {
+	case endpoint.Encryption != nil:
 		encryptionKey = uint8(endpoint.Encryption.Key)
+	case k.wgConfig.Enabled():
+		encryptionKey = wgTypes.StaticEncryptKey
+	case k.ipsecConfig.Enabled():
+		ln, err := k.localNodeStore.Get(context.TODO())
+		if err != nil {
+			logging.Fatal(k.logger, "getLocalNode: unexpected error", logfields.Error, err)
+		}
+		encryptionKey = ln.EncryptionKey
+	default:
+		encryptionKey = 0
 	}
 
 	id := identity.ReservedIdentityUnmanaged
@@ -212,26 +192,31 @@ func (k *K8sCiliumEndpointsWatcher) endpointUpdated(oldEndpoint, endpoint *types
 		return
 	}
 
+	var namedPorts ciliumTypes.NamedPortMap
+	if len(endpoint.NamedPorts) > 0 {
+		namedPorts = make(ciliumTypes.NamedPortMap, len(endpoint.NamedPorts))
+		for _, port := range endpoint.NamedPorts {
+			if err := namedPorts.AddPort(port.Name, int(port.Port), port.Protocol); err != nil {
+				k.logger.Error(
+					"Parsing named port failed",
+					logfields.Error, err,
+					logfields.CEPName, endpoint.GetName(),
+				)
+				continue
+			}
+		}
+	}
+
 	k8sMeta := &ipcache.K8sMetadata{
 		Namespace:  endpoint.Namespace,
 		PodName:    endpoint.Name,
 		PodUID:     endpoint.GetPodUID(),
-		NamedPorts: make(ciliumTypes.NamedPortMap, len(endpoint.NamedPorts)),
-	}
-	for _, port := range endpoint.NamedPorts {
-		if err := k8sMeta.NamedPorts.AddPort(port.Name, int(port.Port), port.Protocol); err != nil {
-			k.logger.Error(
-				"Parsing named port failed",
-				logfields.Error, err,
-				logfields.CEPName, endpoint.GetName(),
-			)
-			continue
-		}
+		NamedPorts: namedPorts,
 	}
 
+	var namedPortsChanged bool
 	for _, pair := range endpoint.Networking.Addressing {
 		if pair.IPV4 != "" {
-			ipsAdded = append(ipsAdded, pair.IPV4)
 			portsChanged, _ := k.ipcache.Upsert(pair.IPV4, nodeIP, encryptionKey, k8sMeta,
 				ipcache.Identity{ID: id, Source: source.CustomResource})
 			if portsChanged {
@@ -240,7 +225,6 @@ func (k *K8sCiliumEndpointsWatcher) endpointUpdated(oldEndpoint, endpoint *types
 		}
 
 		if pair.IPV6 != "" {
-			ipsAdded = append(ipsAdded, pair.IPV6)
 			portsChanged, _ := k.ipcache.Upsert(pair.IPV6, nodeIP, encryptionKey, k8sMeta,
 				ipcache.Identity{ID: id, Source: source.CustomResource})
 			if portsChanged {
@@ -248,21 +232,45 @@ func (k *K8sCiliumEndpointsWatcher) endpointUpdated(oldEndpoint, endpoint *types
 			}
 		}
 	}
+
+	// Delete the old IP addresses from the IP cache
+	if oldEndpoint != nil && oldEndpoint.Networking != nil {
+		oldPodUID := oldEndpoint.GetPodUID()
+		for _, oldPair := range oldEndpoint.Networking.Addressing {
+			if oldPair.IPV4 != "" && !endpointHasIP(endpoint, oldPair.IPV4) {
+				portsChanged := k.ipcache.DeleteOnMetadataMatch(oldPair.IPV4, source.CustomResource, oldEndpoint.Namespace, oldEndpoint.Name, oldPodUID)
+				if portsChanged {
+					namedPortsChanged = true
+				}
+			}
+			if oldPair.IPV6 != "" && !endpointHasIP(endpoint, oldPair.IPV6) {
+				portsChanged := k.ipcache.DeleteOnMetadataMatch(oldPair.IPV6, source.CustomResource, oldEndpoint.Namespace, oldEndpoint.Name, oldPodUID)
+				if portsChanged {
+					namedPortsChanged = true
+				}
+			}
+		}
+	}
+
+	if namedPortsChanged {
+		k.policyManager.TriggerPolicyUpdates("Named ports added or updated")
+	}
 }
 
 func (k *K8sCiliumEndpointsWatcher) endpointDeleted(endpoint *types.CiliumEndpoint) {
 	if endpoint.Networking != nil {
 		namedPortsChanged := false
+		podUID := endpoint.GetPodUID()
 		for _, pair := range endpoint.Networking.Addressing {
 			if pair.IPV4 != "" {
-				portsChanged := k.ipcache.DeleteOnMetadataMatch(pair.IPV4, source.CustomResource, endpoint.Namespace, endpoint.Name, endpoint.GetPodUID())
+				portsChanged := k.ipcache.DeleteOnMetadataMatch(pair.IPV4, source.CustomResource, endpoint.Namespace, endpoint.Name, podUID)
 				if portsChanged {
 					namedPortsChanged = true
 				}
 			}
 
 			if pair.IPV6 != "" {
-				portsChanged := k.ipcache.DeleteOnMetadataMatch(pair.IPV6, source.CustomResource, endpoint.Namespace, endpoint.Name, endpoint.GetPodUID())
+				portsChanged := k.ipcache.DeleteOnMetadataMatch(pair.IPV6, source.CustomResource, endpoint.Namespace, endpoint.Name, podUID)
 				if portsChanged {
 					namedPortsChanged = true
 				}

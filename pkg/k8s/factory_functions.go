@@ -252,10 +252,9 @@ func ConvertCoreCiliumEndpointToTypesCiliumEndpoint(ccep *cilium_v2alpha1.CoreCi
 			Namespace:       ns,
 			OwnerReferences: ownerRefs,
 		},
-		Encryption: func() *cilium_v2.EncryptionSpec {
-			enc := ccep.Encryption
-			return &enc
-		}(),
+		Encryption: &cilium_v2.EncryptionSpec{
+			Key: ccep.Encryption.Key,
+		},
 		Identity: &cilium_v2.EndpointIdentity{
 			ID: ccep.IdentityID,
 		},

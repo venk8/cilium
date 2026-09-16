@@ -66,3 +66,22 @@ func TestGet(t *testing.T) {
 		})
 	}
 }
+
+func BenchmarkGet(b *testing.B) {
+	obj := object{
+		Annotations: map[string]string{
+			"other-1":   "val-1",
+			"key-alt-2": "target-val",
+			"other-2":   "val-2",
+		},
+	}
+	key := "key"
+	aliases := []string{"key-alt-1", "key-alt-2"}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_, _ = Get(&obj, key, aliases...)
+	}
+}
+

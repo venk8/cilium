@@ -130,3 +130,35 @@ func TestNamedPortsIdentityLabels(t *testing.T) {
 
 	require.Empty(t, NamedPortsIdentityLabels(nil))
 }
+
+func BenchmarkGetPodMetadata(b *testing.B) {
+	b.ReportAllocs()
+	ns := &slim_corev1.Namespace{
+		ObjectMeta: slim_metav1.ObjectMeta{
+			Name: "default",
+			Labels: map[string]string{
+				"kubernetes.io/metadata.name": "default",
+			},
+		},
+	}
+	pod := &slim_corev1.Pod{
+		ObjectMeta: slim_metav1.ObjectMeta{
+			Name:      "test-pod",
+			Namespace: "default",
+			Labels: map[string]string{
+				"app": "test",
+			},
+			Annotations: map[string]string{
+				"foo": "bar",
+			},
+		},
+		Spec: slim_corev1.PodSpec{
+			ServiceAccountName: "default",
+		},
+	}
+	logger := hivetest.Logger(b)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = GetPodMetadata(logger, cmtypes.DefaultClusterInfo, ns, pod)
+	}
+}

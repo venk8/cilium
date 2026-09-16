@@ -4,6 +4,7 @@
 package k8s
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -222,9 +223,22 @@ type endpointSlice interface {
 	GetLabels() map[string]string
 }
 
+func parseEndpointSliceID(ep *slim_discovery_v1.EndpointSlice) EndpointSliceID {
+	return EndpointSliceID{
+		ServiceName: loadbalancer.NewServiceName(
+			ep.Namespace,
+			ep.Labels[slim_discovery_v1.LabelServiceName],
+		),
+		EndpointSliceName: ep.Namespace + "/" + ep.Name,
+	}
+}
+
 // ParseEndpointSliceID parses a Kubernetes endpoints slice and returns a
 // EndpointSliceID
 func ParseEndpointSliceID(es endpointSlice) EndpointSliceID {
+	if ep, ok := es.(*slim_discovery_v1.EndpointSlice); ok {
+		return parseEndpointSliceID(ep)
+	}
 	return EndpointSliceID{
 		ServiceName: loadbalancer.NewServiceName(
 			es.GetNamespace(),
@@ -240,7 +254,7 @@ func ParseEndpointConditionsV1(conditions slim_discovery_v1.EndpointConditions) 
 	if conditions.Ready == nil || *conditions.Ready {
 		bc |= BackendConditionReady
 	}
-	if conditions.Serving == nil || conditions.Serving != nil && *conditions.Serving {
+	if conditions.Serving == nil || *conditions.Serving {
 		bc |= BackendConditionServing
 	}
 	if conditions.Terminating != nil && *conditions.Terminating {
@@ -260,7 +274,7 @@ func ParseEndpointSliceV1(logger *slog.Logger, ep *slim_discovery_v1.EndpointSli
 	}
 	endpoints := newEndpoints(backendCount)
 	endpoints.ObjectMeta = ep.ObjectMeta
-	endpoints.EndpointSliceID = ParseEndpointSliceID(ep)
+	endpoints.EndpointSliceID = parseEndpointSliceID(ep)
 
 	// Validate AddressType before parsing. Currently, we only support IPv4 and IPv6.
 	if ep.AddressType != slim_discovery_v1.AddressTypeIPv4 &&
@@ -268,10 +282,12 @@ func ParseEndpointSliceV1(logger *slog.Logger, ep *slim_discovery_v1.EndpointSli
 		return endpoints
 	}
 
-	logger.Debug("Processing endpoints for EndpointSlice",
-		logfields.LenEndpoints, len(ep.Endpoints),
-		logfields.Name, ep.Name,
-	)
+	if logger.Enabled(context.Background(), slog.LevelDebug) {
+		logger.Debug("Processing endpoints for EndpointSlice",
+			logfields.LenEndpoints, len(ep.Endpoints),
+			logfields.Name, ep.Name,
+		)
+	}
 
 	var weight uint16
 	maintenance := false
@@ -351,13 +367,15 @@ func ParseEndpointSliceV1(logger *slog.Logger, ep *slim_discovery_v1.EndpointSli
 			metrics.TerminatingEndpointsEvents.Inc()
 		}
 
-		logger.Debug("Processed endpoint",
-			logfields.Index, i,
-			logfields.Name, ep.Name,
-			logfields.Addresses, sub.Addresses,
-			logfields.Backend, backend,
-			logfieldTerminating, backend.Conditions.IsTerminating(),
-		)
+		if logger.Enabled(context.Background(), slog.LevelDebug) {
+			logger.Debug("Processed endpoint",
+				logfields.Index, i,
+				logfields.Name, ep.Name,
+				logfields.Addresses, sub.Addresses,
+				logfields.Backend, backend,
+				logfieldTerminating, backend.Conditions.IsTerminating(),
+			)
+		}
 	}
 
 	return endpoints

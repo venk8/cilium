@@ -950,3 +950,80 @@ func TestCESSubscriber_OnDelete(t *testing.T) {
 		})
 	}
 }
+
+func BenchmarkCESSubscriber_OnUpdate(b *testing.B) {
+	b.Run("NoChange_100EPs", func(b *testing.B) {
+		oldEPs := make([]v2alpha1.CoreCiliumEndpoint, 100)
+		newEPs := make([]v2alpha1.CoreCiliumEndpoint, 100)
+		for i := 0; i < 100; i++ {
+			name := fmt.Sprintf("cep-%d", i)
+			oldEPs[i] = v2alpha1.CoreCiliumEndpoint{
+				Name:           name,
+				ServiceAccount: "default",
+				IdentityID:     int64(1000 + i),
+			}
+			newEPs[i] = v2alpha1.CoreCiliumEndpoint{
+				Name:           name,
+				ServiceAccount: "default",
+				IdentityID:     int64(1000 + i),
+			}
+		}
+		oldCES := newCES("ces-1", testNamespace, oldEPs...)
+		newCES := newCES("ces-1", testNamespace, newEPs...)
+
+		watcher := newFakeEPWatcher()
+		m := newCEPToCESMap()
+		subscriber := &cesSubscriber{
+			logger:    hivetest.Logger(b),
+			epWatcher: watcher,
+			epCache:   newFakeEndpointCache(),
+			cepMap:    m,
+		}
+		subscriber.OnAdd(oldCES)
+		watcher.reset()
+
+		b.ResetTimer()
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			subscriber.OnUpdate(oldCES, newCES)
+		}
+	})
+
+	b.Run("OneChanged_100EPs", func(b *testing.B) {
+		oldEPs := make([]v2alpha1.CoreCiliumEndpoint, 100)
+		newEPs := make([]v2alpha1.CoreCiliumEndpoint, 100)
+		for i := 0; i < 100; i++ {
+			name := fmt.Sprintf("cep-%d", i)
+			oldEPs[i] = v2alpha1.CoreCiliumEndpoint{
+				Name:           name,
+				ServiceAccount: "default",
+				IdentityID:     int64(1000 + i),
+			}
+			newEPs[i] = v2alpha1.CoreCiliumEndpoint{
+				Name:           name,
+				ServiceAccount: "default",
+				IdentityID:     int64(1000 + i),
+			}
+		}
+		newEPs[50].IdentityID = 9999
+		oldCES := newCES("ces-1", testNamespace, oldEPs...)
+		newCES := newCES("ces-1", testNamespace, newEPs...)
+
+		watcher := newFakeEPWatcher()
+		m := newCEPToCESMap()
+		subscriber := &cesSubscriber{
+			logger:    hivetest.Logger(b),
+			epWatcher: watcher,
+			epCache:   newFakeEndpointCache(),
+			cepMap:    m,
+		}
+		subscriber.OnAdd(oldCES)
+		watcher.reset()
+
+		b.ResetTimer()
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			subscriber.OnUpdate(oldCES, newCES)
+		}
+	})
+}

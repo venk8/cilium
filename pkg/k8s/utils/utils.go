@@ -160,14 +160,55 @@ func GetLatestPodReadiness(podStatus slim_corev1.PodStatus) slim_corev1.Conditio
 // ValidIPs return a sorted slice of unique IP addresses retrieved from the given PodStatus.
 // Returns an error when no IPs are found.
 func ValidIPs(podStatus slim_corev1.PodStatus) []string {
-	if len(podStatus.PodIPs) == 0 && len(podStatus.PodIP) == 0 {
+	nPodIPs := len(podStatus.PodIPs)
+	if nPodIPs == 0 && len(podStatus.PodIP) == 0 {
 		return nil
 	}
 
+	mainIP := podStatus.PodIP
+	if nPodIPs == 0 {
+		return []string{mainIP}
+	}
+
+	if nPodIPs == 1 {
+		ip0 := podStatus.PodIPs[0].IP
+		if mainIP == "" || mainIP == ip0 {
+			if ip0 == "" {
+				return nil
+			}
+			return []string{ip0}
+		}
+		if ip0 == "" {
+			return []string{mainIP}
+		}
+		if mainIP < ip0 {
+			return []string{mainIP, ip0}
+		}
+		return []string{ip0, mainIP}
+	}
+
+	if nPodIPs == 2 && (mainIP == "" || mainIP == podStatus.PodIPs[0].IP || mainIP == podStatus.PodIPs[1].IP) {
+		ip0 := podStatus.PodIPs[0].IP
+		ip1 := podStatus.PodIPs[1].IP
+		if ip0 == "" {
+			if ip1 == "" {
+				return nil
+			}
+			return []string{ip1}
+		}
+		if ip1 == "" || ip0 == ip1 {
+			return []string{ip0}
+		}
+		if ip0 < ip1 {
+			return []string{ip0, ip1}
+		}
+		return []string{ip1, ip0}
+	}
+
 	// make it a set first to avoid repeated IP addresses
-	ips := []string{}
-	if podStatus.PodIP != "" {
-		ips = append(ips, podStatus.PodIP)
+	ips := make([]string, 0, 1+nPodIPs)
+	if mainIP != "" {
+		ips = append(ips, mainIP)
 	}
 
 	for _, podIP := range podStatus.PodIPs {

@@ -647,3 +647,67 @@ func podWatcherTestPod(uid string, phase slim_corev1.PodPhase, podIP, hostIP str
 		},
 	}
 }
+
+func BenchmarkReconcilePodEndpoints_NoChange(b *testing.B) {
+	logger := hivetest.Logger(b)
+	_ = labelsfilter.ParseLabelPrefixCfg(logger, nil, nil, "")
+	watcher := &K8sPodWatcher{
+		logger: logger,
+	}
+	oldPod := podWatcherTestPod("pod-uid", slim_corev1.PodRunning, "", "")
+	oldPod.Labels = map[string]string{"app": "echo", "tier": "backend", "env": "prod"}
+	oldPod.Annotations = map[string]string{"foo": "bar"}
+	newPod := podWatcherTestPod("pod-uid", slim_corev1.PodRunning, "", "")
+	newPod.Labels = map[string]string{"app": "echo", "tier": "backend", "env": "prod"}
+	newPod.Annotations = map[string]string{"foo": "bar"}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = watcher.reconcilePodEndpoints(oldPod, newPod, false)
+	}
+}
+
+func BenchmarkReconcilePodEndpoints_ForcedLabels(b *testing.B) {
+	logger := hivetest.Logger(b)
+	_ = labelsfilter.ParseLabelPrefixCfg(logger, nil, nil, "")
+	watcher := &K8sPodWatcher{
+		logger:          logger,
+		endpointManager: &fakeEndpointManager{},
+	}
+	oldPod := podWatcherTestPod("pod-uid-1", slim_corev1.PodRunning, "", "")
+	oldPod.Labels = map[string]string{"app": "echo", "tier": "backend", "env": "prod"}
+	newPod := podWatcherTestPod("pod-uid-2", slim_corev1.PodRunning, "", "")
+	newPod.Labels = map[string]string{"app": "echo", "tier": "backend", "env": "prod"}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = watcher.reconcilePodEndpoints(oldPod, newPod, true)
+	}
+}
+
+func BenchmarkUpsertPodHostData_NoChange(b *testing.B) {
+	logger := hivetest.Logger(b)
+	ipc := &benchIPCacheManager{}
+	watcher := &K8sPodWatcher{
+		logger:         logger,
+		ipcache:        ipc,
+		localNodeStore: node.NewTestLocalNodeStore(node.LocalNode{}),
+		wgConfig:       fakewireguard.Config{},
+		ipsecConfig:    fakeipsec.Config{},
+	}
+	oldPod := podWatcherTestPod("pod-uid", slim_corev1.PodRunning, "10.244.0.1", "192.168.1.1")
+	newPod := podWatcherTestPod("pod-uid", slim_corev1.PodRunning, "10.244.0.1", "192.168.1.1")
+	oldIPs := k8sTypes.IPSlice{"10.244.0.1"}
+	newIPs := k8sTypes.IPSlice{"10.244.0.1"}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = watcher.updatePodHostData(b.Context(), oldPod, newPod, oldIPs, newIPs)
+	}
+}
+
+
+

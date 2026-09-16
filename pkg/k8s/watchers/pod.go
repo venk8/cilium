@@ -256,8 +256,12 @@ func (k *K8sPodWatcher) addK8sPodV1(ctx context.Context, pod *slim_corev1.Pod) e
 	}
 
 	if pod.Spec.HostNetwork {
-		hostPorts = strings.ReplaceAll(hostPorts, " ", "")
-		k.hostNetworkManager.AddNoTrackHostPorts(pod.Namespace, pod.Name, strings.Split(hostPorts, ","))
+		if hostPorts != "" {
+			hostPorts = strings.ReplaceAll(hostPorts, " ", "")
+			k.hostNetworkManager.AddNoTrackHostPorts(pod.Namespace, pod.Name, strings.Split(hostPorts, ","))
+		} else {
+			k.hostNetworkManager.AddNoTrackHostPorts(pod.Namespace, pod.Name, nil)
+		}
 	}
 
 	if shouldSkipHostNetworkPod(pod) {
@@ -332,8 +336,11 @@ func (k *K8sPodWatcher) replaceHostNetworkState(oldPod, newPod *slim_corev1.Pod)
 
 	switch {
 	case newPod.Spec.HostNetwork:
-		hostPorts = strings.ReplaceAll(hostPorts, " ", "")
-		ports := strings.Split(hostPorts, ",")
+		var ports []string
+		if hostPorts != "" {
+			hostPorts = strings.ReplaceAll(hostPorts, " ", "")
+			ports = strings.Split(hostPorts, ",")
+		}
 		if oldPod.Spec.HostNetwork && !validNoTrackHostPorts(ports) {
 			// The host-network manager leaves its existing desired state in place
 			// when parsing fails. A replacement must not retain rules owned by the
@@ -393,8 +400,12 @@ func (k *K8sPodWatcher) updateExistingK8sPodV1(ctx context.Context, oldK8sPod, n
 	}
 
 	if newK8sPod.Spec.HostNetwork {
-		hostPorts = strings.ReplaceAll(hostPorts, " ", "")
-		k.hostNetworkManager.AddNoTrackHostPorts(newK8sPod.Namespace, newK8sPod.Name, strings.Split(hostPorts, ","))
+		if hostPorts != "" {
+			hostPorts = strings.ReplaceAll(hostPorts, " ", "")
+			k.hostNetworkManager.AddNoTrackHostPorts(newK8sPod.Namespace, newK8sPod.Name, strings.Split(hostPorts, ","))
+		} else {
+			k.hostNetworkManager.AddNoTrackHostPorts(newK8sPod.Namespace, newK8sPod.Name, nil)
+		}
 	}
 
 	if shouldSkipHostNetworkPod(newK8sPod) {
@@ -419,43 +430,74 @@ func (k *K8sPodWatcher) updateExistingK8sPodV1(ctx context.Context, oldK8sPod, n
 }
 
 func (k *K8sPodWatcher) reconcilePodEndpoints(oldK8sPod, newK8sPod *slim_corev1.Pod, forceLabels bool) error {
+	// Check annotation updates.
+	oldAnno := oldK8sPod.ObjectMeta.Annotations
+	newAnno := newK8sPod.ObjectMeta.Annotations
+	var (
+		annoChangedBandwidth  bool
+		annoChangedPriority   bool
+		annoChangedNoTrack    bool
+		annoChangedFIBTableID bool
+		annoChangedDisableSIP bool
+		annotationsChanged    bool
+	)
+	if !maps.Equal(oldAnno, newAnno) {
+		annoChangedBandwidth = oldAnno[bandwidth.EgressBandwidth] != newAnno[bandwidth.EgressBandwidth] ||
+			oldAnno[bandwidth.IngressBandwidth] != newAnno[bandwidth.IngressBandwidth]
+		annoChangedPriority = oldAnno[bandwidth.Priority] != newAnno[bandwidth.Priority]
+		annoChangedNoTrack = oldAnno[annotation.NoTrack] != newAnno[annotation.NoTrack] ||
+			oldAnno[annotation.NoTrackAlias] != newAnno[annotation.NoTrackAlias]
+		annoChangedFIBTableID = option.Config.EnableFibTableIDAnnotation &&
+			oldAnno[annotation.FIBTableID] != newAnno[annotation.FIBTableID]
+		annoChangedDisableSIP = oldAnno[annotation.DisableSourceIPVerification] != newAnno[annotation.DisableSourceIPVerification]
+		annotationsChanged = annoChangedBandwidth || annoChangedPriority || annoChangedNoTrack || annoChangedFIBTableID || annoChangedDisableSIP
+	}
+
+	var (
+		oldPodLabels  map[string]string
+		newPodLabels  map[string]string
+		labelsChanged bool
+	)
+	if !maps.Equal(oldK8sPod.ObjectMeta.Labels, newK8sPod.Labels) {
+		oldK8sPodLabels, _ := labelsfilter.Filter(labels.Map2Labels(oldK8sPod.ObjectMeta.Labels, labels.LabelSourceK8s))
+		// old labels are stripped to avoid grandfathering in special labels
+		oldPodLabels = k8sUtils.StripPodSpecialLabels(oldK8sPodLabels.K8sStringMap())
+
+		strippedNewLabels := k8sUtils.StripPodSpecialLabels(newK8sPod.Labels)
+
+		newK8sPodLabels, _ := labelsfilter.Filter(labels.Map2Labels(strippedNewLabels, labels.LabelSourceK8s))
+		newPodLabels = newK8sPodLabels.K8sStringMap()
+		labelsChanged = !maps.Equal(oldPodLabels, newPodLabels)
+	}
+
+	// Nothing changed.
+	if !annotationsChanged && !labelsChanged && !forceLabels {
+		if k.logger.Enabled(context.Background(), slog.LevelDebug) {
+			k.logger.Debug(
+				"Pod does not have any relevant changes",
+				logfields.K8sPodName, newK8sPod.ObjectMeta.Name,
+				logfields.K8sNamespace, newK8sPod.ObjectMeta.Namespace,
+				logfields.OldLabels, oldK8sPod.GetObjectMeta().GetLabels(),
+				logfields.OldAnnotations, oldK8sPod.GetObjectMeta().GetAnnotations(),
+				logfields.NewLabels, newK8sPod.GetObjectMeta().GetLabels(),
+				logfields.NewAnnotations, newK8sPod.GetObjectMeta().GetAnnotations(),
+			)
+		}
+		return nil
+	}
+
 	scopedLog := k.logger.With(
 		logfields.K8sPodName, newK8sPod.ObjectMeta.Name,
 		logfields.K8sNamespace, newK8sPod.ObjectMeta.Namespace,
 	)
 
-	// Check annotation updates.
-	oldAnno := oldK8sPod.ObjectMeta.Annotations
-	newAnno := newK8sPod.ObjectMeta.Annotations
-	annoChangedBandwidth := !k8s.AnnotationsEqual([]string{bandwidth.EgressBandwidth}, oldAnno, newAnno) || !k8s.AnnotationsEqual([]string{bandwidth.IngressBandwidth}, oldAnno, newAnno)
-	annoChangedPriority := !k8s.AnnotationsEqual([]string{bandwidth.Priority}, oldAnno, newAnno)
-	annoChangedNoTrack := !k8s.AnnotationsEqual([]string{annotation.NoTrack, annotation.NoTrackAlias}, oldAnno, newAnno)
-	annoChangedFIBTableID := option.Config.EnableFibTableIDAnnotation &&
-		!k8s.AnnotationsEqual([]string{annotation.FIBTableID}, oldAnno, newAnno)
-	annoChangedDisableSIP := !k8s.AnnotationsEqual([]string{annotation.DisableSourceIPVerification}, oldAnno, newAnno)
-	annotationsChanged := annoChangedBandwidth || annoChangedPriority || annoChangedNoTrack || annoChangedFIBTableID || annoChangedDisableSIP
-
-	// Check label updates too.
-	oldK8sPodLabels, _ := labelsfilter.Filter(labels.Map2Labels(oldK8sPod.ObjectMeta.Labels, labels.LabelSourceK8s))
-	// old labels are stripped to avoid grandfathering in special labels
-	oldPodLabels := k8sUtils.StripPodSpecialLabels(oldK8sPodLabels.K8sStringMap())
-
-	strippedNewLabels := k8sUtils.StripPodSpecialLabels(newK8sPod.Labels)
-
-	newK8sPodLabels, _ := labelsfilter.Filter(labels.Map2Labels(strippedNewLabels, labels.LabelSourceK8s))
-	newPodLabels := newK8sPodLabels.K8sStringMap()
-	labelsChanged := !maps.Equal(oldPodLabels, newPodLabels)
-
-	// Nothing changed.
-	if !annotationsChanged && !labelsChanged && !forceLabels {
-		scopedLog.Debug(
-			"Pod does not have any relevant changes",
-			logfields.OldLabels, oldK8sPod.GetObjectMeta().GetLabels(),
-			logfields.OldAnnotations, oldK8sPod.GetObjectMeta().GetAnnotations(),
-			logfields.NewLabels, newK8sPod.GetObjectMeta().GetLabels(),
-			logfields.NewAnnotations, newK8sPod.GetObjectMeta().GetAnnotations(),
-		)
-		return nil
+	if forceLabels && !labelsChanged {
+		if oldPodLabels == nil || newPodLabels == nil {
+			strippedNewLabels := k8sUtils.StripPodSpecialLabels(newK8sPod.Labels)
+			newK8sPodLabels, _ := labelsfilter.Filter(labels.Map2Labels(strippedNewLabels, labels.LabelSourceK8s))
+			newPodLabels = newK8sPodLabels.K8sStringMap()
+			oldPodLabels = newPodLabels
+		}
 	}
 
 	podNSName := k8sUtils.GetObjNamespaceName(&newK8sPod.ObjectMeta)
@@ -499,10 +541,8 @@ func (k *K8sPodWatcher) reconcilePodEndpoints(oldK8sPod, newK8sPod *slim_corev1.
 					newK8sPod.Annotations[bandwidth.Priority])
 			}
 			if annoChangedNoTrack {
-				podEP.UpdateNoTrackRules(func() string {
-					value, _ := annotation.Get(newK8sPod, annotation.NoTrack, annotation.NoTrackAlias)
-					return value
-				}())
+				value, _ := annotation.Get(newK8sPod, annotation.NoTrack, annotation.NoTrackAlias)
+				podEP.UpdateNoTrackRules(value)
 			}
 
 			if annoChangedFIBTableID {
@@ -711,7 +751,7 @@ func (k *K8sPodWatcher) upsertPodHostData(ctx context.Context, oldPod, newPod *s
 
 	var namedPortsChanged bool
 
-	ipSliceEqual := oldPodIPs != nil && oldPodIPs.DeepEqual(&newPodIPs)
+	ipSliceEqual := slices.Equal(oldPodIPs, newPodIPs)
 
 	defer func() {
 		if oldPod != nil && (!ipSliceEqual || replace) {
@@ -738,12 +778,11 @@ func (k *K8sPodWatcher) upsertPodHostData(ctx context.Context, oldPod, newPod *s
 		}
 	}()
 
-	specEqual := oldPod != nil && newPod.Spec.DeepEqual(&oldPod.Spec)
-	hostIPEqual := oldPod != nil && newPod.Status.HostIP == oldPod.Status.HostIP
-
-	// if spec, host IPs, and pod IPs are the same there no need to perform the remaining
-	// operations
-	if specEqual && hostIPEqual && ipSliceEqual && !replace {
+	// if spec, host IPs, and pod IPs are the same there no need to perform the remaining operations
+	if oldPod != nil && !replace &&
+		ipSliceEqual &&
+		newPod.Status.HostIP == oldPod.Status.HostIP &&
+		newPod.Spec.DeepEqual(&oldPod.Spec) {
 		return nil
 	}
 
