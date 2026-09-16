@@ -46,8 +46,19 @@ func (s Set[T]) String() string {
 	return res
 }
 
+// NewSingleSet returns a Set initialized to contain a single member without variadic slice allocation.
+func NewSingleSet[T comparable](member T) Set[T] {
+	return Set[T]{single: &member}
+}
+
 // NewSet returns a Set initialized to contain the members in 'members'.
 func NewSet[T comparable](members ...T) Set[T] {
+	if len(members) == 0 {
+		return Set[T]{}
+	}
+	if len(members) == 1 {
+		return Set[T]{single: &members[0]}
+	}
 	s := Set[T]{}
 	for _, member := range members {
 		s.Insert(member)

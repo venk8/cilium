@@ -641,14 +641,17 @@ func (e mapStateEntry) IsPassEntry() bool {
 	return e.passes != nil
 }
 
+var emptyPassSeq = func(yield func(passMeta) bool) {}
+
 // Passes iterates over the pass metadata in the entry.
 func (e mapStateEntry) Passes() iter.Seq[passMeta] {
+	if e.passes == nil {
+		return emptyPassSeq
+	}
 	return func(yield func(passMeta) bool) {
-		if e.passes != nil {
-			for _, meta := range *e.passes {
-				if !yield(meta) {
-					return
-				}
+		for _, meta := range *e.passes {
+			if !yield(meta) {
+				return
 			}
 		}
 	}
@@ -1023,13 +1026,15 @@ func (ms *mapState) pruneCoveredNarrowerKey(k Key, v mapStateEntry, key Key, ent
 	// Delete lower precedence pass metadata on the same tier
 	deletePassMeta := true
 	deletePassEntry := false
-	for pass := range v.Passes() {
-		if pass.isDifferentTierOrHigherPrecedence(precedence) {
-			// a pass must be kept, so the whole can not be deleted
-			deletePassMeta = false
-		} else {
-			// a pass must be deleted
-			deletePassEntry = true
+	if v.passes != nil {
+		for _, pass := range *v.passes {
+			if pass.isDifferentTierOrHigherPrecedence(precedence) {
+				// a pass must be kept, so the whole can not be deleted
+				deletePassMeta = false
+			} else {
+				// a pass must be deleted
+				deletePassEntry = true
+			}
 		}
 	}
 
@@ -1084,9 +1089,9 @@ func (sp *keySlice) collectNarrowerPasses(tierMaxPrecedence types.Precedence, k 
 	if k.Identity == aggregateFor(key.Identity, clusterInfo) {
 		k.Identity = key.Identity
 	}
-	if k != key {
+	if k != key && v.passes != nil {
 		// Narrower higher precedence pass entry on a higher tier?
-		for pass := range v.Passes() {
+		for _, pass := range *v.passes {
 			if pass.precedence > tierMaxPrecedence {
 				sp.addNewKey(k, doneKeys)
 				break // skip remaining passes of higher tiers
@@ -1098,20 +1103,15 @@ func (sp *keySlice) collectNarrowerPasses(tierMaxPrecedence types.Precedence, k 
 // All iterates over the keys in '*sp', allowing the iteration body (yield) to push new keys to it.
 func (sp *keySlice) All() iter.Seq[Key] {
 	return func(yield func(Key) bool) {
-		for len(*sp) > 0 {
-			// get the first key
-			key := (*sp)[0]
-			// shrink the slice to not iterate this key again
-			*sp = (*sp)[1:]
-			// reset empty slice to reuse the data from the beginning, if new keys are
-			// pushed while yielding
-			if len(*sp) == 0 {
-				*sp = (*sp)[:0]
-			}
+		i := 0
+		for i < len(*sp) {
+			key := (*sp)[i]
+			i++
 			if !yield(key) {
 				return
 			}
 		}
+		*sp = (*sp)[:0]
 	}
 }
 
@@ -1172,10 +1172,12 @@ func (ms *mapState) insertWithPasses(tierMaxPrecedence types.Precedence, key Key
 			}
 			// bail if covered by a higher or equal precedence PASS entry on the same
 			// tier
-			for pass := range v.Passes() {
-				if pass.tierMinPrecedence == newPass.tierMinPrecedence &&
-					pass.precedence >= newPass.precedence {
-					return
+			if v.passes != nil {
+				for _, pass := range *v.passes {
+					if pass.tierMinPrecedence == newPass.tierMinPrecedence &&
+						pass.precedence >= newPass.precedence {
+						return
+					}
 				}
 			}
 		}
@@ -1226,22 +1228,24 @@ func (ms *mapState) insertWithPasses(tierMaxPrecedence types.Precedence, key Key
 	for k, v := range ms.BroaderOrEqualKeys(key) {
 		isCoveringKey := key.Identity != aggregateID || k.Identity == aggregateID
 		// Bump precedence if covered by a higher tier PASS verdict.
-		for pass := range v.Passes() {
-			// is the pass from a higher tier?
-			if pass.tierMinPrecedence > entry.Precedence {
-				// A new L3/4 entry may need to be inserted non-covering
-				// pass key. Collect them.
-				if !isCoveringKey {
-					l34Keys.Insert(key.WithIdentity(k.Identity))
-					break // skip remaining passes of higher tiers
+		if v.passes != nil {
+			for _, pass := range *v.passes {
+				// is the pass from a higher tier?
+				if pass.tierMinPrecedence > entry.Precedence {
+					// A new L3/4 entry may need to be inserted non-covering
+					// pass key. Collect them.
+					if !isCoveringKey {
+						l34Keys.Insert(key.WithIdentity(k.Identity))
+						break // skip remaining passes of higher tiers
+					}
+					// else keep the highest precedence covering pass key for each tier
+					passes.Collect(pass)
+				} else if isCoveringKey && pass.precedence > entry.Precedence {
+					// higher precedence covering pass entry, but not on
+					// higher tier, so it must be on the same tier. Bail
+					// the new allow/deny entry immediately.
+					return
 				}
-				// else keep the highest precedence covering pass key for each tier
-				passes.Collect(pass)
-			} else if isCoveringKey && pass.precedence > entry.Precedence {
-				// higher precedence covering pass entry, but not on
-				// higher tier, so it must be on the same tier. Bail
-				// the new allow/deny entry immediately.
-				return
 			}
 		}
 		// Bail if covered by an allow/deny key of higher precedence.
@@ -1321,18 +1325,20 @@ func (ms *mapState) insertWithPasses(tierMaxPrecedence types.Precedence, key Key
 		for k, v := range ms.BroaderOrEqualKeys(key) {
 			isCoveringKey := key.Identity != aggregateID || k.Identity == aggregateID
 			// Bump precedence if covered by a higher tier PASS verdict.
-			for pass := range v.Passes() {
-				// is the pass from a higher tier?
-				if pass.tierMinPrecedence > entry.Precedence {
-					// A new L3/4 entry may need to be inserted non-covering
-					// pass key. Collect them.
-					if !isCoveringKey {
-						l34Keys.Insert(key.WithIdentity(k.Identity))
-						break // skip remaining passes of higher tiers
+			if v.passes != nil {
+				for _, pass := range *v.passes {
+					// is the pass from a higher tier?
+					if pass.tierMinPrecedence > entry.Precedence {
+						// A new L3/4 entry may need to be inserted non-covering
+						// pass key. Collect them.
+						if !isCoveringKey {
+							l34Keys.Insert(key.WithIdentity(k.Identity))
+							break // skip remaining passes of higher tiers
+						}
+						// else keep the highest precedence covering pass key for
+						// each tier
+						passes.Collect(pass)
 					}
-					// else keep the highest precedence covering pass key for
-					// each tier
-					passes.Collect(pass)
 				}
 			}
 			// Bail if covered by an allow/deny key of higher precedence on a higher
@@ -1815,17 +1821,33 @@ func (mc *MapChanges) consumeMapChanges(p *EndpointPolicy, features policyFeatur
 		}
 	}
 
-	changes := ChangeState{
-		Adds:    make(Keys, len(mc.synced)),
-		Deletes: make(Keys, len(mc.synced)),
-		old:     make(mapStateMap, len(mc.synced)),
+	var numAdds, numDeletes int
+	hasMultipleTiers := false
+	firstTier := mc.synced[0].Tier
+	for i := range mc.synced {
+		if mc.synced[i].Add {
+			numAdds++
+		} else {
+			numDeletes++
+		}
+		if !hasMultipleTiers && mc.synced[i].Tier != firstTier {
+			hasMultipleTiers = true
+		}
 	}
 
-	// sort changes in mc.synced so that we will insert higher tier rules first.
-	slices.SortFunc(mc.synced, func(a, b mapChange) int {
-		// lower tier values come first
-		return cmp.Compare(a.Tier, b.Tier)
-	})
+	if hasMultipleTiers {
+		// sort changes in mc.synced so that we will insert higher tier rules first.
+		slices.SortFunc(mc.synced, func(a, b mapChange) int {
+			// lower tier values come first
+			return cmp.Compare(a.Tier, b.Tier)
+		})
+	}
+
+	changes := ChangeState{
+		Adds:    make(Keys, numAdds),
+		Deletes: make(Keys, numDeletes),
+		old:     make(mapStateMap, numDeletes),
+	}
 
 	for i := range mc.synced {
 		key := mc.synced[i].Key

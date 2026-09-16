@@ -28,7 +28,6 @@ import (
 	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/identity/identitymanager"
 	ipcachetypes "github.com/cilium/cilium/pkg/ipcache/types"
-	k8sConst "github.com/cilium/cilium/pkg/k8s/apis/cilium.io"
 	v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	"github.com/cilium/cilium/pkg/k8s/testutils"
 	"github.com/cilium/cilium/pkg/labels"
@@ -356,9 +355,10 @@ func (p *Repository) resolvePolicyLocked(securityIdentity *identity.Identity) (*
 		EgressPolicyEnabled:  egressEnabled,
 	}
 
+	namespace, _ := securityIdentity.LabelArray.LookupLabel(&podNamespaceLabel)
 	policyCtx := policyContext{
 		repo:               p,
-		ns:                 securityIdentity.LabelArray.Get(labels.LabelSourceK8sKeyPrefix + k8sConst.PodNamespaceLabel),
+		ns:                 namespace,
 		defaultDenyIngress: hasIngressDefaultDeny,
 		defaultDenyEgress:  hasEgressDefaultDeny,
 		traceEnabled:       option.Config.TracingEnabled(),
@@ -422,14 +422,17 @@ func (p *Repository) computePolicyEnforcementAndRules(securityIdentity *identity
 	if namespace != "" {
 		expectedRules += len(p.rulesByNamespace[namespace])
 	}
-
-	rulesIngress = make([]*rule, 0, expectedRules)
-	rulesEgress = make([]*rule, 0, expectedRules)
+	if expectedRules == 0 {
+		if policyMode == option.AlwaysEnforce || lbls.Has(labels.IDNameInit) {
+			return true, true, true, true, nil, nil
+		}
+		return false, false, false, false, nil, nil
+	}
 
 	var hasIngressPassVerdict, hasEgressPassVerdict bool
+	initCap := min(expectedRules, 32)
 
-	processKey := func(rKey ruleKey) {
-		r := p.rules[rKey]
+	matchRule := func(r *rule) {
 		if r.matchesSubject(securityIdentity) {
 			if r.Ingress {
 				if r.DefaultDeny {
@@ -437,6 +440,9 @@ func (p *Repository) computePolicyEnforcementAndRules(securityIdentity *identity
 				}
 				if r.Verdict == types.Pass {
 					hasIngressPassVerdict = true
+				}
+				if rulesIngress == nil {
+					rulesIngress = make([]*rule, 0, initCap)
 				}
 				rulesIngress = append(rulesIngress, r)
 			} else {
@@ -446,13 +452,17 @@ func (p *Repository) computePolicyEnforcementAndRules(securityIdentity *identity
 				if r.Verdict == types.Pass {
 					hasEgressPassVerdict = true
 				}
+				if rulesEgress == nil {
+					rulesEgress = make([]*rule, 0, initCap)
+				}
 				rulesEgress = append(rulesEgress, r)
 			}
 		}
 	}
+
 	// Match cluster-wide rules
 	for rKey := range p.rulesByNamespace[""] {
-		processKey(rKey)
+		matchRule(p.rules[rKey])
 	}
 
 	// Match namespace-specific rules and determine the default policy for each direction.
@@ -474,7 +484,7 @@ func (p *Repository) computePolicyEnforcementAndRules(securityIdentity *identity
 	//    The wildcard rule is inserted to the last tier and priority.
 	if namespace != "" {
 		for rKey := range p.rulesByNamespace[namespace] {
-			processKey(rKey)
+			matchRule(p.rules[rKey])
 		}
 	}
 

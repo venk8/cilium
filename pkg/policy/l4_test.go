@@ -748,6 +748,12 @@ func BenchmarkEvaluateL4PolicyMapState(b *testing.B) {
 				users: map[*EndpointPolicy]struct{}{
 					epPolicy: {},
 				},
+				Ingress: L4DirectionPolicy{
+					tierBasePriority: make([]types.Priority, 1),
+				},
+				Egress: L4DirectionPolicy{
+					tierBasePriority: make([]types.Priority, 1),
+				},
 			}
 
 			// Compute initial policy with just the wildcard selectors.

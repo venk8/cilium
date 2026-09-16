@@ -190,12 +190,11 @@ func (pf *PortForwarder) getFirstPodForService(ctx context.Context, svc *corev1.
 		return &podList.Items[0], nil
 	}
 
-	pods := make([]*corev1.Pod, 0, len(podList.Items))
-	for _, pod := range podList.Items {
-		pods = append(pods, &pod)
+	pods := make([]*corev1.Pod, len(podList.Items))
+	for i := range podList.Items {
+		pods[i] = &podList.Items[i]
 	}
-	sortBy := func(pods []*corev1.Pod) sort.Interface { return sort.Reverse(podutils.ActivePods(pods)) }
-	sort.Sort(sortBy(pods))
+	sort.Sort(sort.Reverse(podutils.ActivePods(pods)))
 
 	return pods[0], nil
 }

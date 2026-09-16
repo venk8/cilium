@@ -11,6 +11,7 @@ import (
 
 	slim_metav1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/meta/v1"
 	"github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/selection"
+	"github.com/cilium/cilium/pkg/labels"
 )
 
 func TestLabelSelectorToRequirements(t *testing.T) {
@@ -65,6 +66,29 @@ func BenchmarkLabelSelectorToRequirements(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = LabelSelectorToRequirements(labelSelector)
+	}
+}
+
+func BenchmarkNewEqualsRequirement(b *testing.B) {
+	lbl := labels.NewLabel("k8s.io/app", "frontend", labels.LabelSourceK8s)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = NewEqualsRequirement(lbl)
+	}
+}
+
+func BenchmarkNewExistRequirements(b *testing.B) {
+	lbls := labels.LabelArray{
+		labels.NewLabel("k8s.io/app", "frontend", labels.LabelSourceK8s),
+		labels.NewLabel("k8s.io/env", "prod", labels.LabelSourceK8s),
+		labels.NewLabel("k8s.io/tier", "backend", labels.LabelSourceK8s),
+		labels.NewLabel("k8s.io/version", "v1", labels.LabelSourceK8s),
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = NewExistRequirements(lbls)
 	}
 }
 

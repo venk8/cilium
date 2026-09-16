@@ -638,3 +638,45 @@ func TestPolicyNamedPortMultiMapGetNamedPortsUpdate(t *testing.T) {
 	changed = npm.Update(nid1, peerPortsNew, nil)
 	require.True(t, changed)
 }
+
+func BenchmarkNamedPortMultiMapGetNamedPorts(b *testing.B) {
+	nid1 := identity.NumericIdentity(1)
+	nid2 := identity.NumericIdentity(2)
+	nid3 := identity.NumericIdentity(3)
+	npm := testNamedPortMultiMap(map[string]map[PortProto]map[identity.NumericIdentity]int{
+		"http": {
+			PortProto{Port: 80, Proto: u8proto.TCP}:   {nid1: 1, nid2: 1, nid3: 1},
+			PortProto{Port: 8080, Proto: u8proto.TCP}: {identity.NumericIdentity(4): 1},
+		},
+	})
+	nids := []identity.NumericIdentity{nid1, nid2, nid3}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for b.Loop() {
+		for nid, port := range npm.GetNamedPorts("http", u8proto.TCP, slices.Values(nids)) {
+			_ = nid
+			_ = port
+		}
+	}
+}
+
+func BenchmarkNidPortSeqPorts(b *testing.B) {
+	nid1 := identity.NumericIdentity(1)
+	nid2 := identity.NumericIdentity(2)
+	nid3 := identity.NumericIdentity(3)
+	npm := testNamedPortMultiMap(map[string]map[PortProto]map[identity.NumericIdentity]int{
+		"http": {
+			PortProto{Port: 80, Proto: u8proto.TCP}: {nid1: 1, nid2: 1, nid3: 1},
+		},
+	})
+	nids := []identity.NumericIdentity{nid1, nid2, nid3}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for b.Loop() {
+		seq := npm.GetNamedPorts("http", u8proto.TCP, slices.Values(nids))
+		_ = seq.Ports()
+	}
+}
+

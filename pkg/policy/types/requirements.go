@@ -92,7 +92,7 @@ func LabelSelectorToRequirements(labelSelector *slim_metav1.LabelSelector) Requi
 	}
 
 	for k, v := range labelSelector.MatchLabels {
-		requirements = append(requirements, NewRequirement(k, selection.Equals, []string{v}))
+		requirements = append(requirements, NewRequirementSingleValue(k, selection.Equals, v))
 	}
 	for _, expr := range labelSelector.MatchExpressions {
 		var op selection.Operator
@@ -123,7 +123,8 @@ func NewExistRequirement(lbl labels.Label) Requirement {
 	}
 }
 
-func NewExistRequirements(lbls labels.LabelArray) (reqs Requirements) {
+func NewExistRequirements(lbls labels.LabelArray) Requirements {
+	reqs := make(Requirements, 0, len(lbls))
 	for _, lbl := range lbls {
 		reqs = append(reqs, NewExistRequirement(lbl))
 	}
@@ -141,15 +142,29 @@ func NewEqualsRequirement(lbl labels.Label) Requirement {
 	return Requirement{
 		key:      labels.Label{Key: lbl.Key, Source: lbl.Source},
 		operator: selection.Equals,
-		values:   set.NewSet(lbl.Value),
+		values:   set.NewSingleSet(lbl.Value),
+	}
+}
+
+func NewRequirementSingleValue(key string, op selection.Operator, value string) Requirement {
+	return Requirement{
+		key:      labels.ParseSelectLabel(key),
+		operator: op,
+		values:   set.NewSingleSet(value),
 	}
 }
 
 func NewRequirement(key string, op selection.Operator, values []string) Requirement {
+	var s set.Set[string]
+	if len(values) == 1 {
+		s = set.NewSingleSet(values[0])
+	} else if len(values) > 1 {
+		s = set.NewSet(values...)
+	}
 	return Requirement{
 		key:      labels.ParseSelectLabel(key),
 		operator: op,
-		values:   set.NewSet(values...),
+		values:   s,
 	}
 }
 
@@ -263,24 +278,24 @@ func matchesEncodedRequirements(reqs Requirements, ls labels.LabelArray) bool {
 	return true
 }
 
+func (r *Requirement) hasEncodedValue(ls labels.LabelArray) bool {
+	for val := range r.values.Members() {
+		encoded := labels.EncodedCIDRGroupLabel(r.key.Key, val, r.key.Source)
+		if _, exists := ls.LookupLabel(&encoded); exists {
+			return true
+		}
+	}
+	return false
+}
+
 // matchesEncodedRequirement converts value-match operators into existence
 // checks on encoded key+value labels. Exists/DoesNotExist pass through.
 func matchesEncodedRequirement(r *Requirement, ls labels.LabelArray) bool {
-	encodedValueExists := func() bool {
-		for val := range r.values.Members() {
-			encoded := labels.EncodedCIDRGroupLabel(r.key.Key, val, r.key.Source)
-			if _, exists := ls.LookupLabel(&encoded); exists {
-				return true
-			}
-		}
-		return false
-	}
-
 	switch r.operator {
 	case selection.In, selection.Equals, selection.DoubleEquals:
-		return encodedValueExists()
+		return r.hasEncodedValue(ls)
 	case selection.NotIn, selection.NotEquals:
-		return !encodedValueExists()
+		return !r.hasEncodedValue(ls)
 	case selection.Exists, selection.DoesNotExist:
 		return MatchesRequirement(r, ls)
 	default:
