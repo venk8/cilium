@@ -7,6 +7,7 @@ import (
 	"context"
 	"log/slog"
 	"reflect"
+	"slices"
 
 	"github.com/cilium/cilium/api/v1/models"
 	"github.com/cilium/cilium/pkg/allocator"
@@ -30,6 +31,9 @@ func (s IdentitiesModel) Less(i, j int) bool {
 
 // FromIdentityCache populates the provided model from an identity cache.
 func (s IdentitiesModel) FromIdentityCache(cache identity.IdentityMap) IdentitiesModel {
+	if len(cache) > 0 {
+		s = slices.Grow(s, len(cache))
+	}
 	for id, lbls := range cache {
 		s = append(s, identitymodel.CreateModel(&identity.Identity{
 			ID:     id,
@@ -42,7 +46,18 @@ func (s IdentitiesModel) FromIdentityCache(cache identity.IdentityMap) Identitie
 // GetIdentityCache returns a cache of all known identities
 func (m *CachingIdentityAllocator) GetIdentityCache() identity.IdentityMap {
 	m.logger.Debug("getting identity cache for identity allocator manager")
-	cache := identity.IdentityMap{}
+
+	capEstimate := identity.ReservedIdentitiesCount()
+	if m.isGlobalIdentityAllocatorInitialized() && m.IdentityAllocator != nil {
+		capEstimate += m.IdentityAllocator.CacheLen()
+	}
+	if m.localIdentities != nil {
+		capEstimate += m.localIdentities.size()
+	}
+	if m.localNodeIdentities != nil {
+		capEstimate += m.localNodeIdentities.size()
+	}
+	cache := make(identity.IdentityMap, capEstimate)
 
 	if m.isGlobalIdentityAllocatorInitialized() {
 		m.IdentityAllocator.ForeachCache(func(id idpool.ID, val allocator.AllocatorKey) {
@@ -64,11 +79,15 @@ func (m *CachingIdentityAllocator) GetIdentityCache() identity.IdentityMap {
 		cache[ni] = id.Labels.LabelArray()
 	})
 
-	for _, identity := range m.localIdentities.GetIdentities() {
-		cache[identity.ID] = identity.Labels.LabelArray()
+	if m.localIdentities != nil {
+		m.localIdentities.foreach(func(ni identity.NumericIdentity, id *identity.Identity) {
+			cache[ni] = id.Labels.LabelArray()
+		})
 	}
-	for _, identity := range m.localNodeIdentities.GetIdentities() {
-		cache[identity.ID] = identity.Labels.LabelArray()
+	if m.localNodeIdentities != nil {
+		m.localNodeIdentities.foreach(func(ni identity.NumericIdentity, id *identity.Identity) {
+			cache[ni] = id.Labels.LabelArray()
+		})
 	}
 
 	return cache
@@ -76,7 +95,17 @@ func (m *CachingIdentityAllocator) GetIdentityCache() identity.IdentityMap {
 
 // GetIdentities returns all known identities
 func (m *CachingIdentityAllocator) GetIdentities() IdentitiesModel {
-	identities := IdentitiesModel{}
+	capEstimate := identity.ReservedIdentitiesCount()
+	if m.isGlobalIdentityAllocatorInitialized() && m.IdentityAllocator != nil {
+		capEstimate += m.IdentityAllocator.CacheLen()
+	}
+	if m.localIdentities != nil {
+		capEstimate += m.localIdentities.size()
+	}
+	if m.localNodeIdentities != nil {
+		capEstimate += m.localNodeIdentities.size()
+	}
+	identities := make(IdentitiesModel, 0, capEstimate)
 
 	if m.isGlobalIdentityAllocatorInitialized() {
 		m.IdentityAllocator.ForeachCache(func(id idpool.ID, val allocator.AllocatorKey) {
@@ -91,11 +120,15 @@ func (m *CachingIdentityAllocator) GetIdentities() IdentitiesModel {
 		identities = append(identities, identitymodel.CreateModel(id))
 	})
 
-	for _, v := range m.localIdentities.GetIdentities() {
-		identities = append(identities, identitymodel.CreateModel(v))
+	if m.localIdentities != nil {
+		m.localIdentities.foreach(func(_ identity.NumericIdentity, v *identity.Identity) {
+			identities = append(identities, identitymodel.CreateModel(v))
+		})
 	}
-	for _, v := range m.localNodeIdentities.GetIdentities() {
-		identities = append(identities, identitymodel.CreateModel(v))
+	if m.localNodeIdentities != nil {
+		m.localNodeIdentities.foreach(func(_ identity.NumericIdentity, v *identity.Identity) {
+			identities = append(identities, identitymodel.CreateModel(v))
+		})
 	}
 
 	return identities
@@ -217,9 +250,6 @@ func (m *CachingIdentityAllocator) isGlobalIdentityAllocatorInitialized() bool {
 // remote kvstores and finally fall back to the main kvstore.
 // May return nil for lookups if the allocator has not yet been synchronized.
 func (m *CachingIdentityAllocator) LookupIdentity(ctx context.Context, lbls labels.Labels) *identity.Identity {
-	ctx, cancel := context.WithTimeout(ctx, m.timeout)
-	defer cancel()
-
 	if reservedIdentity := identity.LookupReservedIdentityByLabels(lbls); reservedIdentity != nil {
 		return reservedIdentity
 	}
@@ -234,6 +264,9 @@ func (m *CachingIdentityAllocator) LookupIdentity(ctx context.Context, lbls labe
 	if !m.isGlobalIdentityAllocatorInitialized() {
 		return nil
 	}
+
+	ctx, cancel := context.WithTimeout(ctx, m.timeout)
+	defer cancel()
 
 	lblArray := lbls.LabelArray()
 	id, err := m.IdentityAllocator.GetIncludeRemoteCaches(ctx, &key.GlobalIdentity{LabelArray: lblArray})

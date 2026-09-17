@@ -11,6 +11,8 @@ import (
 	"maps"
 	"net/netip"
 	"runtime"
+	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/cilium/hive/cell"
@@ -318,12 +320,12 @@ func (mgr *endpointManager) Lookup(id string) (*endpoint.Endpoint, error) {
 
 	switch prefix {
 	case endpointid.CiliumLocalIdPrefix:
-		n, err := endpointid.ParseCiliumID(id)
-		if err != nil {
-			return nil, err
+		n, err := strconv.ParseInt(eid, 0, 64)
+		if err != nil || n < 0 {
+			return nil, fmt.Errorf("invalid numeric cilium id: %w", err)
 		}
 		if n > endpointid.MaxEndpointID {
-			return nil, fmt.Errorf("%d: endpoint ID too large", n)
+			return nil, fmt.Errorf("endpoint id too large: %d", n)
 		}
 		return mgr.lookupCiliumID(uint16(n)), nil
 
@@ -402,11 +404,16 @@ func (mgr *endpointManager) LookupCEPName(namespacedName string) *endpoint.Endpo
 
 // GetEndpointsByPodName looks up endpoints by namespace + pod name
 func (mgr *endpointManager) GetEndpointsByPodName(namespacedName string) []*endpoint.Endpoint {
+	ns, podName, ok := strings.Cut(namespacedName, "/")
+	if !ok {
+		return nil
+	}
+
 	mgr.mutex.RLock()
 	defer mgr.mutex.RUnlock()
 	var eps []*endpoint.Endpoint
 	for _, ep := range mgr.endpoints {
-		if ep.GetK8sNamespaceAndPodName() == namespacedName {
+		if ep.GetK8sNamespace() == ns && ep.GetK8sPodName() == podName {
 			eps = append(eps, ep)
 		}
 	}
@@ -448,15 +455,16 @@ func (mgr *endpointManager) GetEndpointsByServiceAccount(namespace string, servi
 
 	var eps []*endpoint.Endpoint
 	for _, ep := range mgr.endpoints {
-		podSA := ""
-
-		if pod := ep.GetPod(); pod == nil {
+		if ep.K8sNamespace != namespace {
 			continue
-		} else {
-			podSA = pod.Spec.ServiceAccountName
 		}
 
-		if ep.K8sNamespace == namespace && serviceAccount == podSA {
+		pod := ep.GetPod()
+		if pod == nil {
+			continue
+		}
+
+		if pod.Spec.ServiceAccountName == serviceAccount {
 			eps = append(eps, ep)
 		}
 	}

@@ -5,6 +5,7 @@ package endpoint
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -116,3 +117,80 @@ func BenchmarkComponentStatus_SortByPriority(b *testing.B) {
 		_ = cs.sortByPriority()
 	}
 }
+
+func BenchmarkEndpointStatus_CurrentStatus(b *testing.B) {
+	eps := NewEndpointStatus()
+	eps.CurrentStatuses = componentStatus{
+		BPF:    &statusLogMsg{Status: Status{Type: BPF, Code: OK, Msg: "bpf ok"}},
+		Policy: &statusLogMsg{Status: Status{Type: Policy, Code: Warning, Msg: "policy warn"}},
+		Other:  &statusLogMsg{Status: Status{Type: Other, Code: OK, Msg: "other ok"}},
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		_ = eps.CurrentStatus()
+	}
+}
+
+func BenchmarkEndpointStatus_GetModel(b *testing.B) {
+	eps := NewEndpointStatus()
+	for i := 0; i < 256; i++ {
+		eps.addStatusLog(&statusLogMsg{
+			Status: Status{
+				Code: OK,
+				Msg:  "Hello World!",
+				Type: BPF,
+			},
+			Timestamp: time.Now(),
+		})
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		_ = eps.GetModel()
+	}
+}
+
+func BenchmarkEndpointStatus_GetModelWithLimit1(b *testing.B) {
+	eps := NewEndpointStatus()
+	for i := 0; i < 256; i++ {
+		eps.addStatusLog(&statusLogMsg{
+			Status: Status{
+				Code: OK,
+				Msg:  "Hello World!",
+				Type: BPF,
+			},
+			Timestamp: time.Now(),
+		})
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		_ = eps.GetModelWithLimit(1)
+	}
+}
+
+func BenchmarkEndpointPolicyStatusMap_UpdateMetrics(b *testing.B) {
+	epMap := newEndpointPolicyStatusMap()
+	for i := uint16(1); i <= 100; i++ {
+		status := models.EndpointPolicyEnabledNone
+		switch i % 4 {
+		case 1:
+			status = models.EndpointPolicyEnabledBoth
+		case 2:
+			status = models.EndpointPolicyEnabledIngress
+		case 3:
+			status = models.EndpointPolicyEnabledEgress
+		}
+		epMap.m[i] = epPolicyStatus{
+			enforcementStatus:     status,
+			missingRedirectsCount: uint(i % 3),
+		}
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		epMap.UpdateMetrics()
+	}
+}
+

@@ -72,3 +72,11 @@ func ListReservedIdentities() IdentityMap {
 	}
 	return out
 }
+
+// ReservedIdentitiesCount returns the number of reserved identities in the cache.
+func ReservedIdentitiesCount() int {
+	cacheMU.RLock()
+	defer cacheMU.RUnlock()
+	return len(reservedIdentityCache)
+}
+

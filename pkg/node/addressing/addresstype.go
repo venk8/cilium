@@ -24,6 +24,7 @@ const (
 type Address interface {
 	AddrType() AddressType
 	ToString() string
+	GetIP() net.IP
 }
 
 // ExtractNodeIP returns one of the provided IP addresses available with the following priority:
@@ -34,7 +35,18 @@ type Address interface {
 func ExtractNodeIP[T Address](addrs []T, ipv6 bool) net.IP {
 	var backupIP net.IP
 	for _, addr := range addrs {
-		parsed := net.ParseIP(addr.ToString())
+		addrType := addr.AddrType()
+		// Filter out non-routable address types before any stringification or parsing
+		switch addrType {
+		case NodeCiliumInternalIP, NodeHostName, NodeExternalDNS, NodeInternalDNS:
+			continue
+		default:
+			if backupIP != nil && addrType != NodeInternalIP && addrType != NodeExternalIP {
+				continue
+			}
+		}
+
+		parsed := addr.GetIP()
 		if parsed == nil {
 			continue
 		}
@@ -42,10 +54,7 @@ func ExtractNodeIP[T Address](addrs []T, ipv6 bool) net.IP {
 			(!ipv6 && parsed.To4() == nil) {
 			continue
 		}
-		switch addr.AddrType() {
-		// Ignore CiliumInternalIPs
-		case NodeCiliumInternalIP:
-			continue
+		switch addrType {
 		// Always prefer a cluster internal IP
 		case NodeInternalIP:
 			return parsed

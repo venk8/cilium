@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/netip"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/cilium/hive/cell"
@@ -23,8 +24,6 @@ import (
 	"github.com/cilium/cilium/pkg/ip"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/node"
-	"github.com/cilium/cilium/pkg/node/addressing"
-	nodeTypes "github.com/cilium/cilium/pkg/node/types"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/time"
 )
@@ -86,8 +85,8 @@ func (n NodeAddress) TableHeader() []string {
 func (n NodeAddress) TableRow() []string {
 	return []string{
 		n.Addr.String(),
-		fmt.Sprintf("%v", n.NodePort),
-		fmt.Sprintf("%v", n.Primary),
+		strconv.FormatBool(n.NodePort),
+		strconv.FormatBool(n.Primary),
 		n.DeviceName,
 	}
 }
@@ -285,8 +284,12 @@ func (n *nodeAddressController) reconcile(health cell.Health) *statedb.WatchSet 
 
 	var k8sIPv4, k8sIPv6 netip.Addr
 	if localNode, _, watch, found := n.Nodes.GetWatch(rtxn, node.LocalNodeQuery); found {
-		k8sIPv4, _ = netip.AddrFromSlice(addressing.ExtractNodeIP[nodeTypes.Address](localNode.IPAddresses, false))
-		k8sIPv6, _ = netip.AddrFromSlice(addressing.ExtractNodeIP[nodeTypes.Address](localNode.IPAddresses, true))
+		if ip := localNode.GetNodeIP(false); ip != nil {
+			k8sIPv4, _ = netip.AddrFromSlice(ip)
+		}
+		if ip := localNode.GetNodeIP(true); ip != nil {
+			k8sIPv6, _ = netip.AddrFromSlice(ip)
+		}
 		ws.Add(watch)
 	}
 
@@ -596,19 +599,18 @@ func (n *nodeAddressController) getAddressesFromDevice(dev *Device, k8sIPv4, k8s
 
 // showAddresses formats a Set[NodeAddress] as "1.2.3.4 (primary, nodeport), fe80::1"
 func showAddresses(addrs []NodeAddress) string {
-	ss := make([]string, 0, len(addrs))
-	for _, addr := range addrs {
-		var extras []string
-		if addr.Primary {
-			extras = append(extras, "primary")
-		}
-		if addr.NodePort {
-			extras = append(extras, "nodeport")
-		}
-		if extras != nil {
-			ss = append(ss, fmt.Sprintf("%s (%s)", addr.Addr, strings.Join(extras, ", ")))
-		} else {
-			ss = append(ss, addr.Addr.String())
+	ss := make([]string, len(addrs))
+	for i, addr := range addrs {
+		addrStr := addr.Addr.String()
+		switch {
+		case addr.Primary && addr.NodePort:
+			ss[i] = addrStr + " (primary, nodeport)"
+		case addr.Primary:
+			ss[i] = addrStr + " (primary)"
+		case addr.NodePort:
+			ss[i] = addrStr + " (nodeport)"
+		default:
+			ss[i] = addrStr
 		}
 	}
 	slices.Sort(ss)
@@ -681,7 +683,7 @@ func SortedAddresses(addrs []DeviceAddress) []DeviceAddress {
 		return slices.Clone(addrs)
 	}
 	addrs = slices.Clone(addrs)
-	slices.SortStableFunc(addrs, func(a, b DeviceAddress) int {
+	slices.SortFunc(addrs, func(a, b DeviceAddress) int {
 		switch {
 		case !a.Secondary && b.Secondary:
 			return -1

@@ -548,12 +548,12 @@ func needsGlobalIdentity(lbls labels.Labels) bool {
 // in as the 'oldNID' parameter; identity.InvalidIdentity must be passed if no
 // previous numeric identity exists.
 func (m *CachingIdentityAllocator) AllocateIdentity(ctx context.Context, lbls labels.Labels, notifyOwner bool, oldNID identity.NumericIdentity) (id *identity.Identity, allocated bool, err error) {
-	ctx, cancel := context.WithTimeout(ctx, m.timeout)
-	defer cancel()
-
 	if !needsGlobalIdentity(lbls) {
 		return m.AllocateLocalIdentity(lbls, notifyOwner, oldNID)
 	}
+
+	ctx, cancel := context.WithTimeout(ctx, m.timeout)
+	defer cancel()
 
 	if option.Config.Debug {
 		m.logger.Debug(

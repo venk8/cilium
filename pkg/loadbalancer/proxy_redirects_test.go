@@ -166,3 +166,33 @@ func TestProxyRedirects_String(t *testing.T) {
 			{ProxyPort: 2000, Ports: []uint16{443}},
 		}.String())
 }
+
+func BenchmarkProxyRedirects_String(b *testing.B) {
+	pr := ProxyRedirects{
+		{ProxyPort: 1000, Ports: []uint16{80, 8080}},
+		{ProxyPort: 2000, Ports: []uint16{443, 8443}},
+		{ProxyPort: 3000, Ports: []uint16{9090}},
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		_ = pr.String()
+	}
+}
+
+func BenchmarkService_ShowPortNames(b *testing.B) {
+	svc := &Service{
+		PortNames: map[string]uint16{
+			"http":    80,
+			"https":   443,
+			"metrics": 9090,
+			"healthz": 8080,
+			"admin":   9000,
+		},
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		_ = svc.showPortNames()
+	}
+}

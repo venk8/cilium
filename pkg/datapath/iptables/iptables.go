@@ -84,6 +84,23 @@ var (
 	noTrackSupportedProtos = []lb.L4Type{
 		lb.TCP, lb.UDP,
 	}
+
+	toProxyMark           = fmt.Sprintf("%#08x", linux_defaults.MagicMarkIsToProxy)
+	matchFromIPSecEncrypt = fmt.Sprintf("%#08x/%#08x", linux_defaults.RouteMarkEncrypt, linux_defaults.RouteMarkMask)
+	matchSkipTProxy       = fmt.Sprintf("%#08x/%#08x", linux_defaults.MarkSkipTProxy, linux_defaults.RouteMarkMask)
+	matchToProxy          = fmt.Sprintf("%#08x/%#08x", linux_defaults.MagicMarkIsToProxy, linux_defaults.MagicMarkHostMask)
+	matchProxyReply       = fmt.Sprintf("%#08x/%#08x", linux_defaults.MagicMarkIsProxy, linux_defaults.MagicMarkProxyNoIDMask)
+	matchProxyForward     = fmt.Sprintf("%#08x/%#08x", linux_defaults.MagicMarkEgress, linux_defaults.MagicMarkHostMask)
+	matchL7ProxyUpstream  = fmt.Sprintf("%#08x/%#08x", linux_defaults.MagicMarkIsProxyEPID, linux_defaults.MagicMarkProxyMask)
+	matchFromProxy        = fmt.Sprintf("%#08x/%#08x", linux_defaults.MagicMarkIsProxy, linux_defaults.MagicMarkProxyMask)
+	matchIdentity         = fmt.Sprintf("%#08x/%#08x", linux_defaults.MagicMarkIdentity, linux_defaults.MagicMarkHostMask)
+	matchFromIPSecDecrypt = fmt.Sprintf("%#08x/%#08x", linux_defaults.RouteMarkDecrypt, linux_defaults.RouteMarkMask)
+	matchEncrypted        = fmt.Sprintf("%#08x/%#08x", linux_defaults.RouteMarkEncrypt, linux_defaults.RouteMarkMask)
+	matchOverlay          = fmt.Sprintf("%#08x/%#08x", linux_defaults.MagicMarkOverlay, linux_defaults.MagicMarkHostMask)
+	matchFromProxyEPID    = fmt.Sprintf("%#08x/%#08x", linux_defaults.MagicMarkIsProxyEPID, linux_defaults.MagicMarkProxyMask)
+	markAsFromHost        = fmt.Sprintf("%#08x/%#08x", linux_defaults.MagicMarkHost, linux_defaults.MagicMarkHostMask)
+	nfmaskNodeport        = fmt.Sprintf("%#08x", linux_defaults.MarkMultinodeNodeport)
+	ctmaskNodeport        = fmt.Sprintf("%#08x", linux_defaults.MaskMultinodeNodeport)
 )
 
 const (
@@ -293,8 +310,16 @@ type podAndNameSpace struct {
 type noTrackHostPortsByPod map[podAndNameSpace]set.Set[lb.L4Addr]
 
 func (ports noTrackHostPortsByPod) flatten() set.Set[lb.L4Addr] {
-	result := set.Set[lb.L4Addr]{}
+	if len(ports) == 0 {
+		return set.Set[lb.L4Addr]{}
+	}
+	if len(ports) == 1 {
+		for _, p := range ports {
+			return p.Clone()
+		}
+	}
 
+	result := set.Set[lb.L4Addr]{}
 	for _, p := range ports {
 		result.Merge(p)
 	}
@@ -303,7 +328,10 @@ func (ports noTrackHostPortsByPod) flatten() set.Set[lb.L4Addr] {
 }
 
 func (ports noTrackHostPortsByPod) exclude(key podAndNameSpace) noTrackHostPortsByPod {
-	result := make(noTrackHostPortsByPod)
+	if _, ok := ports[key]; !ok {
+		return ports
+	}
+	result := make(noTrackHostPortsByPod, len(ports)-1)
 
 	for k, p := range ports {
 		if key == k {
@@ -674,9 +702,6 @@ func (m *manager) inboundProxyRedirectRule(cmd string) []string {
 	//    by ip_early_demux
 	// Explicitly support chaining Envoy listeners via the loopback device by
 	// excluding traffic for the loopback device.
-	toProxyMark := fmt.Sprintf("%#08x", linux_defaults.MagicMarkIsToProxy)
-	matchFromIPSecEncrypt := fmt.Sprintf("%#08x/%#08x", linux_defaults.RouteMarkEncrypt, linux_defaults.RouteMarkMask)
-	matchSkipTProxy := fmt.Sprintf("%#08x/%#08x", linux_defaults.MarkSkipTProxy, linux_defaults.RouteMarkMask)
 	return []string{
 		"-t", "mangle",
 		cmd, ciliumPreMangleChain,
@@ -805,17 +830,6 @@ func (m *manager) installTunnelNoTrackRules(tunelPort uint16) error {
 }
 
 func (m *manager) installStaticProxyRules(ifName, localDeliveryInterface string) error {
-	// match traffic to a proxy (upper 16 bits has the proxy port, which is masked out)
-	matchToProxy := fmt.Sprintf("%#08x/%#08x", linux_defaults.MagicMarkIsToProxy, linux_defaults.MagicMarkHostMask)
-	// proxy return traffic has 0 ID in the mask
-	matchProxyReply := fmt.Sprintf("%#08x/%#08x", linux_defaults.MagicMarkIsProxy, linux_defaults.MagicMarkProxyNoIDMask)
-	// proxy forward traffic
-	matchProxyForward := fmt.Sprintf("%#08x/%#08x", linux_defaults.MagicMarkEgress, linux_defaults.MagicMarkHostMask)
-	// L7 proxy upstream return traffic has Endpoint ID in the mask
-	matchL7ProxyUpstream := fmt.Sprintf("%#08x/%#08x", linux_defaults.MagicMarkIsProxyEPID, linux_defaults.MagicMarkProxyMask)
-	// match traffic from a proxy (either in forward or in return direction)
-	matchFromProxy := fmt.Sprintf("%#08x/%#08x", linux_defaults.MagicMarkIsProxy, linux_defaults.MagicMarkProxyMask)
-
 	if m.sharedCfg.EnableIPv4 {
 		// No conntrack for traffic to proxy
 		if err := m.ip4tables.runProg([]string{
@@ -1759,13 +1773,6 @@ func (m *manager) installHostTrafficMarkRule(prog runnable) error {
 	// mark, then when the service implementation proxies it back into
 	// Cilium the BPF will see this mark and understand that the packet
 	// originated from the host.
-	matchFromIPSecDecrypt := fmt.Sprintf("%#08x/%#08x", linux_defaults.RouteMarkDecrypt, linux_defaults.RouteMarkMask)
-	matchEncrypted := fmt.Sprintf("%#08x/%#08x", linux_defaults.RouteMarkEncrypt, linux_defaults.RouteMarkMask)
-	matchOverlay := fmt.Sprintf("%#08x/%#08x", linux_defaults.MagicMarkOverlay, linux_defaults.MagicMarkHostMask)
-	matchFromProxy := fmt.Sprintf("%#08x/%#08x", linux_defaults.MagicMarkIsProxy, linux_defaults.MagicMarkProxyMask)
-	matchFromProxyEPID := fmt.Sprintf("%#08x/%#08x", linux_defaults.MagicMarkIsProxyEPID, linux_defaults.MagicMarkProxyMask)
-	markAsFromHost := fmt.Sprintf("%#08x/%#08x", linux_defaults.MagicMarkHost, linux_defaults.MagicMarkHostMask)
-
 	return prog.runProg([]string{
 		"-t", "filter",
 		"-A", ciliumOutputChain,
@@ -2379,6 +2386,9 @@ func (m *manager) cleanupHostNoTrackRules(proto lb.L4Type, p []uint16) error {
 
 // removeNoTrackHostPorts removes notrack rules if the global set changes after removing an entry for the pod.
 func (m *manager) removeNoTrackHostPorts(currentState noTrackHostPortsByPod, podName podAndNameSpace) error {
+	if _, ok := currentState[podName]; !ok {
+		return nil
+	}
 	oldPorts := groupL4AddrsByProto(currentState.flatten().AsSlice())
 	delete(currentState, podName)
 	newPorts := groupL4AddrsByProto(currentState.flatten().AsSlice())

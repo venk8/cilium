@@ -3,7 +3,7 @@
 
 package api
 
-import "fmt"
+import "strconv"
 
 // Keep in sync with __id_for_file in bpf/lib/source_info.h.
 var files = map[uint8]string{
@@ -38,10 +38,22 @@ var files = map[uint8]string{
 	// @@ source files list end
 }
 
+var bpfFilesArray [256]string
+
+func init() {
+	for k, v := range files {
+		bpfFilesArray[k] = v
+	}
+}
+
 // BPFFileName returns the file name for the given BPF file id.
 func BPFFileName(id uint8) string {
-	if name, ok := files[id]; ok {
+	if name := bpfFilesArray[id]; name != "" {
 		return name
 	}
-	return fmt.Sprintf("unknown(%d)", id)
+	var buf [24]byte
+	b := append(buf[:0], "unknown("...)
+	b = strconv.AppendUint(b, uint64(id), 10)
+	b = append(b, ')')
+	return string(b)
 }

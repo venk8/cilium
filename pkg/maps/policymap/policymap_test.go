@@ -536,3 +536,31 @@ func TestNewEntryFromPolicyEntry(t *testing.T) {
 		})
 	}
 }
+
+func BenchmarkPolicyKey_String(b *testing.B) {
+	key := &PolicyKey{
+		Prefixlen:        uint32(FullPrefixBits),
+		Identity:         12345,
+		TrafficDirection: 1,
+		Nexthdr:          6,
+		DestPortNetwork:  byteorder.HostToNetwork16(80),
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = key.String()
+	}
+}
+
+func BenchmarkPolicyKey_PortProtoString(b *testing.B) {
+	key := &PolicyKey{
+		Prefixlen:        uint32(FullPrefixBits),
+		Identity:         12345,
+		TrafficDirection: 1,
+		Nexthdr:          6,
+		DestPortNetwork:  byteorder.HostToNetwork16(80),
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = key.PortProtoString()
+	}
+}

@@ -169,26 +169,28 @@ func (r *Route) TableRow() []string {
 
 	mtu := ""
 	if r.MTU != 0 {
-		mtu = fmt.Sprintf("%d", r.MTU)
+		mtu = strconv.Itoa(r.MTU)
 	}
 
 	return []string{
 		r.Dst.String(),
 		showAddr(r.Src),
 		showAddr(r.Gw),
-		fmt.Sprintf("%d", r.LinkIndex),
+		strconv.Itoa(r.LinkIndex),
 		mtu,
 		r.Table.String(),
 		r.Type.String(),
 		r.Scope.String(),
-		fmt.Sprintf("%d", r.Priority),
+		strconv.Itoa(r.Priority),
 	}
 }
+
+var defaultPrefixes = [...]netip.Prefix{zeroPrefixV4, zeroPrefixV6}
 
 func HasDefaultRoute(tbl statedb.Table[*Route], rxn statedb.ReadTxn, linkIndex int) bool {
 	// Device has a default route when a route exists in the main table
 	// with a zero destination.
-	for _, prefix := range []netip.Prefix{zeroPrefixV4, zeroPrefixV6} {
+	for _, prefix := range defaultPrefixes {
 		r, _, _ := tbl.Get(rxn, RouteByID(RouteID{
 			RT_TABLE_MAIN,
 			linkIndex,
@@ -253,7 +255,7 @@ func (table RouteTable) String() string {
 	case RT_TABLE_LOCAL:
 		return "local"
 	default:
-		return fmt.Sprintf("%d", table)
+		return strconv.FormatUint(uint64(table), 10)
 	}
 }
 
@@ -270,7 +272,7 @@ func (scope RouteScope) String() string {
 	case RT_SCOPE_NOWHERE:
 		return "nowhere"
 	default:
-		return fmt.Sprintf("%d", scope)
+		return strconv.Itoa(int(scope))
 	}
 }
 
@@ -301,6 +303,6 @@ func (typ RouteType) String() string {
 	case RTN_XRESOLVE:
 		return "xresolve"
 	default:
-		return fmt.Sprintf("%d", typ)
+		return strconv.Itoa(int(typ))
 	}
 }

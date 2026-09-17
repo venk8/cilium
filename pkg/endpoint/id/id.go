@@ -49,7 +49,11 @@ const (
 
 // NewCiliumID returns a new endpoint identifier of type CiliumLocalIdPrefix
 func NewCiliumID(id int64) string {
-	return NewID(CiliumLocalIdPrefix, strconv.FormatInt(id, 10))
+	var buf [32]byte
+	b := append(buf[:0], CiliumLocalIdPrefix...)
+	b = append(b, ':')
+	b = strconv.AppendInt(b, id, 10)
+	return string(b)
 }
 
 // NewID returns a new endpoint identifier
@@ -60,23 +64,34 @@ func NewID(prefix PrefixType, id string) string {
 // NewIPPrefixID returns an identifier based on the IP address specified. If ip
 // is invalid, an empty string is returned.
 func NewIPPrefixID(ip netip.Addr) string {
-	if ip.IsValid() {
-		if ip.Is4() {
-			return NewID(IPv4Prefix, ip.String())
-		}
-		return NewID(IPv6Prefix, ip.String())
+	if !ip.IsValid() {
+		return ""
 	}
-	return ""
+	var buf [64]byte
+	b := buf[:0]
+	if ip.Is6() {
+		b = append(b, IPv6Prefix...)
+	} else {
+		b = append(b, IPv4Prefix...)
+	}
+	b = append(b, ':')
+	b = ip.AppendTo(b)
+	return string(b)
 }
 
 // NewCNIAttachmentID returns an identifier based on the CNI attachment ID. If
 // the containerIfName is empty, only the containerID will be used.
 func NewCNIAttachmentID(containerID, containerIfName string) string {
-	id := containerID
-	if containerIfName != "" {
-		id = containerID + ":" + containerIfName
+	if containerIfName == "" {
+		return NewID(CNIAttachmentIdPrefix, containerID)
 	}
-	return NewID(CNIAttachmentIdPrefix, id)
+	var buf [128]byte
+	b := append(buf[:0], CNIAttachmentIdPrefix...)
+	b = append(b, ':')
+	b = append(b, containerID...)
+	b = append(b, ':')
+	b = append(b, containerIfName...)
+	return string(b)
 }
 
 // splitID splits ID into prefix and id. No validation is performed on prefix.

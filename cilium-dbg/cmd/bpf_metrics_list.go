@@ -170,12 +170,13 @@ func listHumanReadableMetrics(bpfMetricsList []*metricsRow) {
 }
 
 func extractRow(key *metricsmap.Key, values *metricsmap.Values) *metricsRow {
+	count, bytes := values.Sum()
 	return &metricsRow{
 		key.Reason,
 		key.DropForwardReason(),
 		key.Direction(),
-		values.Count(),
-		values.Bytes(),
+		count,
+		bytes,
 		key.Line,
 		key.FileName(),
 	}

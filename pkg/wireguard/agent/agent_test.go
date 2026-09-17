@@ -6,6 +6,7 @@ package agent
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"iter"
 	"log/slog"
 	"maps"
@@ -742,3 +743,27 @@ func TestAgent_PeerEndpointSelection(t *testing.T) {
 		})
 	}
 }
+
+func BenchmarkQueuedAllowedIPUpdates(b *testing.B) {
+	p := &peerConfig{
+		needsInsert: make(map[netip.Prefix]net.IPNet, 50),
+		needsRemove: make(map[netip.Prefix]net.IPNet, 50),
+	}
+	for i := 0; i < 50; i++ {
+		_, ipnet, _ := net.ParseCIDR(fmt.Sprintf("10.0.%d.0/24", i))
+		pfx := ipnetToPrefix(*ipnet)
+		p.needsInsert[pfx] = *ipnet
+		_, ipnet2, _ := net.ParseCIDR(fmt.Sprintf("10.1.%d.0/24", i))
+		pfx2 := ipnetToPrefix(*ipnet2)
+		p.needsRemove[pfx2] = *ipnet2
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		ins, rem := p.queuedAllowedIPUpdates()
+		_ = ins
+		_ = rem
+	}
+}
+

@@ -773,17 +773,17 @@ func (state BackendState) String() (string, error) {
 }
 
 func NewL4Type(name string) (L4Type, error) {
-	switch strings.ToLower(name) {
-	case "none":
-		return NONE, nil
-	case "any":
-		return ANY, nil
-	case "tcp":
+	switch {
+	case strings.EqualFold(name, "tcp"):
 		return TCP, nil
-	case "udp":
+	case strings.EqualFold(name, "udp"):
 		return UDP, nil
-	case "sctp":
+	case strings.EqualFold(name, "sctp"):
 		return SCTP, nil
+	case strings.EqualFold(name, "any"):
+		return ANY, nil
+	case strings.EqualFold(name, "none"):
+		return NONE, nil
 	default:
 		return "", fmt.Errorf("unknown L4 protocol")
 	}
@@ -833,25 +833,28 @@ func (l L4Addr) Equals(o L4Addr) bool {
 
 // String returns a string representation of an L4Addr
 func (l L4Addr) String() string {
-	return fmt.Sprintf("%d/%s", l.Port, l.Protocol)
+	var buf [16]byte
+	b := strconv.AppendUint(buf[:0], uint64(l.Port), 10)
+	b = append(b, '/')
+	b = append(b, l.Protocol...)
+	return string(b)
 }
 
 // L4AddrFromString returns a L4Addr from its string representation.
 func L4AddrFromString(s string) (L4Addr, error) {
-	splitted := strings.Split(s, "/")
-
-	if len(splitted) != 2 {
+	portStr, protoStr, ok := strings.Cut(s, "/")
+	if !ok {
 		return L4Addr{}, fmt.Errorf("%w for %s", ErrInvalidL4Addr, s)
 	}
 
-	proto, err := NewL4Type(strings.ToUpper(splitted[1]))
+	proto, err := NewL4Type(protoStr)
 	if err != nil {
-		return L4Addr{}, fmt.Errorf("%w for %s", err, splitted[0])
+		return L4Addr{}, fmt.Errorf("%w for %s", err, portStr)
 	}
 
-	portUInt64, err := strconv.ParseUint(splitted[0], 10, 16)
+	portUInt64, err := strconv.ParseUint(portStr, 10, 16)
 	if err != nil {
-		return L4Addr{}, fmt.Errorf("%s is not a valid port number. %w", splitted[1], err)
+		return L4Addr{}, fmt.Errorf("%s is not a valid port number. %w", portStr, err)
 	}
 
 	return NewL4Addr(proto, uint16(portUInt64)), nil
@@ -1131,14 +1134,24 @@ func (a L3n4Addr) String() string {
 // format for IPv4 and "[IPv6]:Port/Protocol[/Scope]" format for IPv6.
 func (a L3n4Addr) StringWithProtocol() string {
 	rep := a.rep()
-	var scope string
+	var buf [64]byte
+	b := buf[:0]
+	is6 := a.IsIPv6()
+	if is6 {
+		b = append(b, '[')
+	}
+	b = rep.addrCluster.AppendTo(b)
+	if is6 {
+		b = append(b, ']')
+	}
+	b = append(b, ':')
+	b = strconv.AppendUint(b, uint64(rep.Port), 10)
+	b = append(b, '/')
+	b = append(b, rep.Protocol...)
 	if rep.scope == ScopeInternal {
-		scope = "/i"
+		b = append(b, "/i"...)
 	}
-	if a.IsIPv6() {
-		return "[" + rep.addrCluster.String() + "]:" + strconv.FormatUint(uint64(rep.Port), 10) + "/" + rep.Protocol + scope
-	}
-	return rep.addrCluster.String() + ":" + strconv.FormatUint(uint64(rep.Port), 10) + "/" + rep.Protocol + scope
+	return string(b)
 }
 
 // StringID returns the L3n4Addr as string to be used for unique identification
@@ -1153,7 +1166,11 @@ func (a L3n4Addr) IsIPv6() bool {
 
 func (l L3n4Addr) AddrString() string {
 	rep := l.rep()
-	return rep.addrCluster.Addr().String() + ":" + strconv.FormatUint(uint64(rep.Port), 10)
+	var buf [64]byte
+	b := rep.addrCluster.Addr().AppendTo(buf[:0])
+	b = append(b, ':')
+	b = strconv.AppendUint(b, uint64(rep.Port), 10)
+	return string(b)
 }
 
 type l3n4AddrCacheEntry struct {

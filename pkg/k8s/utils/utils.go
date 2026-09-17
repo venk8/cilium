@@ -242,18 +242,24 @@ type nameLabelsGetter interface {
 // Vendors might add additional labels to this slices in an init() function.
 var CiliumOwnedLabelPrefixes []string
 
+func isCiliumOwned(k string) bool {
+	if strings.HasPrefix(k, k8sconst.LabelPrefix) {
+		return true
+	}
+	for _, prefix := range CiliumOwnedLabelPrefixes {
+		if strings.HasPrefix(k, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // RemoveCiliumLabels returns a copy of the given labels map, without the labels owned by Cilium.
 func RemoveCiliumLabels(labels map[string]string) map[string]string {
-	res := map[string]string{}
-nextLabel:
+	res := make(map[string]string, len(labels))
 	for k, v := range labels {
-		if strings.HasPrefix(k, k8sconst.LabelPrefix) {
-			continue nextLabel
-		}
-		for _, prefix := range CiliumOwnedLabelPrefixes {
-			if strings.HasPrefix(k, prefix) {
-				continue nextLabel
-			}
+		if isCiliumOwned(k) {
+			continue
 		}
 		res[k] = v
 	}
@@ -285,8 +291,11 @@ func SanitizePodLabels(podLabels map[string]string, namespace nameLabelsGetter, 
 
 // StripPodSpecialLabels strips labels that are not supposed to be coming from a k8s pod object update.
 func StripPodSpecialLabels(labels map[string]string) map[string]string {
-	sanitizedLabels := make(map[string]string)
-	for k, v := range RemoveCiliumLabels(labels) {
+	sanitizedLabels := make(map[string]string, len(labels))
+	for k, v := range labels {
+		if isCiliumOwned(k) {
+			continue
+		}
 		// If the key contains the prefix for namespace labels then we will
 		// ignore it.
 		if strings.HasPrefix(k, k8sconst.PodNamespaceMetaLabels) {

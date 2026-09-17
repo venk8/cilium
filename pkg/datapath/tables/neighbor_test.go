@@ -55,3 +55,47 @@ func BenchmarkNeighborIDFromString(b *testing.B) {
 		_, _ = neighborIDIndex.FromString(s)
 	}
 }
+
+func BenchmarkNeighborState_String(b *testing.B) {
+	s := NeighborState(NUD_REACHABLE | NUD_STALE | NUD_PERMANENT)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = s.String()
+	}
+}
+
+func BenchmarkNeighborFlags_String(b *testing.B) {
+	f := NeighborFlags(NTF_SELF | NTF_ROUTER | NTF_EXT_LEARNED)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = f.String()
+	}
+}
+
+func BenchmarkNeighborType_String(b *testing.B) {
+	t := NDA_DST
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = t.String()
+	}
+}
+
+func BenchmarkNeighbor_TableRow(b *testing.B) {
+	n := &Neighbor{
+		LinkIndex:    10,
+		IPAddr:       netip.MustParseAddr("192.168.1.1"),
+		HardwareAddr: HardwareAddr{0x00, 0x11, 0x22, 0x33, 0x44, 0x55},
+		Type:         NDA_DST,
+		State:        NUD_REACHABLE | NUD_STALE,
+		Flags:        NTF_SELF,
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = n.TableRow()
+	}
+}
+

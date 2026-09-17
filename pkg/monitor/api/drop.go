@@ -4,7 +4,7 @@
 package api
 
 import (
-	"fmt"
+	"strconv"
 )
 
 // DropMin numbers less than this are non-drop reason codes
@@ -109,25 +109,46 @@ var errors = map[uint8]string{
 	207: "First logical datagram fragment not found from world",
 }
 
+var dropErrorsArray [256]string
+
+func init() {
+	for k, v := range errors {
+		dropErrorsArray[k] = v
+	}
+}
+
 func extendedReason(extError int8) string {
 	if extError == int8(0) {
 		return ""
 	}
-	return fmt.Sprintf("%d", extError)
+	return strconv.Itoa(int(extError))
 }
 
 func DropReasonExt(reason uint8, extError int8) string {
-	if err, ok := errors[reason]; ok {
-		if ext := extendedReason(extError); ext == "" {
+	if err := dropErrorsArray[reason]; err != "" {
+		if extError == 0 {
 			return err
-		} else {
-			return err + ", " + ext
 		}
+		var buf [64]byte
+		b := append(buf[:0], err...)
+		b = append(b, ", "...)
+		b = strconv.AppendInt(b, int64(extError), 10)
+		return string(b)
 	}
-	return fmt.Sprintf("%d, %d", reason, extError)
+	var buf [32]byte
+	b := strconv.AppendUint(buf[:0], uint64(reason), 10)
+	b = append(b, ", "...)
+	b = strconv.AppendInt(b, int64(extError), 10)
+	return string(b)
 }
 
 // DropReason prints the drop reason in a human readable string
 func DropReason(reason uint8) string {
-	return DropReasonExt(reason, int8(0))
+	if err := dropErrorsArray[reason]; err != "" {
+		return err
+	}
+	var buf [16]byte
+	b := strconv.AppendUint(buf[:0], uint64(reason), 10)
+	b = append(b, ", 0"...)
+	return string(b)
 }

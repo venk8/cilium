@@ -4,8 +4,6 @@
 package loadbalancer
 
 import (
-	"fmt"
-	"maps"
 	"net/netip"
 	"slices"
 	"strconv"
@@ -189,10 +187,20 @@ func (pr *ProxyRedirect) String() string {
 	if pr == nil {
 		return ""
 	}
-	if len(pr.Ports) > 0 {
-		return fmt.Sprintf("%d (ports: %v)", pr.ProxyPort, pr.Ports)
+	if len(pr.Ports) == 0 {
+		return strconv.FormatUint(uint64(pr.ProxyPort), 10)
 	}
-	return strconv.FormatUint(uint64(pr.ProxyPort), 10)
+	var b strings.Builder
+	b.WriteString(strconv.FormatUint(uint64(pr.ProxyPort), 10))
+	b.WriteString(" (ports: [")
+	for i, port := range pr.Ports {
+		if i > 0 {
+			b.WriteByte(' ')
+		}
+		b.WriteString(strconv.FormatUint(uint64(port), 10))
+	}
+	b.WriteString("])")
+	return b.String()
 }
 
 // ProxyRedirects is a set of proxy redirects associated with a service.
@@ -248,11 +256,16 @@ func (p ProxyRedirects) String() string {
 	if len(p) == 1 {
 		return p[0].String()
 	}
-	ss := make([]string, len(p))
+	var b strings.Builder
+	b.WriteByte('[')
 	for i := range p {
-		ss[i] = p[i].String()
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteString(p[i].String())
 	}
-	return "[" + strings.Join(ss, ", ") + "]"
+	b.WriteByte(']')
+	return b.String()
 }
 
 // Clone returns a shallow clone of the service, e.g. for updating a service with UpsertService. Fields that are references
@@ -279,7 +292,7 @@ func (svc *Service) TableRow() []string {
 	if svc.ExtTrafficPolicy == svc.IntTrafficPolicy {
 		trafficPolicy = string(svc.ExtTrafficPolicy)
 	} else {
-		trafficPolicy = fmt.Sprintf("Ext=%s, Int=%s", svc.ExtTrafficPolicy, svc.IntTrafficPolicy)
+		trafficPolicy = "Ext=" + string(svc.ExtTrafficPolicy) + ", Int=" + string(svc.IntTrafficPolicy)
 	}
 
 	// Collapse the more rarely set fields into a single "Flags" column
@@ -307,7 +320,7 @@ func (svc *Service) TableRow() []string {
 	}
 
 	if svc.HealthCheckNodePort != 0 {
-		flags = append(flags, fmt.Sprintf("HealthCheckNodePort=%d", svc.HealthCheckNodePort))
+		flags = append(flags, "HealthCheckNodePort="+strconv.FormatUint(uint64(svc.HealthCheckNodePort), 10))
 	}
 
 	if svc.LoopbackHostPort {
@@ -342,15 +355,23 @@ func (svc *Service) TableRow() []string {
 }
 
 func (svc *Service) showPortNames() string {
+	if len(svc.PortNames) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(svc.PortNames))
+	for name := range svc.PortNames {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+
 	var b strings.Builder
-	n := len(svc.PortNames)
-	for _, name := range slices.Sorted(maps.Keys(svc.PortNames)) {
-		fmt.Fprintf(&b, "%s=%d", name, svc.PortNames[name])
-		n--
-		if n > 0 {
+	for i, name := range names {
+		if i > 0 {
 			b.WriteString(", ")
 		}
-
+		b.WriteString(name)
+		b.WriteByte('=')
+		b.WriteString(strconv.FormatUint(uint64(svc.PortNames[name]), 10))
 	}
 	return b.String()
 }
