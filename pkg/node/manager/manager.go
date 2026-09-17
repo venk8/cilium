@@ -408,6 +408,10 @@ func (m *manager) nodeAddressHasTunnelIP(address nodeTypes.Address) bool {
 }
 
 func (m *manager) nodeAddressHasEncryptKey() bool {
+	if !m.conf.NodeEncryptionEnabled() {
+		return false
+	}
+
 	optOut := false
 	if m.writer != nil && m.db != nil {
 		if localNode, _, found := m.writer.Table().Get(m.db.ReadTxn(), node.LocalNodeQuery); found {
@@ -420,10 +424,7 @@ func (m *manager) nodeAddressHasEncryptKey() bool {
 	// to encrypt something we know does not have an encryption policy installed
 	// in the datapath. By setting key=0 and tunnelIP this will result in traffic
 	// being sent unencrypted over overlay device.
-	return m.conf.NodeEncryptionEnabled() &&
-		// Also ignore any remote node's key if the local node opted to not perform
-		// node-to-node encryption
-		!optOut
+	return !optOut
 }
 
 // endpointEncryptionKey returns the encryption key index to use for the health
@@ -442,10 +443,18 @@ func (m *manager) endpointEncryptionKey(n *nodeTypes.Node) ipcacheTypes.EncryptK
 	return ipcacheTypes.EncryptKey(n.EncryptionKey)
 }
 
+var (
+	labelsWorldV4 = labels.Labels{labels.WorldLabelV4.Key: labels.WorldLabelV4}
+	labelsWorldV6 = labels.Labels{labels.WorldLabelV6.Key: labels.WorldLabelV6}
+	labelsWorld   = labels.Labels{labels.WorldLabel.Key: labels.WorldLabel}
+)
+
 func (m *manager) nodeIdentityLabels(n nodeTypes.Node) labels.Labels {
-	nodeLabels := labels.NewFrom(labels.LabelRemoteNode)
 	if n.IsLocal() {
-		nodeLabels = labels.NewFrom(labels.LabelHost)
+		if !m.conf.PolicyCIDRMatchesNodes() && !option.Config.PerNodeLabelsEnabled() {
+			return labels.LabelHost
+		}
+		nodeLabels := labels.NewFrom(labels.LabelHost)
 		if m.conf.PolicyCIDRMatchesNodes() {
 			for _, address := range n.IPAddresses {
 				addr, ok := netipx.FromStdIP(address.IP)
@@ -462,16 +471,28 @@ func (m *manager) nodeIdentityLabels(n nodeTypes.Node) labels.Labels {
 				}
 			}
 		}
+		if option.Config.PerNodeLabelsEnabled() {
+			lbls := labels.Map2Labels(n.Labels, labels.LabelSourceNode)
+			filteredLbls, _ := labelsfilter.FilterNodeLabels(lbls)
+			nodeLabels.MergeLabels(filteredLbls)
+			nodeLabels.MergeLabels(labels.Map2Labels(map[string]string{
+				k8sConst.PolicyLabelCluster: n.Cluster,
+			}, labels.LabelSourceK8s))
+		}
+		return nodeLabels
 	}
 
-	if option.Config.PerNodeLabelsEnabled() {
-		lbls := labels.Map2Labels(n.Labels, labels.LabelSourceNode)
-		filteredLbls, _ := labelsfilter.FilterNodeLabels(lbls)
-		nodeLabels.MergeLabels(filteredLbls)
-		nodeLabels.MergeLabels(labels.Map2Labels(map[string]string{
-			k8sConst.PolicyLabelCluster: n.Cluster,
-		}, labels.LabelSourceK8s))
+	if !option.Config.PerNodeLabelsEnabled() {
+		return labels.LabelRemoteNode
 	}
+
+	nodeLabels := labels.NewFrom(labels.LabelRemoteNode)
+	lbls := labels.Map2Labels(n.Labels, labels.LabelSourceNode)
+	filteredLbls, _ := labelsfilter.FilterNodeLabels(lbls)
+	nodeLabels.MergeLabels(filteredLbls)
+	nodeLabels.MergeLabels(labels.Map2Labels(map[string]string{
+		k8sConst.PolicyLabelCluster: n.Cluster,
+	}, labels.LabelSourceK8s))
 
 	return nodeLabels
 }
@@ -480,9 +501,14 @@ func (m *manager) nodeIdentityLabels(n nodeTypes.Node) labels.Labels {
 // reserved:world identity given the provided prefix and the
 // current cluster configuration in terms of dual-stack.
 func worldLabelForPrefix(prefix netip.Prefix) labels.Labels {
-	lbls := make(labels.Labels, 1)
-	lbls.AddWorldLabel(prefix.Addr())
-	return lbls
+	addr := prefix.Addr()
+	switch {
+	case addr.Is4() && option.Config.EnableIPv6:
+		return labelsWorldV4
+	case addr.Is6() && option.Config.EnableIPv4:
+		return labelsWorldV6
+	}
+	return labelsWorld
 }
 
 // NodeUpdated is called after the information of a node has been updated. The
@@ -519,31 +545,39 @@ func (m *manager) NodeUpdated(n nodeTypes.Node) {
 	resource := ipcacheTypes.NewResourceID(ipcacheTypes.ResourceKindNode, "", n.Name)
 	nodeLabels := m.nodeIdentityLabels(n)
 
-	var healthIPsAdded, ingressIPsAdded, podCIDRsAdded []netip.Prefix
+	var healthIPsAdded, ingressIPsAdded []netip.Prefix
 	nodeIPsAdded := make([]netip.Prefix, 0, len(n.IPAddresses))
+	var podCIDRsAdded []netip.Prefix
+
+	mutatorOpts := m.prefixClusterMutatorFn(&n)
+
+	var key uint8
+	if m.nodeAddressHasEncryptKey() {
+		key = n.EncryptionKey
+	}
+	encryptKey := ipcacheTypes.EncryptKey(key)
+
+	endpointFlags := ipcacheTypes.EndpointFlags{}
+	if n.Cluster != m.clusterInfo.Name {
+		endpointFlags.SetRemoteCluster(true)
+	}
+
+	policyCIDRMatchesNodes := m.conf.PolicyCIDRMatchesNodes()
+	nodeEncryptionOrHostFirewall := m.conf.NodeEncryptionEnabled() || m.conf.EnableHostFirewall
 
 	for _, address := range n.IPAddresses {
 		prefix := ip.IPToNetPrefix(address.IP)
 		var prefixCluster cmtypes.PrefixCluster
-		if address.Type == addressing.NodeCiliumInternalIP {
-			prefixCluster = cmtypes.PrefixClusterFrom(prefix, m.prefixClusterMutatorFn(&n)...)
+		isInternalIP := address.Type == addressing.NodeCiliumInternalIP
+		if isInternalIP {
+			prefixCluster = cmtypes.PrefixClusterFrom(prefix, mutatorOpts...)
 		} else {
 			prefixCluster = cmtypes.NewLocalPrefixCluster(prefix)
 		}
 
 		var tunnelIP netip.Addr
-		if m.nodeAddressHasTunnelIP(address) {
+		if isInternalIP || nodeEncryptionOrHostFirewall {
 			tunnelIP = nodeIP
-		}
-
-		var key uint8
-		if m.nodeAddressHasEncryptKey() {
-			key = n.EncryptionKey
-		}
-
-		endpointFlags := ipcacheTypes.EndpointFlags{}
-		if n.Cluster != m.clusterInfo.Name {
-			endpointFlags.SetRemoteCluster(true)
 		}
 
 		// We expect the node manager to have a source of either Kubernetes,
@@ -561,13 +595,13 @@ func (m *manager) NodeUpdated(n nodeTypes.Node) {
 		existing := m.ipcache.GetMetadataSourceByPrefix(prefixCluster)
 		overwrite := source.AllowOverwrite(existing, n.Source)
 		if !overwrite && existing != source.KubeAPIServer &&
-			!(address.Type == addressing.NodeCiliumInternalIP && m.conf.IsLocalRouterIP(address.ToString())) {
+			!(isInternalIP && m.conf.IsLocalRouterIP(address.ToString())) {
 			dpUpdate = false
 		}
 
 		lbls := nodeLabels
 		// Add the CIDR labels for this node, if we allow selecting nodes by CIDR
-		if m.conf.PolicyCIDRMatchesNodes() {
+		if policyCIDRMatchesNodes {
 			lbls = labels.NewFrom(nodeLabels)
 			lbls.MergeLabels(labels.GetCIDRLabels(prefixCluster.AsPrefix()))
 		}
@@ -577,7 +611,7 @@ func (m *manager) NodeUpdated(n nodeTypes.Node) {
 		m.ipcache.UpsertMetadata(prefixCluster, n.Source, resource,
 			lbls,
 			ipcacheTypes.TunnelPeer{Addr: tunnelIP},
-			ipcacheTypes.EncryptKey(key),
+			encryptKey,
 			endpointFlags)
 		nodeIPsAdded = append(nodeIPsAdded, prefixCluster.AsPrefix())
 	}
@@ -589,25 +623,36 @@ func (m *manager) NodeUpdated(n nodeTypes.Node) {
 		ipv4PodCIDRs := n.GetIPv4AllocCIDRs()
 		ipv6PodCIDRs := n.GetIPv6AllocCIDRs()
 
-		mu := make([]ipcache.MU, 0, len(ipv4PodCIDRs)+len(ipv6PodCIDRs))
-		for entry := range m.podCIDREntries(n.Source, resource, m.cidrsToPrefixesCluster(&n, ipv4PodCIDRs...), nodeIP, n.EncryptionKey) {
-			mu = append(mu, entry)
-			podCIDRsAdded = append(podCIDRsAdded, entry.Prefix.AsPrefix())
+		totalCIDRs := len(ipv4PodCIDRs) + len(ipv6PodCIDRs)
+		if totalCIDRs > 0 {
+			podCIDRsAdded = make([]netip.Prefix, 0, totalCIDRs)
+			mu := make([]ipcache.MU, 0, totalCIDRs)
+			for entry := range m.podCIDREntries(n.Source, resource, m.cidrsToPrefixesCluster(&n, ipv4PodCIDRs...), nodeIP, n.EncryptionKey) {
+				mu = append(mu, entry)
+				podCIDRsAdded = append(podCIDRsAdded, entry.Prefix.AsPrefix())
+			}
+			for entry := range m.podCIDREntries(n.Source, resource, m.cidrsToPrefixesCluster(&n, ipv6PodCIDRs...), nodeIP, n.EncryptionKey) {
+				mu = append(mu, entry)
+				podCIDRsAdded = append(podCIDRsAdded, entry.Prefix.AsPrefix())
+			}
+			if len(mu) > 0 {
+				m.ipcache.UpsertMetadataBatch(mu...)
+			}
 		}
-		for entry := range m.podCIDREntries(n.Source, resource, m.cidrsToPrefixesCluster(&n, ipv6PodCIDRs...), nodeIP, n.EncryptionKey) {
-			mu = append(mu, entry)
-			podCIDRsAdded = append(podCIDRsAdded, entry.Prefix.AsPrefix())
-		}
-		m.ipcache.UpsertMetadataBatch(mu...)
 	}
 
+	endpointEncryptKey := m.endpointEncryptionKey(&n)
+
 	for _, address := range [...]netip.Addr{n.IPv4HealthIP.Addr, n.IPv6HealthIP.Addr} {
+		if !address.IsValid() {
+			continue
+		}
 		prefix := netip.PrefixFrom(address, address.BitLen())
 		if !prefix.IsValid() {
 			continue
 		}
 
-		prefixCluster := cmtypes.PrefixClusterFrom(prefix, m.prefixClusterMutatorFn(&n)...)
+		prefixCluster := cmtypes.PrefixClusterFrom(prefix, mutatorOpts...)
 
 		if !source.AllowOverwrite(m.ipcache.GetMetadataSourceByPrefix(prefixCluster), n.Source) {
 			dpUpdate = false
@@ -616,17 +661,20 @@ func (m *manager) NodeUpdated(n nodeTypes.Node) {
 		m.ipcache.UpsertMetadata(prefixCluster, n.Source, resource,
 			labels.LabelHealth,
 			ipcacheTypes.TunnelPeer{Addr: nodeIP},
-			m.endpointEncryptionKey(&n))
+			endpointEncryptKey)
 		healthIPsAdded = append(healthIPsAdded, prefixCluster.AsPrefix())
 	}
 
 	for _, address := range [...]netip.Addr{n.IPv4IngressIP.Addr, n.IPv6IngressIP.Addr} {
+		if !address.IsValid() {
+			continue
+		}
 		prefix := netip.PrefixFrom(address, address.BitLen())
 		if !prefix.IsValid() {
 			continue
 		}
 
-		prefixCluster := cmtypes.PrefixClusterFrom(prefix, m.prefixClusterMutatorFn(&n)...)
+		prefixCluster := cmtypes.PrefixClusterFrom(prefix, mutatorOpts...)
 
 		if !source.AllowOverwrite(m.ipcache.GetMetadataSourceByPrefix(prefixCluster), n.Source) {
 			dpUpdate = false
@@ -635,7 +683,7 @@ func (m *manager) NodeUpdated(n nodeTypes.Node) {
 		m.ipcache.UpsertMetadata(prefixCluster, n.Source, resource,
 			labels.LabelIngress,
 			ipcacheTypes.TunnelPeer{Addr: nodeIP},
-			m.endpointEncryptionKey(&n))
+			endpointEncryptKey)
 		ingressIPsAdded = append(ingressIPsAdded, prefixCluster.AsPrefix())
 	}
 
@@ -745,8 +793,9 @@ func (m *manager) deleteFromNodeTable(src source.Source, nodeID nodeTypes.Identi
 
 func (m *manager) cidrsToPrefixesCluster(n *nodeTypes.Node, prefixes ...netip.Prefix) iter.Seq[cmtypes.PrefixCluster] {
 	return func(yield func(cmtypes.PrefixCluster) bool) {
+		mutatorOpts := m.prefixClusterMutatorFn(n)
 		for _, prefix := range prefixes {
-			if !yield(cmtypes.PrefixClusterFrom(prefix, m.prefixClusterMutatorFn(n)...)) {
+			if !yield(cmtypes.PrefixClusterFrom(prefix, mutatorOpts...)) {
 				return
 			}
 		}
@@ -792,6 +841,8 @@ func (m *manager) removeNodeFromIPCache(oldNode nodeTypes.Node, resource ipcache
 		oldNodeIP, _ = netipx.FromStdIP(nIP)
 	}
 
+	oldMutatorOpts := m.prefixClusterMutatorFn(&oldNode)
+
 	// Delete the old node IP addresses if they have changed in this node.
 	for _, address := range oldNode.IPAddresses {
 		prefix := ip.IPToNetPrefix(address.IP)
@@ -801,7 +852,7 @@ func (m *manager) removeNodeFromIPCache(oldNode nodeTypes.Node, resource ipcache
 
 		var oldPrefixCluster cmtypes.PrefixCluster
 		if address.Type == addressing.NodeCiliumInternalIP {
-			oldPrefixCluster = cmtypes.PrefixClusterFrom(prefix, m.prefixClusterMutatorFn(&oldNode)...)
+			oldPrefixCluster = cmtypes.PrefixClusterFrom(prefix, oldMutatorOpts...)
 		} else {
 			oldPrefixCluster = cmtypes.NewLocalPrefixCluster(prefix)
 		}
@@ -815,30 +866,39 @@ func (m *manager) removeNodeFromIPCache(oldNode nodeTypes.Node, resource ipcache
 		oldIPv4PodCIDRs := oldNode.GetIPv4AllocCIDRs()
 		oldIPv6PodCIDRs := oldNode.GetIPv6AllocCIDRs()
 
-		mu := make([]ipcache.MU, 0, len(oldIPv4PodCIDRs)+len(oldIPv6PodCIDRs))
-		for entry := range m.podCIDREntries(oldNode.Source, resource, m.cidrsToPrefixesCluster(&oldNode, oldIPv4PodCIDRs...), oldNodeIP, oldNode.EncryptionKey) {
-			if slices.Contains(podCIDRsAdded, entry.Prefix.AsPrefix()) {
+		var mu []ipcache.MU
+		for _, cidr := range oldIPv4PodCIDRs {
+			if slices.Contains(podCIDRsAdded, cidr) {
 				continue
 			}
-			mu = append(mu, entry)
+			for entry := range m.podCIDREntries(oldNode.Source, resource, m.cidrsToPrefixesCluster(&oldNode, cidr), oldNodeIP, oldNode.EncryptionKey) {
+				mu = append(mu, entry)
+			}
 		}
-		for entry := range m.podCIDREntries(oldNode.Source, resource, m.cidrsToPrefixesCluster(&oldNode, oldIPv6PodCIDRs...), oldNodeIP, oldNode.EncryptionKey) {
-			if slices.Contains(podCIDRsAdded, entry.Prefix.AsPrefix()) {
+		for _, cidr := range oldIPv6PodCIDRs {
+			if slices.Contains(podCIDRsAdded, cidr) {
 				continue
 			}
-			mu = append(mu, entry)
+			for entry := range m.podCIDREntries(oldNode.Source, resource, m.cidrsToPrefixesCluster(&oldNode, cidr), oldNodeIP, oldNode.EncryptionKey) {
+				mu = append(mu, entry)
+			}
 		}
-		m.ipcache.RemoveMetadataBatch(mu...)
+		if len(mu) > 0 {
+			m.ipcache.RemoveMetadataBatch(mu...)
+		}
 	}
 
 	// Delete the old health IP addresses if they have changed in this node.
 	for _, address := range [...]netip.Addr{oldNode.IPv4HealthIP.Addr, oldNode.IPv6HealthIP.Addr} {
+		if !address.IsValid() {
+			continue
+		}
 		prefix := netip.PrefixFrom(address, address.BitLen())
 		if !prefix.IsValid() || slices.Contains(healthIPsAdded, prefix) {
 			continue
 		}
 
-		prefixCluster := cmtypes.PrefixClusterFrom(prefix, m.prefixClusterMutatorFn(&oldNode)...)
+		prefixCluster := cmtypes.PrefixClusterFrom(prefix, oldMutatorOpts...)
 
 		m.ipcache.RemoveMetadata(prefixCluster, resource,
 			labels.LabelHealth,
@@ -847,12 +907,15 @@ func (m *manager) removeNodeFromIPCache(oldNode nodeTypes.Node, resource ipcache
 
 	// Delete the old ingress IP addresses if they have changed in this node.
 	for _, address := range [...]netip.Addr{oldNode.IPv4IngressIP.Addr, oldNode.IPv6IngressIP.Addr} {
+		if !address.IsValid() {
+			continue
+		}
 		prefix := netip.PrefixFrom(address, address.BitLen())
 		if !prefix.IsValid() || slices.Contains(ingressIPsAdded, prefix) {
 			continue
 		}
 
-		prefixCluster := cmtypes.PrefixClusterFrom(prefix, m.prefixClusterMutatorFn(&oldNode)...)
+		prefixCluster := cmtypes.PrefixClusterFrom(prefix, oldMutatorOpts...)
 
 		m.ipcache.RemoveMetadata(prefixCluster, resource,
 			labels.LabelIngress,

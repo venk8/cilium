@@ -237,7 +237,7 @@ func (elm *etcdLeaseManager) Wait() {
 
 func (elm *etcdLeaseManager) newSession(ctx context.Context) (session *concurrency.Session, err error) {
 	defer func(duration *spanstat.SpanStat) {
-		increaseMetric("lease", metricSet, "AcquireLease", duration.EndError(err).Total(), err)
+		increaseMetric("lease", metricSet, "AcquireLease", duration.EndErrorTotal(err), err)
 	}(spanstat.Start())
 	resp, err := elm.client.Grant(ctx, int64(elm.ttl.Seconds()))
 	if err != nil {

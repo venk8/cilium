@@ -307,21 +307,32 @@ func ParseEndpointSliceV1(logger *slog.Logger, ep *slim_discovery_v1.EndpointSli
 	}
 
 	// Parse the ports shared by all the backends.
-	ports := make(map[loadbalancer.L4Addr][]string, len(ep.Ports))
-	for _, port := range ep.Ports {
-		if name, lbPort, ok := parseEndpointPortV1(port); ok {
-			ports[lbPort] = append(ports[lbPort], name)
+	var ports map[loadbalancer.L4Addr][]string
+	if len(ep.Ports) > 0 {
+		ports = make(map[loadbalancer.L4Addr][]string, len(ep.Ports))
+		for _, port := range ep.Ports {
+			if name, lbPort, ok := parseEndpointPortV1(port); ok {
+				if existing, exists := ports[lbPort]; exists {
+					ports[lbPort] = append(existing, name)
+				} else {
+					ports[lbPort] = []string{name}
+				}
+			}
 		}
+	}
+
+	var backends []Backend
+	if len(ep.Endpoints) > 0 {
+		backends = make([]Backend, len(ep.Endpoints))
 	}
 
 	for i, sub := range ep.Endpoints {
 		// Construct the backend configuration shared by all the addresses in this slice.
-		backend := &Backend{
-			Conditions:  ParseEndpointConditionsV1(sub.Conditions),
-			Ports:       ports,
-			Weight:      weight,
-			Maintenance: maintenance,
-		}
+		backend := &backends[i]
+		backend.Conditions = ParseEndpointConditionsV1(sub.Conditions)
+		backend.Ports = ports
+		backend.Weight = weight
+		backend.Maintenance = maintenance
 
 		if sub.NodeName != nil {
 			backend.NodeName = *sub.NodeName

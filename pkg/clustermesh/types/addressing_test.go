@@ -291,4 +291,18 @@ func BenchmarkPrefixClusterString(b *testing.B) {
 	}
 }
 
+func BenchmarkParseAddrCluster(b *testing.B) {
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = ParseAddrCluster("10.0.0.1")
+	}
+}
 
+func BenchmarkParseAddrClusterWithCluster(b *testing.B) {
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = ParseAddrCluster("10.0.0.1@42")
+	}
+}

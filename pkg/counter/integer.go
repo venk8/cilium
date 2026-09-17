@@ -24,6 +24,12 @@ func (i IntCounter) Delete(key int) bool {
 	return Counter[int](i).Delete(key)
 }
 
+// Has returns true if the specified integer key has a non-zero refcount.
+func (i IntCounter) Has(key int) bool {
+	return Counter[int](i).Has(key)
+}
+
+
 // DeepCopy makes a new copy of the received IntCounter.
 func (i IntCounter) DeepCopy() IntCounter {
 	return IntCounter(Counter[int](i).DeepCopy())

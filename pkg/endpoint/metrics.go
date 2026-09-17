@@ -128,6 +128,16 @@ func (s *regenerationStatistics) GetMap() map[string]*spanstat.SpanStat {
 type endpointPolicyStatusMap struct {
 	mutex lock.Mutex
 	m     map[uint16]epPolicyStatus
+
+	cachedVec                 metric.Vec[metric.Gauge]
+	gaugeNone                 metric.Gauge
+	gaugeEgress               metric.Gauge
+	gaugeIngress              metric.Gauge
+	gaugeBoth                 metric.Gauge
+	gaugeAuditEgress          metric.Gauge
+	gaugeAuditIngress         metric.Gauge
+	gaugeAuditBoth            metric.Gauge
+	gaugeMissingProxyRedirect metric.Gauge
 }
 
 type epPolicyStatus struct {
@@ -173,6 +183,27 @@ func (epPolicyMaps *endpointPolicyStatusMap) UpdateMetrics() {
 	)
 
 	epPolicyMaps.mutex.Lock()
+	vec := metrics.PolicyEndpointStatus
+	if epPolicyMaps.cachedVec != vec {
+		epPolicyMaps.cachedVec = vec
+		epPolicyMaps.gaugeNone = vec.WithLabelValues(string(models.EndpointPolicyEnabledNone))
+		epPolicyMaps.gaugeEgress = vec.WithLabelValues(string(models.EndpointPolicyEnabledEgress))
+		epPolicyMaps.gaugeIngress = vec.WithLabelValues(string(models.EndpointPolicyEnabledIngress))
+		epPolicyMaps.gaugeBoth = vec.WithLabelValues(string(models.EndpointPolicyEnabledBoth))
+		epPolicyMaps.gaugeAuditEgress = vec.WithLabelValues(string(models.EndpointPolicyEnabledAuditDashEgress))
+		epPolicyMaps.gaugeAuditIngress = vec.WithLabelValues(string(models.EndpointPolicyEnabledAuditDashIngress))
+		epPolicyMaps.gaugeAuditBoth = vec.WithLabelValues(string(models.EndpointPolicyEnabledAuditDashBoth))
+		epPolicyMaps.gaugeMissingProxyRedirect = metrics.PolicyMissingProxyRedirects.WithLabelValues()
+	}
+	gNone := epPolicyMaps.gaugeNone
+	gEgress := epPolicyMaps.gaugeEgress
+	gIngress := epPolicyMaps.gaugeIngress
+	gBoth := epPolicyMaps.gaugeBoth
+	gAuditEgress := epPolicyMaps.gaugeAuditEgress
+	gAuditIngress := epPolicyMaps.gaugeAuditIngress
+	gAuditBoth := epPolicyMaps.gaugeAuditBoth
+	gMissingRedirect := epPolicyMaps.gaugeMissingProxyRedirect
+
 	for _, value := range epPolicyMaps.m {
 		switch value.enforcementStatus {
 		case models.EndpointPolicyEnabledNone:
@@ -194,12 +225,12 @@ func (epPolicyMaps *endpointPolicyStatusMap) UpdateMetrics() {
 	}
 	epPolicyMaps.mutex.Unlock()
 
-	metrics.PolicyEndpointStatus.WithLabelValues(string(models.EndpointPolicyEnabledNone)).Set(countNone)
-	metrics.PolicyEndpointStatus.WithLabelValues(string(models.EndpointPolicyEnabledEgress)).Set(countEgress)
-	metrics.PolicyEndpointStatus.WithLabelValues(string(models.EndpointPolicyEnabledIngress)).Set(countIngress)
-	metrics.PolicyEndpointStatus.WithLabelValues(string(models.EndpointPolicyEnabledBoth)).Set(countBoth)
-	metrics.PolicyEndpointStatus.WithLabelValues(string(models.EndpointPolicyEnabledAuditDashEgress)).Set(countAuditEgress)
-	metrics.PolicyEndpointStatus.WithLabelValues(string(models.EndpointPolicyEnabledAuditDashIngress)).Set(countAuditIngress)
-	metrics.PolicyEndpointStatus.WithLabelValues(string(models.EndpointPolicyEnabledAuditDashBoth)).Set(countAuditBoth)
-	metrics.PolicyMissingProxyRedirects.WithLabelValues().Set(float64(totalMissingRedirects))
+	gNone.Set(countNone)
+	gEgress.Set(countEgress)
+	gIngress.Set(countIngress)
+	gBoth.Set(countBoth)
+	gAuditEgress.Set(countAuditEgress)
+	gAuditIngress.Set(countAuditIngress)
+	gAuditBoth.Set(countAuditBoth)
+	gMissingRedirect.Set(float64(totalMissingRedirects))
 }

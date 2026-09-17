@@ -247,18 +247,24 @@ func (e *EndpointStatus) GetModelWithLimit(limit int) []*models.EndpointStatusCh
 	if limit > 0 && limit < n {
 		n = limit
 	}
+	if n == 0 {
+		return nil
+	}
+	items := make([]models.EndpointStatusChange, n)
 	list := make([]*models.EndpointStatusChange, 0, n)
 	for i := e.lastIndex(); ; i-- {
 		if i < 0 {
 			i = maxLogs - 1
 		}
 		if i < len(e.Log) && e.Log[i] != nil {
-			list = append(list, &models.EndpointStatusChange{
+			idx := len(list)
+			items[idx] = models.EndpointStatusChange{
 				Timestamp: e.Log[i].Timestamp.Format(time.RFC3339),
 				Code:      e.Log[i].Status.Code.String(),
 				Message:   e.Log[i].Status.Msg,
 				State:     models.EndpointState(e.Log[i].Status.State),
-			})
+			}
+			list = append(list, &items[idx])
 			if limit > 0 && len(list) >= limit {
 				break
 			}

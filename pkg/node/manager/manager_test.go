@@ -80,20 +80,28 @@ func AddrOrPrefixToIP(ip string) (netip.Prefix, error) {
 func (i *ipcacheMock) Upsert(ip string, hostIP net.IP, hostKey uint8, k8sMeta *ipcache.K8sMetadata, newIdentity ipcache.Identity, aux ...ipcache.IPMetadata) (bool, error) {
 	addr, err := AddrOrPrefixToIP(ip)
 	if err != nil {
-		i.events <- nodeEvent{fmt.Sprintf("upsert failed: %s", err), addr, aux}
+		if i.events != nil {
+			i.events <- nodeEvent{fmt.Sprintf("upsert failed: %s", err), addr, aux}
+		}
 		return false, err
 	}
-	i.events <- nodeEvent{"upsert", addr, aux}
+	if i.events != nil {
+		i.events <- nodeEvent{"upsert", addr, aux}
+	}
 	return false, nil
 }
 
 func (i *ipcacheMock) Delete(ip string, source source.Source, aux ...ipcache.IPMetadata) bool {
 	addr, err := AddrOrPrefixToIP(ip)
 	if err != nil {
-		i.events <- nodeEvent{fmt.Sprintf("delete failed: %s", err), addr, aux}
+		if i.events != nil {
+			i.events <- nodeEvent{fmt.Sprintf("delete failed: %s", err), addr, aux}
+		}
 		return false
 	}
-	i.events <- nodeEvent{"delete", addr, aux}
+	if i.events != nil {
+		i.events <- nodeEvent{"delete", addr, aux}
+	}
 	return false
 }
 
@@ -1394,3 +1402,74 @@ func TestNodeTableInitializersCompleteInEitherOrder(t *testing.T) {
 		})
 	}
 }
+
+func BenchmarkWorldLabelForPrefix(b *testing.B) {
+	prefix := netip.MustParsePrefix("10.244.0.0/24")
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = worldLabelForPrefix(prefix)
+	}
+}
+
+func BenchmarkRemoveNodeFromIPCache_UnchangedCIDRs(b *testing.B) {
+	ipcacheMock := newIPcacheMock()
+	dp := fakenode.NewHandler()
+	h, _ := cell.NewSimpleHealth()
+	logger := hivetest.Logger(b)
+	mngr, err := New(logger, &option.DaemonConfig{}, cmtypes.DefaultClusterInfo, tunnel.Config{}, ipcacheMock, NewNodeMetrics(), h, nil, nil, nil, fakewireguard.Config{}, nil, testClusterSizeDependantInterval)
+	require.NoError(b, err)
+	mngr.Subscribe(dp)
+	defer mngr.Stop(context.TODO())
+
+	m := mngr
+	node := nodeTypes.Node{
+		Name:          "node-1",
+		Source:        source.CustomResource,
+		IPv4AllocCIDR: nodeTypes.PrefixFrom(netip.MustParsePrefix("10.244.0.0/24")),
+		IPv6AllocCIDR: nodeTypes.PrefixFrom(netip.MustParsePrefix("fd00::/64")),
+		IPAddresses: []nodeTypes.Address{
+			{Type: addressing.NodeInternalIP, IP: net.ParseIP("10.0.0.1")},
+		},
+	}
+	resource := ipcacheTypes.NewResourceID(ipcacheTypes.ResourceKindNode, "", "node-1")
+	nodeIPsAdded := []netip.Prefix{netip.MustParsePrefix("10.0.0.1/32")}
+	podCIDRsAdded := []netip.Prefix{netip.MustParsePrefix("10.244.0.0/24"), netip.MustParsePrefix("fd00::/64")}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		m.removeNodeFromIPCache(node, resource, nodeIPsAdded, nil, nil, podCIDRsAdded)
+	}
+}
+
+func BenchmarkNodeUpdated(b *testing.B) {
+	ipcacheMock := &ipcacheMock{}
+	dp := fakenode.NewHandler()
+	h, _ := cell.NewSimpleHealth()
+	logger := slog.New(slog.DiscardHandler)
+	mngr, err := New(logger, &option.DaemonConfig{}, cmtypes.DefaultClusterInfo, tunnel.Config{}, ipcacheMock, NewNodeMetrics(), h, nil, nil, nil, fakewireguard.Config{}, nil, testClusterSizeDependantInterval)
+	require.NoError(b, err)
+	mngr.Subscribe(dp)
+	defer mngr.Stop(context.TODO())
+
+	node := nodeTypes.Node{
+		Name:   "node-1",
+		Source: source.CustomResource,
+		IPAddresses: []nodeTypes.Address{
+			{Type: addressing.NodeInternalIP, IP: net.ParseIP("10.0.0.1")},
+			{Type: addressing.NodeCiliumInternalIP, IP: net.ParseIP("10.244.0.1")},
+		},
+		IPv4AllocCIDR: nodeTypes.PrefixFrom(netip.MustParsePrefix("10.244.0.0/24")),
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		mngr.NodeUpdated(node)
+	}
+}
+
+
+
+

@@ -33,7 +33,7 @@ func createMap(spec *ebpf.MapSpec, opts *ebpf.MapOptions) (*ebpf.Map, error) {
 	m, err := ebpf.NewMapWithOptions(spec, *opts)
 
 	if metrics.BPFSyscallDuration.IsEnabled() {
-		metrics.BPFSyscallDuration.WithLabelValues(metricOpCreate, metrics.Error2Outcome(err)).Observe(duration.End(err == nil).Total().Seconds())
+		metrics.BPFSyscallDuration.WithLabelValues(metricOpCreate, metrics.Error2Outcome(err)).Observe(duration.EndTotal(err == nil).Seconds())
 	}
 
 	return m, err

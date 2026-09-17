@@ -4,6 +4,7 @@
 package reflectors
 
 import (
+	"fmt"
 	"log/slog"
 	"maps"
 	"slices"
@@ -51,6 +52,46 @@ func BenchmarkParseEndpointSlice(b *testing.B) {
 		panic(err)
 	}
 	epSlice := obj.(*slim_discovery_v1.EndpointSlice)
+	logger := hivetest.Logger(b)
+
+	for b.Loop() {
+		k8s.ParseEndpointSliceV1(logger, epSlice)
+	}
+	b.ReportMetric(float64(b.N)/b.Elapsed().Seconds(), "endpointslices/sec")
+}
+
+func BenchmarkParseEndpointSlice_10Endpoints(b *testing.B) {
+	obj, err := testutils.DecodeFile("../benchmark/testdata/endpointslice.yaml")
+	if err != nil {
+		panic(err)
+	}
+	epSlice := obj.(*slim_discovery_v1.EndpointSlice).DeepCopy()
+	baseEp := epSlice.Endpoints[0]
+	epSlice.Endpoints = make([]slim_discovery_v1.Endpoint, 10)
+	for i := range epSlice.Endpoints {
+		epSlice.Endpoints[i] = *baseEp.DeepCopy()
+		epSlice.Endpoints[i].Addresses = []string{fmt.Sprintf("10.244.%d.%d", i/256, i%256)}
+	}
+	logger := hivetest.Logger(b)
+
+	for b.Loop() {
+		k8s.ParseEndpointSliceV1(logger, epSlice)
+	}
+	b.ReportMetric(float64(b.N)/b.Elapsed().Seconds(), "endpointslices/sec")
+}
+
+func BenchmarkParseEndpointSlice_100Endpoints(b *testing.B) {
+	obj, err := testutils.DecodeFile("../benchmark/testdata/endpointslice.yaml")
+	if err != nil {
+		panic(err)
+	}
+	epSlice := obj.(*slim_discovery_v1.EndpointSlice).DeepCopy()
+	baseEp := epSlice.Endpoints[0]
+	epSlice.Endpoints = make([]slim_discovery_v1.Endpoint, 100)
+	for i := range epSlice.Endpoints {
+		epSlice.Endpoints[i] = *baseEp.DeepCopy()
+		epSlice.Endpoints[i].Addresses = []string{fmt.Sprintf("10.244.%d.%d", i/256, i%256)}
+	}
 	logger := hivetest.Logger(b)
 
 	for b.Loop() {
