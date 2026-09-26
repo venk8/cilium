@@ -15,6 +15,29 @@
  */
 #define BPF_TEST
 
+/* Tests run as XDP programs, which can't call the socket storage helpers.
+ * Default to sockets without storage; tests exercising socket storage
+ * redefine sk_storage_get and sk_storage_delete with stateful mocks.
+ */
+#define BPF_SK_STORAGE_MOCKED
+static __always_inline void *
+mock_bpf_sk_storage_get_common(void *map __maybe_unused,
+			       void *sk __maybe_unused,
+			       void *value __maybe_unused,
+			       __u64 flags __maybe_unused)
+{
+	return NULL;
+}
+
+static __always_inline int
+mock_bpf_sk_storage_delete_common(void *map __maybe_unused, void *sk __maybe_unused)
+{
+	return -ENOENT;
+}
+
+#define sk_storage_get mock_bpf_sk_storage_get_common
+#define sk_storage_delete mock_bpf_sk_storage_delete_common
+
 #ifndef ___bpf_concat
 #define ___bpf_concat(a, b) a ## b
 #endif
