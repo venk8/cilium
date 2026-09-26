@@ -6,7 +6,6 @@ package bpf
 import (
 	"fmt"
 	"log/slog"
-	"maps"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/asm"
@@ -116,13 +115,13 @@ func removeUnusedMaps(spec *ebpf.CollectionSpec, fixed *set.Set[string], reach r
 		logger.Debug("Removed unused maps from CollectionSpec", logfields.Maps, deleted)
 	}
 
-	// Clean up MapReplacements for maps that were pruned to prevent ebpf-go
-	// from failing with "replacement map not found in CollectionSpec".
+	// A replacement for a map pruned above has nothing left to replace, and
+	// ebpf-go rejects replacements for maps missing from the spec. Only drop
+	// those, so a replacement that never matched a map still fails loudly.
 	if opts != nil {
-		maps.DeleteFunc(opts.CollectionOptions.MapReplacements, func(key string, _ *ebpf.Map) bool {
-			_, ok := spec.Maps[key]
-			return !ok
-		})
+		for _, name := range deleted {
+			delete(opts.CollectionOptions.MapReplacements, name)
+		}
 	}
 
 	return nil
