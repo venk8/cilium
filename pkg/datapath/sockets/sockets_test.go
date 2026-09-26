@@ -4,6 +4,7 @@
 package sockets
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -11,28 +12,27 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"syscall"
 	"testing"
 	"time"
-
-	"github.com/cilium/hive/hivetest"
-
-	"github.com/cilium/cilium/pkg/testutils"
-
-	"github.com/cilium/cilium/pkg/bpf"
-	"github.com/cilium/cilium/pkg/datapath/linux/safenetlink"
-	"github.com/cilium/cilium/pkg/datapath/loader"
-	"github.com/cilium/cilium/pkg/loadbalancer/maps"
-	"github.com/cilium/cilium/pkg/testutils/netns"
-
-	"github.com/cilium/ebpf"
-
 	"unsafe"
 
+	"github.com/cilium/ebpf"
+	"github.com/cilium/hive/hivetest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
+
+	"github.com/cilium/cilium/pkg/bpf"
+	"github.com/cilium/cilium/pkg/byteorder"
+	bpfgen "github.com/cilium/cilium/pkg/datapath/bpf"
+	"github.com/cilium/cilium/pkg/datapath/linux/safenetlink"
+	"github.com/cilium/cilium/pkg/datapath/loader"
+	"github.com/cilium/cilium/pkg/loadbalancer/maps"
+	"github.com/cilium/cilium/pkg/testutils"
+	"github.com/cilium/cilium/pkg/testutils/netns"
 )
 
 func TestSocketReqSerialize(t *testing.T) {
@@ -236,13 +236,26 @@ type testBPFSocketDestroyer struct {
 
 	sockRevNat4Map *bpf.Map
 	sockRevNat6Map *bpf.Map
+
+	sockRevNat4StMap *ebpf.Map
+	sockRevNat6StMap *ebpf.Map
 }
 
 func newTestBPFSocketDestroyer(tb testing.TB) socketDestroyerTester {
 	tb.Helper()
 
-	err := os.MkdirAll(bpf.TCGlobalsPath(), 0755)
-	require.NoError(tb, err)
+	require.NoError(tb, bpf.MkdirBPF(bpf.TCGlobalsPath()))
+
+	// Loading the programs pins the socket storage maps by name. Remove those
+	// pins afterwards, unless they already existed, e.g. from a running agent.
+	var stPins []string
+	for _, name := range []string{maps.SockRevNat4StMapName, maps.SockRevNat6StMapName} {
+		pin := filepath.Join(bpf.TCGlobalsPath(), name)
+		stPins = append(stPins, pin)
+		if _, err := os.Stat(pin); errors.Is(err, os.ErrNotExist) {
+			tb.Cleanup(func() { os.Remove(pin) })
+		}
+	}
 
 	sockRevNat4Map := bpf.NewMap(maps.SockRevNat4MapName,
 		ebpf.LRUHash,
@@ -269,14 +282,45 @@ func newTestBPFSocketDestroyer(tb testing.TB) socketDestroyerTester {
 		progs.CilSockTcpDestroyV6.Close()
 	})
 
+	sockRevNat4StMap, err := ebpf.LoadPinnedMap(stPins[0], nil)
+	require.NoError(tb, err)
+	tb.Cleanup(func() { sockRevNat4StMap.Close() })
+	sockRevNat6StMap, err := ebpf.LoadPinnedMap(stPins[1], nil)
+	require.NoError(tb, err)
+	tb.Cleanup(func() { sockRevNat6StMap.Close() })
+
 	return &testBPFSocketDestroyer{
 		bpfSocketDestroyer: &bpfSocketDestroyer{
 			progs:        progs,
 			filterSetter: filterSetter,
 		},
-		sockRevNat4Map: sockRevNat4Map,
-		sockRevNat6Map: sockRevNat6Map,
+		sockRevNat4Map:   sockRevNat4Map,
+		sockRevNat6Map:   sockRevNat6Map,
+		sockRevNat4StMap: sockRevNat4StMap,
+		sockRevNat6StMap: sockRevNat6StMap,
 	}
+}
+
+// PrepareStorage records addr in the socket storage of the socket behind fd,
+// as the connect hook does for a socket connected to addr via a service. It
+// doesn't touch the legacy reverse NAT maps.
+func (d *testBPFSocketDestroyer) PrepareStorage(fd int, addr string) error {
+	addrPort := netip.MustParseAddrPort(addr)
+	a := addrPort.Addr().Unmap()
+	port := byteorder.HostToNetwork16(addrPort.Port())
+
+	if a.Is4() {
+		b := a.As4()
+		value := bpfgen.SockTermIpv4SkStorageEntry{
+			BackendAddress: binary.NativeEndian.Uint32(b[:]),
+			BackendPort:    port,
+		}
+		return d.sockRevNat4StMap.Update(uint32(fd), &value, ebpf.UpdateAny)
+	}
+
+	value := bpfgen.SockTermIpv6SkStorageEntry{BackendPort: port}
+	value.BackendAddress.Addr = a.As16()
+	return d.sockRevNat6StMap.Update(uint32(fd), &value, ebpf.UpdateAny)
 }
 
 func (d *testBPFSocketDestroyer) PrepareAddress(cookie uint64, addr string) error {
@@ -621,29 +665,63 @@ func TestPrivilegedSocketDestroyers(t *testing.T) {
 	}
 }
 
+// TestPrivilegedSocketDestroyersReconnected checks that only sockets still
+// connected to the backend are destroyed, whether the socket recorded the
+// backend in the legacy reverse NAT map or in its socket storage.
 func TestPrivilegedSocketDestroyersReconnected(t *testing.T) {
 	testutils.PrivilegedTest(t)
 	log := hivetest.Logger(t)
 
-	socketDestroyers := makeSocketDestroyers(t)
+	bpf.CheckOrMountFS(log, "")
 
-	for dName, sockDestroyer := range socketDestroyers {
-		t.Run(dName, func(t *testing.T) {
-			t.Run("v4", func(t *testing.T) {
-				runReconnectedTest(t, log, sockDestroyer, "udp", "127.0.0.1:8888", "127.0.0.1:8890", unix.AF_INET)
-			})
-			t.Run("v6", func(t *testing.T) {
-				runReconnectedTest(t, log, sockDestroyer, "udp6", "[::1]:8888", "[::1]:8890", unix.AF_INET6)
-			})
-		})
+	cases := []reconnectCase{
+		{name: "connected", destroyed: true},
+		{name: "disconnected", disconnect: true},
+		{name: "reconnected", disconnect: true, reconnect: true},
+	}
+
+	for dName, sockDestroyer := range makeSocketDestroyers(t) {
+		_, isBPF := sockDestroyer.(*testBPFSocketDestroyer)
+		for _, storage := range []bool{false, true} {
+			if storage && !isBPF {
+				continue
+			}
+			for _, tc := range cases {
+				tc.storage = storage
+				t.Run(fmt.Sprintf("%s/storage=%t/%s", dName, storage, tc.name), func(t *testing.T) {
+					t.Run("v4", func(t *testing.T) {
+						runReconnectedTest(t, log, sockDestroyer, tc, "udp", "127.0.0.1:8888", "127.0.0.1:8890")
+					})
+					t.Run("v6", func(t *testing.T) {
+						runReconnectedTest(t, log, sockDestroyer, tc, "udp6", "[::1]:8888", "[::1]:8890")
+					})
+				})
+			}
+		}
 	}
 }
 
-func runReconnectedTest(t *testing.T, log *slog.Logger, sockDestroyer socketDestroyerTester, network, addr1, addr2 string, family uint8) {
+type reconnectCase struct {
+	name string
+	// storage records the backend in the socket storage instead of the
+	// legacy reverse NAT map.
+	storage bool
+	// disconnect runs connect(AF_UNSPEC) after connecting to the backend.
+	disconnect bool
+	// reconnect then connects the socket to another address.
+	reconnect bool
+	// destroyed is whether terminating the backend should destroy the socket.
+	destroyed bool
+}
+
+func runReconnectedTest(t *testing.T, log *slog.Logger, sockDestroyer socketDestroyerTester,
+	tc reconnectCase, network, backend, other string) {
 	ns := netns.NewNetNS(t)
 	defer ns.Close()
 	defer sockDestroyer.Reset()
 
+	// ns.Do runs its callback on another goroutine, so failures are returned
+	// as errors rather than reported through t from inside it.
 	require.NoError(t, ns.Do(func() error {
 		link, err := safenetlink.LinkByName("lo")
 		if err != nil {
@@ -652,90 +730,102 @@ func runReconnectedTest(t *testing.T, log *slog.Logger, sockDestroyer socketDest
 		return netlink.LinkSetUp(link)
 	}))
 
+	var destroyed bool
 	require.NoError(t, ns.Do(func() error {
-		uaddr1, err := net.ResolveUDPAddr(network, addr1)
-		require.NoError(t, err)
-		uaddr2, err := net.ResolveUDPAddr(network, addr2)
-		require.NoError(t, err)
-
-		err = startServer(t, network, addr1)
-		require.NoError(t, err)
-
-		err = startServer(t, network, addr2)
-		require.NoError(t, err)
-
-		// Connect to addr1
-		conn, err := net.Dial(network, addr1)
-		require.NoError(t, err)
-		defer conn.Close()
-
-		sysConn, ok := conn.(syscall.Conn)
-		require.True(t, ok)
-
-		rawConn, err := sysConn.SyscallConn()
-		require.NoError(t, err)
-
-		var cookie uint64
-		rawConn.Control(func(fd uintptr) {
-			cookie, err = unix.GetsockoptUint64(int(fd), unix.SOL_SOCKET, unix.SO_COOKIE)
-		})
-		require.NoError(t, err)
-
-		// Prepare the map
-		err = sockDestroyer.PrepareAddress(cookie, addr1)
-		require.NoError(t, err)
-
-		// Disconnect (AF_UNSPEC)
-		var sysErr error
-		rawConn.Control(func(fd uintptr) {
-			var raw syscall.RawSockaddrAny
-			raw.Addr.Family = syscall.AF_UNSPEC
-			_, _, e := syscall.Syscall(syscall.SYS_CONNECT, fd, uintptr(unsafe.Pointer(&raw)), unsafe.Sizeof(raw.Addr))
-			if e != 0 {
-				sysErr = e
+		for _, addr := range []string{backend, other} {
+			if err := startServer(t, network, addr); err != nil {
+				return err
 			}
-		})
-		if sysErr != nil {
-			t.Logf("AF_UNSPEC connect err: %v", sysErr)
-			sysErr = nil
 		}
 
-		// Re-connect to addr2
-		rawConn.Control(func(fd uintptr) {
-			var addr unix.Sockaddr
-			if family == unix.AF_INET {
-				addr = &unix.SockaddrInet4{
-					Port: uaddr2.Port,
-					Addr: [4]byte(uaddr2.IP.To4()),
-				}
-			} else {
-				addr = &unix.SockaddrInet6{
-					Port: uaddr2.Port,
-					Addr: [16]byte(uaddr2.IP.To16()),
-				}
-			}
-			sysErr = unix.Connect(int(fd), addr)
-		})
-		require.NoError(t, sysErr, "Failed to connect to addr2!")
+		conn, err := net.Dial(network, backend)
+		if err != nil {
+			return fmt.Errorf("connecting to %s: %w", backend, err)
+		}
+		defer conn.Close()
+		rawConn, err := conn.(syscall.Conn).SyscallConn()
+		if err != nil {
+			return err
+		}
 
-		// Run destroyer for addr1
-		filter := SocketFilter{
-			DestIp:   uaddr1.AddrPort().Addr(),
-			DestPort: uint16(uaddr1.Port),
+		var ctrlErr error
+		err = rawConn.Control(func(fd uintptr) {
+			ctrlErr = prepareReconnect(int(fd), sockDestroyer, tc, backend, other)
+		})
+		if err := errors.Join(err, ctrlErr); err != nil {
+			return err
+		}
+
+		backendAddr := netip.MustParseAddrPort(backend)
+		family := uint8(unix.AF_INET)
+		if backendAddr.Addr().Is6() {
+			family = unix.AF_INET6
+		}
+		if err := sockDestroyer.Destroy(log, SocketFilter{
+			DestIp:   backendAddr.Addr(),
+			DestPort: backendAddr.Port(),
 			Family:   family,
 			Protocol: unix.IPPROTO_UDP,
 			States:   StateFilterUDP,
+		}); err != nil {
+			return fmt.Errorf("destroying sockets connected to %s: %w", backend, err)
 		}
-		err = sockDestroyer.Destroy(log, filter)
-		require.NoError(t, err)
 
-		// Verify the socket was NOT destroyed
-		var b [8]byte
-		_, err = conn.Write(b[:])
-		require.NoError(t, err, "Socket connected to %s was WRONGFULLY destroyed by %s sweep!", addr2, addr1)
-
+		// Destroying a UDP socket aborts it with ECONNABORTED.
+		var soErr int
+		err = rawConn.Control(func(fd uintptr) {
+			soErr, ctrlErr = unix.GetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_ERROR)
+		})
+		if err := errors.Join(err, ctrlErr); err != nil {
+			return fmt.Errorf("reading SO_ERROR: %w", err)
+		}
+		destroyed = soErr == int(unix.ECONNABORTED)
 		return nil
 	}))
+
+	require.Equal(t, tc.destroyed, destroyed, "socket destroyed")
+}
+
+// prepareReconnect records backend as the socket's service backend and then
+// disconnects and reconnects the socket as tc asks.
+func prepareReconnect(fd int, sockDestroyer socketDestroyerTester, tc reconnectCase, backend, other string) error {
+	if tc.storage {
+		if err := sockDestroyer.(*testBPFSocketDestroyer).PrepareStorage(fd, backend); err != nil {
+			return fmt.Errorf("preparing socket storage: %w", err)
+		}
+	} else {
+		cookie, err := unix.GetsockoptUint64(fd, unix.SOL_SOCKET, unix.SO_COOKIE)
+		if err != nil {
+			return fmt.Errorf("reading socket cookie: %w", err)
+		}
+		if err := sockDestroyer.PrepareAddress(cookie, backend); err != nil {
+			return fmt.Errorf("preparing reverse NAT map: %w", err)
+		}
+	}
+
+	if tc.disconnect {
+		var sa syscall.RawSockaddrAny
+		sa.Addr.Family = syscall.AF_UNSPEC
+		if _, _, errno := syscall.Syscall(syscall.SYS_CONNECT, uintptr(fd),
+			uintptr(unsafe.Pointer(&sa)), unsafe.Sizeof(sa.Addr)); errno != 0 {
+			return fmt.Errorf("connect(AF_UNSPEC): %w", errno)
+		}
+	}
+
+	if tc.reconnect {
+		addrPort := netip.MustParseAddrPort(other)
+		var sa unix.Sockaddr
+		if addrPort.Addr().Is4() {
+			sa = &unix.SockaddrInet4{Port: int(addrPort.Port()), Addr: addrPort.Addr().As4()}
+		} else {
+			sa = &unix.SockaddrInet6{Port: int(addrPort.Port()), Addr: addrPort.Addr().As16()}
+		}
+		if err := unix.Connect(fd, sa); err != nil {
+			return fmt.Errorf("connecting to %s: %w", other, err)
+		}
+	}
+
+	return nil
 }
 
 func BenchmarkDestroyers(b *testing.B) {
