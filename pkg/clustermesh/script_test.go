@@ -48,7 +48,6 @@ import (
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/maglev"
-	"github.com/cilium/cilium/pkg/maps/registry"
 	"github.com/cilium/cilium/pkg/metrics"
 	"github.com/cilium/cilium/pkg/node"
 	nodemanager "github.com/cilium/cilium/pkg/node/manager"
@@ -88,7 +87,6 @@ func TestScript(t *testing.T) {
 			daemonk8s.ResourcesCell,
 			cell.Config(envoyCfg.SecretSyncConfig{}),
 			k8sTables.TablesCell,
-			registry.Cell,
 			lbcell.Cell,
 
 			maglev.Cell,

@@ -21,7 +21,6 @@ import (
 	"github.com/cilium/cilium/pkg/kpr"
 	"github.com/cilium/cilium/pkg/lbipamconfig"
 	"github.com/cilium/cilium/pkg/maglev"
-	"github.com/cilium/cilium/pkg/maps/registry"
 	"github.com/cilium/cilium/pkg/metrics"
 	"github.com/cilium/cilium/pkg/node"
 	"github.com/cilium/cilium/pkg/nodeipamconfig"
@@ -44,7 +43,6 @@ func TestCell(t *testing.T) {
 		kpr.Cell,
 		lbipamconfig.Cell,
 		nodeipamconfig.Cell,
-		registry.Cell,
 		Cell,
 		cell.Provide(
 			func() cmtypes.ClusterInfo { return cmtypes.ClusterInfo{} },
