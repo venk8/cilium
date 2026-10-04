@@ -40,6 +40,9 @@ mock_sk_storage_delete(const void *map, struct bpf_sock *sk);
 #include "lib/ipcache.h"
 #include "lib/lb.h"
 
+/* Reject connect() to a service without backends. */
+ASSIGN_CONFIG(bool, enable_no_service_endpoints_routable, true)
+
 static struct ipv4_sk_storage_entry st4;
 static struct ipv6_sk_storage_entry st6;
 static bool st4_valid;
@@ -715,6 +718,167 @@ int test_sock6_revnat_direct_reconnect(__maybe_unused struct xdp_md *ctx)
 	assert(st6_valid);
 	assert(st6.rev_nat_index == REVNAT_NODEPORT);
 	assert(map_lookup_elem(&cilium_lb6_reverse_sk, &lru_node));
+
+	test_finish();
+}
+
+#define SVC_PORT_C	bpf_htons(5003)
+#define REVNAT_C	4
+
+/* A connect() that socket LB rejects leaves the socket connected to its
+ * previous peer, so it must leave the reverse NAT state of that connection
+ * alone too: the storage may be all that is left of it, and the legacy entry
+ * may name the service of a later sendto() instead.
+ */
+CHECK("xdp", "sock4_revnat_rejected_connect")
+int test_sock4_revnat_rejected_connect(__maybe_unused struct xdp_md *ctx)
+{
+	struct bpf_sock sk = {};
+	struct bpf_sock_addr addr = {
+		.protocol = IPPROTO_UDP,
+		.sk = &sk,
+	};
+	struct ipv4_revnat_tuple lru_key = {
+		.cookie = 0,
+		.address = v4_pod_one,
+		.port = BACKEND_PORT,
+	};
+	int ret;
+
+	/* A and B front the same backend, C has none. */
+	lb_v4_add_service(v4_svc_one, SVC_PORT_A, IPPROTO_UDP, 1, REVNAT_A);
+	lb_v4_add_backend(v4_svc_one, SVC_PORT_A, 1, 124, v4_pod_one,
+			  BACKEND_PORT, IPPROTO_UDP, 0);
+	lb_v4_add_service(v4_svc_two, SVC_PORT_B, IPPROTO_UDP, 1, REVNAT_B);
+	lb_v4_add_backend(v4_svc_two, SVC_PORT_B, 1, 124, v4_pod_one,
+			  BACKEND_PORT, IPPROTO_UDP, 0);
+	lb_v4_add_service(v4_svc_two, SVC_PORT_C, IPPROTO_UDP, 0, REVNAT_C);
+	ipcache_v4_add_entry(v4_pod_one, 0, 112233, 0, 0);
+	map_delete_elem(&cilium_lb4_reverse_sk, &lru_key);
+	st4_valid = false;
+
+	test_init();
+
+	/* connect() to A, then lose the legacy entry to LRU eviction. */
+	ret = connect4(&addr, v4_svc_one, SVC_PORT_A);
+	assert(ret == 0);
+	sk.dst_ip4 = v4_pod_one;
+	sk.dst_port = BACKEND_PORT;
+	map_delete_elem(&cilium_lb4_reverse_sk, &lru_key);
+
+	/* connect() to C is rejected, and the socket stays connected to A. */
+	ret = connect4(&addr, v4_svc_two, SVC_PORT_C);
+	assert(ret == -EHOSTUNREACH);
+	assert(st4_valid);
+	assert(st4.address == v4_svc_one);
+	ret = rev4(&addr, GETPEERNAME);
+	assert(ret == 0);
+	assert(addr.user_ip4 == v4_svc_one);
+	assert(addr.user_port == SVC_PORT_A);
+	ret = rev4(&addr, RECVMSG);
+	assert(ret == 0);
+	assert(addr.user_ip4 == v4_svc_one);
+	assert(addr.user_port == SVC_PORT_A);
+
+	/* After sendto() B, a rejected connect() still leaves getpeername()
+	 * reporting A, while replies are from B.
+	 */
+	addr.user_ip4 = v4_svc_two;
+	addr.user_port = SVC_PORT_B;
+	ret = __sock4_xlate_fwd(&addr, &addr, true, false);
+	assert(ret == 0);
+	ret = connect4(&addr, v4_svc_two, SVC_PORT_C);
+	assert(ret == -EHOSTUNREACH);
+	ret = rev4(&addr, GETPEERNAME);
+	assert(ret == 0);
+	assert(addr.user_ip4 == v4_svc_one);
+	assert(addr.user_port == SVC_PORT_A);
+	ret = rev4(&addr, RECVMSG);
+	assert(ret == 0);
+	assert(addr.user_ip4 == v4_svc_two);
+	assert(addr.user_port == SVC_PORT_B);
+
+	/* The same through an IPv4-mapped IPv6 socket. */
+	memset(&addr, 0, sizeof(addr));
+	addr.protocol = IPPROTO_UDP;
+	addr.sk = &sk;
+	ret = connect46(&addr, v4_svc_one, SVC_PORT_A);
+	assert(ret == 0);
+	map_delete_elem(&cilium_lb4_reverse_sk, &lru_key);
+	ret = connect46(&addr, v4_svc_two, SVC_PORT_C);
+	assert(ret == -EHOSTUNREACH);
+	assert(st4_valid);
+	assert(st4.address == v4_svc_one);
+
+	test_finish();
+}
+
+/* See test_sock4_revnat_rejected_connect. */
+CHECK("xdp", "sock6_revnat_rejected_connect")
+int test_sock6_revnat_rejected_connect(__maybe_unused struct xdp_md *ctx)
+{
+	union v6addr svc_a = {}, svc_b = {}, backend = {};
+	struct bpf_sock sk = {};
+	struct bpf_sock_addr addr = {
+		.protocol = IPPROTO_UDP,
+		.sk = &sk,
+	};
+	struct ipv6_revnat_tuple lru_key = {
+		.cookie = 0,
+		.port = BACKEND_PORT,
+	};
+	int ret;
+
+	memcpy(svc_a.addr, (void *)v6_node_one, 16);
+	memcpy(svc_b.addr, (void *)v6_node_two, 16);
+	memcpy(backend.addr, (void *)v6_pod_one, 16);
+	memcpy(&lru_key.address, &backend, sizeof(backend));
+
+	lb_v6_add_service(&svc_a, SVC_PORT_A, IPPROTO_UDP, 1, REVNAT_A);
+	lb_v6_add_backend(&svc_a, SVC_PORT_A, 1, 124, &backend, BACKEND_PORT,
+			  IPPROTO_UDP, 0);
+	lb_v6_add_service(&svc_b, SVC_PORT_B, IPPROTO_UDP, 1, REVNAT_B);
+	lb_v6_add_backend(&svc_b, SVC_PORT_B, 1, 124, &backend, BACKEND_PORT,
+			  IPPROTO_UDP, 0);
+	lb_v6_add_service(&svc_b, SVC_PORT_C, IPPROTO_UDP, 0, REVNAT_C);
+	ipcache_v6_add_entry(&backend, 0, 112233, 0, 0);
+	map_delete_elem(&cilium_lb6_reverse_sk, &lru_key);
+	st6_valid = false;
+
+	test_init();
+
+	ret = connect6(&addr, &svc_a, SVC_PORT_A);
+	assert(ret == 0);
+	sk.dst_port = BACKEND_PORT;
+	map_delete_elem(&cilium_lb6_reverse_sk, &lru_key);
+
+	ret = connect6(&addr, &svc_b, SVC_PORT_C);
+	assert(ret == -EHOSTUNREACH);
+	assert(st6_valid);
+	assert(ipv6_addr_equals(&st6.address, &svc_a));
+	ret = rev6(&addr, &backend, GETPEERNAME);
+	assert(ret == 0);
+	assert(!memcmp(addr.user_ip6, &svc_a, 16));
+	assert(addr.user_port == SVC_PORT_A);
+	ret = rev6(&addr, &backend, RECVMSG);
+	assert(ret == 0);
+	assert(!memcmp(addr.user_ip6, &svc_a, 16));
+	assert(addr.user_port == SVC_PORT_A);
+
+	memcpy(addr.user_ip6, &svc_b, 16);
+	addr.user_port = SVC_PORT_B;
+	ret = __sock6_xlate_fwd(&addr, true, false);
+	assert(ret == 0);
+	ret = connect6(&addr, &svc_b, SVC_PORT_C);
+	assert(ret == -EHOSTUNREACH);
+	ret = rev6(&addr, &backend, GETPEERNAME);
+	assert(ret == 0);
+	assert(!memcmp(addr.user_ip6, &svc_a, 16));
+	assert(addr.user_port == SVC_PORT_A);
+	ret = rev6(&addr, &backend, RECVMSG);
+	assert(ret == 0);
+	assert(!memcmp(addr.user_ip6, &svc_b, 16));
+	assert(addr.user_port == SVC_PORT_B);
 
 	test_finish();
 }
