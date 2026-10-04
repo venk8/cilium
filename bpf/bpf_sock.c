@@ -171,6 +171,31 @@ static __always_inline int sock4_update_revnat(struct bpf_sock_addr *ctx,
 	val.port = dst_port;
 	val.rev_nat_index = rev_nat_id;
 
+	/* Note that for the revnat map the protocol is not needed since the
+	 * cookie is already part of the key which is an unique identifier,
+	 * meaning across the TCP/UDP universe a socket cookie is unique.
+	 */
+	key.cookie = sock_local_cookie(ctx);
+	key.address = backend->address;
+	key.port = backend->port;
+	tmp = map_lookup_elem(&cilium_lb4_reverse_sk, &key);
+	if (!tmp || memcmp(tmp, &val, sizeof(val))) {
+		ret = map_update_elem(&cilium_lb4_reverse_sk, &key, &val, 0);
+		if (ret < 0)
+			return ret;
+
+		/* Touch the reverse NAT entry after insertion to
+		 * prevent premature LRU eviction before the
+		 * reverse-path lookup arrives.
+		 */
+		if (!tmp)
+			map_lookup_elem(&cilium_lb4_reverse_sk, &key);
+	}
+
+	/* Only record the connection in the socket's storage once the legacy
+	 * entry is in place: should that fail, socket LB rejects the connect()
+	 * and the socket stays connected to its previous peer.
+	 */
 	if (ctx->sk && is_connect) {
 		struct ipv4_sk_storage_entry sk_init = {
 			.address = val.address,
@@ -185,25 +210,6 @@ static __always_inline int sock4_update_revnat(struct bpf_sock_addr *ctx,
 
 		if (sk_val && memcmp(sk_val, &sk_init, sizeof(sk_init)))
 			*sk_val = sk_init;
-	}
-
-	/* Note that for the revnat map the protocol is not needed since the
-	 * cookie is already part of the key which is an unique identifier,
-	 * meaning across the TCP/UDP universe a socket cookie is unique.
-	 */
-	key.cookie = sock_local_cookie(ctx);
-	key.address = backend->address;
-	key.port = backend->port;
-	tmp = map_lookup_elem(&cilium_lb4_reverse_sk, &key);
-	if (!tmp || memcmp(tmp, &val, sizeof(val))) {
-		ret = map_update_elem(&cilium_lb4_reverse_sk, &key, &val, 0);
-
-		/* Touch the reverse NAT entry after insertion to
-		 * prevent premature LRU eviction before the
-		 * reverse-path lookup arrives.
-		 */
-		if (ret == 0 && !tmp)
-			map_lookup_elem(&cilium_lb4_reverse_sk, &key);
 	}
 
 	return ret;
@@ -814,6 +820,27 @@ static __always_inline int sock6_update_revnat(struct bpf_sock_addr *ctx,
 	val.port = dst_port;
 	val.rev_nat_index = rev_nat_index;
 
+	key.cookie = sock_local_cookie(ctx);
+	key.address = backend->address;
+	key.port = backend->port;
+	tmp = map_lookup_elem(&cilium_lb6_reverse_sk, &key);
+	if (!tmp || memcmp(tmp, &val, sizeof(val))) {
+		ret = map_update_elem(&cilium_lb6_reverse_sk, &key, &val, 0);
+		if (ret < 0)
+			return ret;
+
+		/* Touch the reverse NAT entry after insertion to
+		 * prevent premature LRU eviction before the
+		 * reverse-path lookup arrives.
+		 */
+		if (!tmp)
+			map_lookup_elem(&cilium_lb6_reverse_sk, &key);
+	}
+
+	/* Only record the connection in the socket's storage once the legacy
+	 * entry is in place: should that fail, socket LB rejects the connect()
+	 * and the socket stays connected to its previous peer.
+	 */
 	if (ctx->sk && is_connect) {
 		struct ipv6_sk_storage_entry sk_init = {
 			.address = val.address,
@@ -828,21 +855,6 @@ static __always_inline int sock6_update_revnat(struct bpf_sock_addr *ctx,
 
 		if (sk_val && memcmp(sk_val, &sk_init, sizeof(sk_init)))
 			*sk_val = sk_init;
-	}
-
-	key.cookie = sock_local_cookie(ctx);
-	key.address = backend->address;
-	key.port = backend->port;
-	tmp = map_lookup_elem(&cilium_lb6_reverse_sk, &key);
-	if (!tmp || memcmp(tmp, &val, sizeof(val))) {
-		ret = map_update_elem(&cilium_lb6_reverse_sk, &key, &val, 0);
-
-		/* Touch the reverse NAT entry after insertion to
-		 * prevent premature LRU eviction before the
-		 * reverse-path lookup arrives.
-		 */
-		if (ret == 0 && !tmp)
-			map_lookup_elem(&cilium_lb6_reverse_sk, &key);
 	}
 	return ret;
 }
