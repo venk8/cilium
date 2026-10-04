@@ -136,13 +136,11 @@ __u64 sock_select_slot(struct bpf_sock_addr *ctx)
 
 /* Whether the socket currently has a peer. connect() sets the destination
  * port and connect(AF_UNSPEC) clears it, without running any of our hooks.
- * Kernels before 5.18 only permit 4-byte loads of bpf_sock's dst_port, so
- * load it together with its zero padding.
  */
 static __always_inline __maybe_unused
 bool sock_is_connected(const struct bpf_sock *sk)
 {
-	return *(const volatile __u32 *)&sk->dst_port != 0;
+	return sk->dst_port != 0;
 }
 
 static __always_inline __maybe_unused
