@@ -95,9 +95,29 @@ mock_sk_storage_delete(const void *map, struct bpf_sock *sk __maybe_unused)
 #define SVC_PORT_B	bpf_htons(5002)
 #define BACKEND_PORT	bpf_htons(7000)
 
+/* The peer argument of __sock{4,6}_xlate_rev(). */
+#define RECVMSG		false
+#define GETPEERNAME	true
+
+/* Translates a reply from the backend for recvmsg() or getpeername(). */
+static __always_inline int rev4(struct bpf_sock_addr *addr, bool peer)
+{
+	addr->user_ip4 = v4_pod_one;
+	addr->user_port = BACKEND_PORT;
+	return __sock4_xlate_rev(addr, addr, peer);
+}
+
+static __always_inline int rev6(struct bpf_sock_addr *addr,
+				const union v6addr *backend, bool peer)
+{
+	memcpy(addr->user_ip6, backend, 16);
+	addr->user_port = BACKEND_PORT;
+	return __sock6_xlate_rev(addr, peer);
+}
+
 /* Services A and B front the same backend. A socket that talks to both can
- * only tell them apart by what it last did: its connect() is recorded in the
- * socket storage, its sendto() only in cilium_lb4_reverse_sk.
+ * only tell them apart by what it did: connect() is recorded in the socket
+ * storage and the legacy map, sendto() only in the legacy map.
  */
 CHECK("xdp", "sock4_revnat_storage")
 int test_sock4_revnat_storage(__maybe_unused struct xdp_md *ctx)
@@ -124,6 +144,8 @@ int test_sock4_revnat_storage(__maybe_unused struct xdp_md *ctx)
 			  BACKEND_PORT, IPPROTO_UDP, 0);
 	/* Needed to avoid sock4_skip_xlate */
 	ipcache_v4_add_entry(v4_pod_one, 0, 112233, 0, 0);
+	map_delete_elem(&cilium_lb4_reverse_sk, &lru_key);
+	st4_valid = false;
 
 	test_init();
 
@@ -140,58 +162,89 @@ int test_sock4_revnat_storage(__maybe_unused struct xdp_md *ctx)
 	assert(st4.rev_nat_index == REVNAT_A);
 	assert(st4.backend_address == v4_pod_one);
 	assert(st4.backend_port == BACKEND_PORT);
+	assert(map_lookup_elem(&cilium_lb4_reverse_sk, &lru_key));
 	sk.dst_ip4 = v4_pod_one;
 	sk.dst_port = BACKEND_PORT;
 
-	/* While connected, replies are translated from the socket storage, even
-	 * once the legacy entry has been evicted.
+	/* While connected, both report A, also once the legacy entry has been
+	 * evicted.
 	 */
+	ret = rev4(&addr, RECVMSG);
+	assert(ret == 0);
+	assert(addr.user_ip4 == v4_svc_one);
+	assert(addr.user_port == SVC_PORT_A);
 	map_delete_elem(&cilium_lb4_reverse_sk, &lru_key);
-	addr.user_ip4 = v4_pod_one;
-	addr.user_port = BACKEND_PORT;
-	ret = __sock4_xlate_rev(&addr, &addr);
+	ret = rev4(&addr, RECVMSG);
+	assert(ret == 0);
+	assert(addr.user_ip4 == v4_svc_one);
+	assert(addr.user_port == SVC_PORT_A);
+	ret = rev4(&addr, GETPEERNAME);
+	assert(ret == 0);
+	assert(addr.user_ip4 == v4_svc_one);
+	assert(addr.user_port == SVC_PORT_A);
+
+	/* sendto() B on the still connected socket leaves the storage alone and
+	 * points the legacy entry at B. The reply comes from B, while the socket
+	 * remains connected through A.
+	 */
+	addr.user_ip4 = v4_svc_two;
+	addr.user_port = SVC_PORT_B;
+	ret = __sock4_xlate_fwd(&addr, &addr, true, false);
+	assert(ret == 0);
+	assert(st4_valid);
+	assert(st4.address == v4_svc_one);
+	ret = rev4(&addr, RECVMSG);
+	assert(ret == 0);
+	assert(addr.user_ip4 == v4_svc_two);
+	assert(addr.user_port == SVC_PORT_B);
+	ret = rev4(&addr, GETPEERNAME);
 	assert(ret == 0);
 	assert(addr.user_ip4 == v4_svc_one);
 	assert(addr.user_port == SVC_PORT_A);
 
 	/* connect(AF_UNSPEC) clears the peer but runs none of our hooks, so the
-	 * storage still names A. sendto() B then only updates the legacy map.
+	 * storage still names A. The reply to sendto() B comes from B.
 	 */
 	sk.dst_ip4 = 0;
 	sk.dst_port = 0;
 	addr.user_ip4 = v4_svc_two;
 	addr.user_port = SVC_PORT_B;
-	ret = __sock4_xlate_fwd(&addr, &addr, false, false);
+	ret = __sock4_xlate_fwd(&addr, &addr, true, false);
 	assert(ret == 0);
 	assert(st4_valid);
 	assert(st4.address == v4_svc_one);
-
-	/* The reply to that sendto() must come from B, not the stale A. */
-	addr.user_ip4 = v4_pod_one;
-	addr.user_port = BACKEND_PORT;
-	ret = __sock4_xlate_rev(&addr, &addr);
+	ret = rev4(&addr, RECVMSG);
 	assert(ret == 0);
 	assert(addr.user_ip4 == v4_svc_two);
 	assert(addr.user_port == SVC_PORT_B);
 
+	/* Once its legacy entry is evicted, a disconnected socket's reply is
+	 * left untranslated rather than reported as coming from A.
+	 */
+	map_delete_elem(&cilium_lb4_reverse_sk, &lru_key);
+	ret = rev4(&addr, RECVMSG);
+	assert(ret == -ENXIO);
+	assert(addr.user_ip4 == v4_pod_one);
+	assert(addr.user_port == BACKEND_PORT);
+	addr.user_ip4 = v4_svc_two;
+	addr.user_port = SVC_PORT_B;
+	ret = __sock4_xlate_fwd(&addr, &addr, true, false);
+	assert(ret == 0);
+
 	/* Removing A must not cost the disconnected socket its entry for B. */
 	lb_v4_add_service(v4_svc_one, SVC_PORT_A, IPPROTO_UDP, 1, REVNAT_OTHER);
-	addr.user_ip4 = v4_pod_one;
-	addr.user_port = BACKEND_PORT;
-	ret = __sock4_xlate_rev(&addr, &addr);
+	ret = rev4(&addr, RECVMSG);
 	assert(ret == 0);
 	assert(addr.user_ip4 == v4_svc_two);
 	assert(addr.user_port == SVC_PORT_B);
 	assert(map_lookup_elem(&cilium_lb4_reverse_sk, &lru_key));
 
 	/* A connected socket whose storage names the removed A drops only the
-	 * storage and falls back to the live legacy entry for B.
+	 * storage: getpeername() falls back to the live legacy entry for B.
 	 */
 	sk.dst_ip4 = v4_pod_one;
 	sk.dst_port = BACKEND_PORT;
-	addr.user_ip4 = v4_pod_one;
-	addr.user_port = BACKEND_PORT;
-	ret = __sock4_xlate_rev(&addr, &addr);
+	ret = rev4(&addr, GETPEERNAME);
 	assert(ret == 0);
 	assert(addr.user_ip4 == v4_svc_two);
 	assert(addr.user_port == SVC_PORT_B);
@@ -204,10 +257,8 @@ int test_sock4_revnat_storage(__maybe_unused struct xdp_md *ctx)
 	 * the reply is left untranslated.
 	 */
 	lb_v4_add_service(v4_svc_two, SVC_PORT_B, IPPROTO_UDP, 1, REVNAT_OTHER);
-	addr.user_ip4 = v4_pod_one;
-	addr.user_port = BACKEND_PORT;
-	ret = __sock4_xlate_rev(&addr, &addr);
-	assert(ret == -ENOENT);
+	ret = rev4(&addr, RECVMSG);
+	assert(ret == -ENXIO);
 	assert(addr.user_ip4 == v4_pod_one);
 	assert(addr.user_port == BACKEND_PORT);
 	assert(!map_lookup_elem(&cilium_lb4_reverse_sk, &lru_key));
@@ -217,7 +268,7 @@ int test_sock4_revnat_storage(__maybe_unused struct xdp_md *ctx)
 	lb_v4_add_service(v4_svc_two, SVC_PORT_B, IPPROTO_UDP, 1, REVNAT_B);
 	addr.user_ip4 = v4_svc_two;
 	addr.user_port = SVC_PORT_B;
-	ret = __sock4_xlate_fwd(&addr, &addr, false, false);
+	ret = __sock4_xlate_fwd(&addr, &addr, true, false);
 	assert(ret == 0);
 	st4_valid = true;
 	st4.address = v4_svc_one;
@@ -225,9 +276,7 @@ int test_sock4_revnat_storage(__maybe_unused struct xdp_md *ctx)
 	st4.rev_nat_index = REVNAT_A;
 	st4.backend_address = v4_pod_two;
 	st4.backend_port = BACKEND_PORT;
-	addr.user_ip4 = v4_pod_one;
-	addr.user_port = BACKEND_PORT;
-	ret = __sock4_xlate_rev(&addr, &addr);
+	ret = rev4(&addr, GETPEERNAME);
 	assert(ret == 0);
 	assert(addr.user_ip4 == v4_svc_two);
 	assert(addr.user_port == SVC_PORT_B);
@@ -267,6 +316,8 @@ int test_sock6_revnat_storage(__maybe_unused struct xdp_md *ctx)
 			  IPPROTO_UDP, 0);
 	/* Needed to avoid sock6_skip_xlate */
 	ipcache_v6_add_entry(&backend, 0, 112233, 0, 0);
+	map_delete_elem(&cilium_lb6_reverse_sk, &lru_key);
+	st6_valid = false;
 
 	test_init();
 
@@ -282,12 +333,34 @@ int test_sock6_revnat_storage(__maybe_unused struct xdp_md *ctx)
 	assert(st6.rev_nat_index == REVNAT_A);
 	assert(ipv6_addr_equals(&st6.backend_address, &backend));
 	assert(st6.backend_port == BACKEND_PORT);
+	assert(map_lookup_elem(&cilium_lb6_reverse_sk, &lru_key));
 	sk.dst_port = BACKEND_PORT;
 
+	ret = rev6(&addr, &backend, RECVMSG);
+	assert(ret == 0);
+	assert(!memcmp(addr.user_ip6, &svc_a, 16));
+	assert(addr.user_port == SVC_PORT_A);
 	map_delete_elem(&cilium_lb6_reverse_sk, &lru_key);
-	memcpy(addr.user_ip6, &backend, 16);
-	addr.user_port = BACKEND_PORT;
-	ret = __sock6_xlate_rev(&addr);
+	ret = rev6(&addr, &backend, RECVMSG);
+	assert(ret == 0);
+	assert(!memcmp(addr.user_ip6, &svc_a, 16));
+	assert(addr.user_port == SVC_PORT_A);
+	ret = rev6(&addr, &backend, GETPEERNAME);
+	assert(ret == 0);
+	assert(!memcmp(addr.user_ip6, &svc_a, 16));
+	assert(addr.user_port == SVC_PORT_A);
+
+	memcpy(addr.user_ip6, &svc_b, 16);
+	addr.user_port = SVC_PORT_B;
+	ret = __sock6_xlate_fwd(&addr, true, false);
+	assert(ret == 0);
+	assert(st6_valid);
+	assert(ipv6_addr_equals(&st6.address, &svc_a));
+	ret = rev6(&addr, &backend, RECVMSG);
+	assert(ret == 0);
+	assert(!memcmp(addr.user_ip6, &svc_b, 16));
+	assert(addr.user_port == SVC_PORT_B);
+	ret = rev6(&addr, &backend, GETPEERNAME);
 	assert(ret == 0);
 	assert(!memcmp(addr.user_ip6, &svc_a, 16));
 	assert(addr.user_port == SVC_PORT_A);
@@ -295,31 +368,34 @@ int test_sock6_revnat_storage(__maybe_unused struct xdp_md *ctx)
 	sk.dst_port = 0;
 	memcpy(addr.user_ip6, &svc_b, 16);
 	addr.user_port = SVC_PORT_B;
-	ret = __sock6_xlate_fwd(&addr, false, false);
+	ret = __sock6_xlate_fwd(&addr, true, false);
 	assert(ret == 0);
 	assert(st6_valid);
 	assert(ipv6_addr_equals(&st6.address, &svc_a));
-
-	memcpy(addr.user_ip6, &backend, 16);
-	addr.user_port = BACKEND_PORT;
-	ret = __sock6_xlate_rev(&addr);
+	ret = rev6(&addr, &backend, RECVMSG);
 	assert(ret == 0);
 	assert(!memcmp(addr.user_ip6, &svc_b, 16));
 	assert(addr.user_port == SVC_PORT_B);
 
+	map_delete_elem(&cilium_lb6_reverse_sk, &lru_key);
+	ret = rev6(&addr, &backend, RECVMSG);
+	assert(ret == -ENXIO);
+	assert(!memcmp(addr.user_ip6, &backend, 16));
+	assert(addr.user_port == BACKEND_PORT);
+	memcpy(addr.user_ip6, &svc_b, 16);
+	addr.user_port = SVC_PORT_B;
+	ret = __sock6_xlate_fwd(&addr, true, false);
+	assert(ret == 0);
+
 	lb_v6_add_service(&svc_a, SVC_PORT_A, IPPROTO_UDP, 1, REVNAT_OTHER);
-	memcpy(addr.user_ip6, &backend, 16);
-	addr.user_port = BACKEND_PORT;
-	ret = __sock6_xlate_rev(&addr);
+	ret = rev6(&addr, &backend, RECVMSG);
 	assert(ret == 0);
 	assert(!memcmp(addr.user_ip6, &svc_b, 16));
 	assert(addr.user_port == SVC_PORT_B);
 	assert(map_lookup_elem(&cilium_lb6_reverse_sk, &lru_key));
 
 	sk.dst_port = BACKEND_PORT;
-	memcpy(addr.user_ip6, &backend, 16);
-	addr.user_port = BACKEND_PORT;
-	ret = __sock6_xlate_rev(&addr);
+	ret = rev6(&addr, &backend, GETPEERNAME);
 	assert(ret == 0);
 	assert(!memcmp(addr.user_ip6, &svc_b, 16));
 	assert(addr.user_port == SVC_PORT_B);
@@ -329,10 +405,8 @@ int test_sock6_revnat_storage(__maybe_unused struct xdp_md *ctx)
 	assert(lru->rev_nat_index == REVNAT_B);
 
 	lb_v6_add_service(&svc_b, SVC_PORT_B, IPPROTO_UDP, 1, REVNAT_OTHER);
-	memcpy(addr.user_ip6, &backend, 16);
-	addr.user_port = BACKEND_PORT;
-	ret = __sock6_xlate_rev(&addr);
-	assert(ret == -ENOENT);
+	ret = rev6(&addr, &backend, RECVMSG);
+	assert(ret == -ENXIO);
 	assert(!memcmp(addr.user_ip6, &backend, 16));
 	assert(addr.user_port == BACKEND_PORT);
 	assert(!map_lookup_elem(&cilium_lb6_reverse_sk, &lru_key));
@@ -341,7 +415,7 @@ int test_sock6_revnat_storage(__maybe_unused struct xdp_md *ctx)
 	lb_v6_add_service(&svc_b, SVC_PORT_B, IPPROTO_UDP, 1, REVNAT_B);
 	memcpy(addr.user_ip6, &svc_b, 16);
 	addr.user_port = SVC_PORT_B;
-	ret = __sock6_xlate_fwd(&addr, false, false);
+	ret = __sock6_xlate_fwd(&addr, true, false);
 	assert(ret == 0);
 	st6_valid = true;
 	memcpy(&st6.address, &svc_a, sizeof(svc_a));
@@ -349,9 +423,7 @@ int test_sock6_revnat_storage(__maybe_unused struct xdp_md *ctx)
 	st6.rev_nat_index = REVNAT_A;
 	memcpy(&st6.backend_address, &other, sizeof(other));
 	st6.backend_port = BACKEND_PORT;
-	memcpy(addr.user_ip6, &backend, 16);
-	addr.user_port = BACKEND_PORT;
-	ret = __sock6_xlate_rev(&addr);
+	ret = rev6(&addr, &backend, GETPEERNAME);
 	assert(ret == 0);
 	assert(!memcmp(addr.user_ip6, &svc_b, 16));
 	assert(addr.user_port == SVC_PORT_B);
@@ -414,7 +486,7 @@ int test_sock4_revnat_direct_reconnect(__maybe_unused struct xdp_md *ctx)
 	/* getpeername() now reports the backend. */
 	sk.dst_ip4 = v4_pod_one;
 	sk.dst_port = BACKEND_PORT;
-	ret = __sock4_xlate_rev(&addr, &addr);
+	ret = __sock4_xlate_rev(&addr, &addr, GETPEERNAME);
 	assert(ret == -ENXIO);
 	assert(addr.user_ip4 == v4_pod_one);
 	assert(addr.user_port == BACKEND_PORT);
@@ -501,7 +573,7 @@ int test_sock6_revnat_direct_reconnect(__maybe_unused struct xdp_md *ctx)
 	assert(!map_lookup_elem(&cilium_lb6_reverse_sk, &lru_key));
 
 	sk.dst_port = BACKEND_PORT;
-	__sock6_xlate_rev(&addr);
+	__sock6_xlate_rev(&addr, GETPEERNAME);
 	assert(!memcmp(addr.user_ip6, &backend, 16));
 	assert(addr.user_port == BACKEND_PORT);
 

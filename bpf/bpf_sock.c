@@ -677,10 +677,69 @@ sock4_revnat_is_live(struct bpf_sock_addr *ctx_full,
 	       (svc->count != 0 || lb4_svc_is_l7_loadbalancer(svc));
 }
 
-static __always_inline int __sock4_xlate_rev(struct bpf_sock_addr *ctx,
-					     struct bpf_sock_addr *ctx_full)
+/* The socket's storage entry, if the socket is connected, the entry names the
+ * backend address and port and its service is live. A stale entry is dropped.
+ */
+static __always_inline bool
+sock4_revnat_from_storage(struct bpf_sock_addr *ctx_full, __be32 address,
+			  __be16 port, __u8 protocol,
+			  struct ipv4_revnat_entry *val)
 {
-	struct ipv4_revnat_entry val_tmp = {}, *val = NULL;
+	struct ipv4_sk_storage_entry *st;
+
+	/* The storage isn't updated by sendto() and outlives
+	 * connect(AF_UNSPEC), so it only describes a connected socket.
+	 */
+	if (!ctx_full->sk || !sock_is_connected(ctx_full->sk))
+		return false;
+
+	st = sk_storage_get(&cilium_lb4_reverse_sk_v2, ctx_full->sk, 0, 0);
+	if (!st || st->backend_address != address || st->backend_port != port)
+		return false;
+
+	val->address = st->address;
+	val->port = st->port;
+	val->rev_nat_index = st->rev_nat_index;
+	if (sock4_revnat_is_live(ctx_full, val, protocol))
+		return true;
+
+	sk_storage_delete(&cilium_lb4_reverse_sk_v2, ctx_full->sk);
+	update_metrics(0, METRIC_INGRESS, REASON_LB_REVNAT_STALE);
+	return false;
+}
+
+/* The socket's entry in cilium_lb4_reverse_sk, if its service is live. A
+ * stale entry is dropped.
+ */
+static __always_inline bool
+sock4_revnat_from_map(struct bpf_sock_addr *ctx_full,
+		      const struct ipv4_revnat_tuple *key, __u8 protocol,
+		      struct ipv4_revnat_entry *val)
+{
+	const struct ipv4_revnat_entry *entry;
+
+	entry = map_lookup_elem(&cilium_lb4_reverse_sk, key);
+	if (!entry)
+		return false;
+
+	if (sock4_revnat_is_live(ctx_full, entry, protocol)) {
+		*val = *entry;
+		return true;
+	}
+
+	map_delete_elem(&cilium_lb4_reverse_sk, key);
+	update_metrics(0, METRIC_INGRESS, REASON_LB_REVNAT_STALE);
+	return false;
+}
+
+/* Translates the backend address in ctx back to the service it was reached
+ * through, for getpeername() if peer is set and for recvmsg() otherwise.
+ */
+static __always_inline int __sock4_xlate_rev(struct bpf_sock_addr *ctx,
+					     struct bpf_sock_addr *ctx_full,
+					     const bool peer)
+{
+	struct ipv4_revnat_entry val = {};
 	__u16 dst_port = ctx_dst_port(ctx);
 	__u8 protocol = ctx_protocol(ctx);
 	__u32 dst_ip = ctx->user_ip4;
@@ -689,55 +748,32 @@ static __always_inline int __sock4_xlate_rev(struct bpf_sock_addr *ctx,
 		.address	= dst_ip,
 		.port		= dst_port,
 	};
+	bool found;
 
 	send_trace_sock_notify4(ctx_full, XLATE_PRE_DIRECTION_REV, dst_ip,
 				bpf_ntohs(dst_port), false);
 
-	/* A connected socket's storage names the service it connected to. It is
-	 * not updated by sendto() and outlives connect(AF_UNSPEC), so once the
-	 * socket is disconnected the entry kept current by sendmsg in
-	 * cilium_lb4_reverse_sk is the authoritative one.
+	/* getpeername() asks which service the socket is connected through,
+	 * which is what its storage records. A datagram answers whatever was
+	 * last sent to its source: cilium_lb4_reverse_sk records that for
+	 * connect() and sendto() alike, also on a connected socket, where
+	 * sendto() with an address leaves the storage alone. Each falls back
+	 * to the other, e.g. once the legacy entry has been evicted.
 	 */
-	if (ctx_full->sk && sock_is_connected(ctx_full->sk)) {
-		struct ipv4_sk_storage_entry *sk_val =
-			sk_storage_get(&cilium_lb4_reverse_sk_v2, ctx_full->sk, 0, 0);
+	found = peer &&
+		sock4_revnat_from_storage(ctx_full, dst_ip, dst_port, protocol, &val);
+	if (!found)
+		found = sock4_revnat_from_map(ctx_full, &key, protocol, &val);
+	if (!found && !peer)
+		found = sock4_revnat_from_storage(ctx_full, dst_ip, dst_port,
+						  protocol, &val);
+	if (!found)
+		return -ENXIO;
 
-		if (sk_val &&
-		    sk_val->backend_address == dst_ip &&
-		    sk_val->backend_port == dst_port) {
-			val_tmp.address = sk_val->address;
-			val_tmp.port = sk_val->port;
-			val_tmp.rev_nat_index = sk_val->rev_nat_index;
-
-			if (sock4_revnat_is_live(ctx_full, &val_tmp, protocol)) {
-				val = &val_tmp;
-			} else {
-				/* Only the storage is known to be stale here; the
-				 * legacy entry may name another, live service.
-				 */
-				sk_storage_delete(&cilium_lb4_reverse_sk_v2,
-						  ctx_full->sk);
-				update_metrics(0, METRIC_INGRESS,
-					       REASON_LB_REVNAT_STALE);
-			}
-		}
-	}
-
-	if (!val) {
-		val = map_lookup_elem(&cilium_lb4_reverse_sk, &key);
-		if (!val)
-			return -ENXIO;
-		if (!sock4_revnat_is_live(ctx_full, val, protocol)) {
-			map_delete_elem(&cilium_lb4_reverse_sk, &key);
-			update_metrics(0, METRIC_INGRESS, REASON_LB_REVNAT_STALE);
-			return -ENOENT;
-		}
-	}
-
-	ctx->user_ip4 = val->address;
-	ctx_set_port(ctx, val->port);
-	send_trace_sock_notify4(ctx_full, XLATE_POST_DIRECTION_REV, val->address,
-				bpf_ntohs(val->port), false);
+	ctx->user_ip4 = val.address;
+	ctx_set_port(ctx, val.port);
+	send_trace_sock_notify4(ctx_full, XLATE_POST_DIRECTION_REV, val.address,
+				bpf_ntohs(val.port), false);
 	return 0;
 }
 
@@ -758,7 +794,7 @@ int cil_sock4_sendmsg(struct bpf_sock_addr *ctx)
 __section("cgroup/recvmsg4")
 int cil_sock4_recvmsg(struct bpf_sock_addr *ctx)
 {
-	__sock4_xlate_rev(ctx, ctx);
+	__sock4_xlate_rev(ctx, ctx, false);
 	return SYS_PROCEED;
 }
 
@@ -766,7 +802,7 @@ int cil_sock4_recvmsg(struct bpf_sock_addr *ctx)
 __section("cgroup/getpeername4")
 int cil_sock4_getpeername(struct bpf_sock_addr *ctx)
 {
-	__sock4_xlate_rev(ctx, ctx);
+	__sock4_xlate_rev(ctx, ctx, true);
 	return SYS_PROCEED;
 }
 #endif /* ENABLE_SOCKET_LB_PEER */
@@ -1365,7 +1401,8 @@ int cil_sock6_connect(struct bpf_sock_addr *ctx)
 }
 
 static __always_inline int
-sock6_xlate_rev_v4_in_v6(struct bpf_sock_addr *ctx __maybe_unused)
+sock6_xlate_rev_v4_in_v6(struct bpf_sock_addr *ctx __maybe_unused,
+			 const bool peer __maybe_unused)
 {
 #ifdef ENABLE_IPV4
 	struct bpf_sock_addr fake_ctx;
@@ -1381,7 +1418,7 @@ sock6_xlate_rev_v4_in_v6(struct bpf_sock_addr *ctx __maybe_unused)
 	fake_ctx.user_ip4  = addr6.p4;
 	fake_ctx.user_port = ctx_dst_port(ctx);
 
-	ret = __sock4_xlate_rev(&fake_ctx, ctx);
+	ret = __sock4_xlate_rev(&fake_ctx, ctx, peer);
 	if (ret < 0)
 		return ret;
 
@@ -1415,15 +1452,67 @@ sock6_revnat_is_live(struct bpf_sock_addr *ctx,
 	return svc && svc->rev_nat_index == val->rev_nat_index &&
 	       (svc->count != 0 || lb6_svc_is_l7_loadbalancer(svc));
 }
+
+/* See sock4_revnat_from_storage(). */
+static __always_inline bool
+sock6_revnat_from_storage(struct bpf_sock_addr *ctx,
+			  const union v6addr *address, __be16 port,
+			  __u8 protocol, struct ipv6_revnat_entry *val)
+{
+	struct ipv6_sk_storage_entry *st;
+
+	if (!ctx->sk || !sock_is_connected(ctx->sk))
+		return false;
+
+	st = sk_storage_get(&cilium_lb6_reverse_sk_v2, ctx->sk, 0, 0);
+	if (!st || !ipv6_addr_equals(&st->backend_address, address) ||
+	    st->backend_port != port)
+		return false;
+
+	val->address = st->address;
+	val->port = st->port;
+	val->rev_nat_index = st->rev_nat_index;
+	if (sock6_revnat_is_live(ctx, val, protocol))
+		return true;
+
+	sk_storage_delete(&cilium_lb6_reverse_sk_v2, ctx->sk);
+	update_metrics(0, METRIC_INGRESS, REASON_LB_REVNAT_STALE);
+	return false;
+}
+
+/* See sock4_revnat_from_map(). */
+static __always_inline bool
+sock6_revnat_from_map(struct bpf_sock_addr *ctx,
+		      const struct ipv6_revnat_tuple *key, __u8 protocol,
+		      struct ipv6_revnat_entry *val)
+{
+	const struct ipv6_revnat_entry *entry;
+
+	entry = map_lookup_elem(&cilium_lb6_reverse_sk, key);
+	if (!entry)
+		return false;
+
+	if (sock6_revnat_is_live(ctx, entry, protocol)) {
+		*val = *entry;
+		return true;
+	}
+
+	map_delete_elem(&cilium_lb6_reverse_sk, key);
+	update_metrics(0, METRIC_INGRESS, REASON_LB_REVNAT_STALE);
+	return false;
+}
 #endif /* ENABLE_IPV6 */
 
-static __always_inline int __sock6_xlate_rev(struct bpf_sock_addr *ctx)
+/* See __sock4_xlate_rev(). */
+static __always_inline int __sock6_xlate_rev(struct bpf_sock_addr *ctx,
+					     const bool peer)
 {
 #ifdef ENABLE_IPV6
 	struct ipv6_revnat_tuple key = {};
-	struct ipv6_revnat_entry val_tmp = {}, *val = NULL;
+	struct ipv6_revnat_entry val = {};
 	__u16 dst_port = ctx_dst_port(ctx);
 	__u8 protocol = ctx_protocol(ctx);
+	bool found;
 
 	key.cookie = sock_local_cookie(ctx);
 	key.port = dst_port;
@@ -1432,47 +1521,24 @@ static __always_inline int __sock6_xlate_rev(struct bpf_sock_addr *ctx)
 	send_trace_sock_notify6(ctx, XLATE_PRE_DIRECTION_REV, &key.address,
 				bpf_ntohs(dst_port), false);
 
-	/* See __sock4_xlate_rev. */
-	if (ctx->sk && sock_is_connected(ctx->sk)) {
-		struct ipv6_sk_storage_entry *sk_val =
-			sk_storage_get(&cilium_lb6_reverse_sk_v2, ctx->sk, 0, 0);
-
-		if (sk_val &&
-		    ipv6_addr_equals(&sk_val->backend_address, &key.address) &&
-		    sk_val->backend_port == dst_port) {
-			val_tmp.address = sk_val->address;
-			val_tmp.port = sk_val->port;
-			val_tmp.rev_nat_index = sk_val->rev_nat_index;
-
-			if (sock6_revnat_is_live(ctx, &val_tmp, protocol)) {
-				val = &val_tmp;
-			} else {
-				sk_storage_delete(&cilium_lb6_reverse_sk_v2, ctx->sk);
-				update_metrics(0, METRIC_INGRESS,
-					       REASON_LB_REVNAT_STALE);
-			}
-		}
-	}
-
-	if (!val) {
-		val = map_lookup_elem(&cilium_lb6_reverse_sk, &key);
-		if (val && !sock6_revnat_is_live(ctx, val, protocol)) {
-			map_delete_elem(&cilium_lb6_reverse_sk, &key);
-			update_metrics(0, METRIC_INGRESS, REASON_LB_REVNAT_STALE);
-			return -ENOENT;
-		}
-	}
-
-	if (val) {
-		ctx_set_v6_address(ctx, &val->address);
-		ctx_set_port(ctx, val->port);
-		send_trace_sock_notify6(ctx, XLATE_POST_DIRECTION_REV, &val->address,
-					bpf_ntohs(val->port), false);
+	found = peer &&
+		sock6_revnat_from_storage(ctx, &key.address, dst_port, protocol,
+					  &val);
+	if (!found)
+		found = sock6_revnat_from_map(ctx, &key, protocol, &val);
+	if (!found && !peer)
+		found = sock6_revnat_from_storage(ctx, &key.address, dst_port,
+						  protocol, &val);
+	if (found) {
+		ctx_set_v6_address(ctx, &val.address);
+		ctx_set_port(ctx, val.port);
+		send_trace_sock_notify6(ctx, XLATE_POST_DIRECTION_REV,
+					&val.address, bpf_ntohs(val.port), false);
 		return 0;
 	}
 #endif /* ENABLE_IPV6 */
 
-	return sock6_xlate_rev_v4_in_v6(ctx);
+	return sock6_xlate_rev_v4_in_v6(ctx, peer);
 }
 
 __section("cgroup/sendmsg6")
@@ -1492,7 +1558,7 @@ int cil_sock6_sendmsg(struct bpf_sock_addr *ctx)
 __section("cgroup/recvmsg6")
 int cil_sock6_recvmsg(struct bpf_sock_addr *ctx)
 {
-	__sock6_xlate_rev(ctx);
+	__sock6_xlate_rev(ctx, false);
 	return SYS_PROCEED;
 }
 
@@ -1500,7 +1566,7 @@ int cil_sock6_recvmsg(struct bpf_sock_addr *ctx)
 __section("cgroup/getpeername6")
 int cil_sock6_getpeername(struct bpf_sock_addr *ctx)
 {
-	__sock6_xlate_rev(ctx);
+	__sock6_xlate_rev(ctx, true);
 	return SYS_PROCEED;
 }
 #endif /* ENABLE_SOCKET_LB_PEER */
