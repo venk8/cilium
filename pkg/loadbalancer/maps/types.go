@@ -972,6 +972,15 @@ const (
 	// SockRevNat6MapName is the BPF map name.
 	SockRevNat6MapName = "cilium_lb6_reverse_sk"
 
+	// SockRevNat4StMapName is the name of the IPv4 socket storage map. It is
+	// created and pinned by the datapath loader and not accessed from user
+	// space.
+	SockRevNat4StMapName = "cilium_lb4_reverse_sk_v2"
+
+	// SockRevNat6StMapName is the name of the IPv6 socket storage map. See
+	// SockRevNat4StMapName.
+	SockRevNat6StMapName = "cilium_lb6_reverse_sk_v2"
+
 	// SockRevNat4MapSize is the maximum number of entries in the BPF map.
 	SockRevNat4MapSize = 256 * 1024
 
