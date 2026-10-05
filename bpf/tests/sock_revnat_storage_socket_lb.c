@@ -51,6 +51,9 @@ mock_map_update_elem(const void *map, const void *key, const void *value,
 #include "lib/ipcache.h"
 #include "lib/lb.h"
 
+/* Reject connect() to a service without backends. */
+ASSIGN_CONFIG(bool, enable_no_service_endpoints_routable, true)
+
 static struct ipv4_sk_storage_entry st4;
 static struct ipv6_sk_storage_entry st6;
 static bool st4_valid;
@@ -456,6 +459,9 @@ int test_sock6_revnat_storage(__maybe_unused struct xdp_md *ctx)
 	test_finish();
 }
 
+#define NODEPORT	bpf_htons(30080)
+#define REVNAT_NODEPORT	3
+
 static __always_inline int connect4(struct bpf_sock_addr *addr, __be32 ip,
 				    __be16 port)
 {
@@ -482,6 +488,427 @@ static __always_inline int connect6(struct bpf_sock_addr *addr,
 	memcpy(addr->user_ip6, ip, 16);
 	addr->user_port = port;
 	return __sock6_xlate_fwd(addr, false, true);
+}
+
+/* A connect() that socket LB lets through untranslated drops the reverse NAT
+ * state of the socket's previous connection. A socket that reached a backend
+ * through a service and then connects to it directly must neither report the
+ * service nor match it in socket termination, whether or not it has storage.
+ * A connect() through a service whose backend has the service's own address
+ * and port is translated, and must keep the state it records.
+ */
+CHECK("xdp", "sock4_revnat_direct_reconnect")
+int test_sock4_revnat_direct_reconnect(__maybe_unused struct xdp_md *ctx)
+{
+	struct bpf_sock sk = {};
+	struct bpf_sock_addr addr = {
+		.protocol = IPPROTO_UDP,
+		.sk = &sk,
+	};
+	struct ipv4_revnat_tuple lru_x = {
+		.cookie = 0,
+		.address = v4_pod_one,
+		.port = BACKEND_PORT,
+	};
+	struct ipv4_revnat_tuple lru_y = {
+		.cookie = 0,
+		.address = v4_pod_two,
+		.port = BACKEND_PORT,
+	};
+	struct ipv4_revnat_tuple lru_node = {
+		.cookie = 0,
+		.address = v4_node_one,
+		.port = NODEPORT,
+	};
+	int ret;
+
+	/* A fronts backend X, B fronts backend Y. */
+	lb_v4_add_service(v4_svc_one, SVC_PORT_A, IPPROTO_UDP, 1, REVNAT_A);
+	lb_v4_add_backend(v4_svc_one, SVC_PORT_A, 1, 124, v4_pod_one,
+			  BACKEND_PORT, IPPROTO_UDP, 0);
+	lb_v4_add_service(v4_svc_two, SVC_PORT_B, IPPROTO_UDP, 1, REVNAT_B);
+	lb_v4_add_backend(v4_svc_two, SVC_PORT_B, 1, 125, v4_pod_two,
+			  BACKEND_PORT, IPPROTO_UDP, 0);
+	ipcache_v4_add_entry(v4_pod_one, 0, 112233, 0, 0);
+	ipcache_v4_add_entry(v4_pod_two, 0, 112233, 0, 0);
+	map_delete_elem(&cilium_lb4_reverse_sk, &lru_x);
+	map_delete_elem(&cilium_lb4_reverse_sk, &lru_y);
+	st4_valid = false;
+	fail_revnat_update = false;
+
+	test_init();
+
+	/* connect() to A, connect(AF_UNSPEC), then connect() to X directly. */
+	ret = connect4(&addr, v4_svc_one, SVC_PORT_A);
+	assert(ret == 0);
+	assert(addr.user_ip4 == v4_pod_one);
+	assert(st4_valid);
+	assert(map_lookup_elem(&cilium_lb4_reverse_sk, &lru_x));
+	ret = connect4(&addr, v4_pod_one, BACKEND_PORT);
+	assert(ret == -ENXIO);
+	assert(addr.user_ip4 == v4_pod_one);
+	assert(addr.user_port == BACKEND_PORT);
+	assert(!st4_valid);
+	assert(!map_lookup_elem(&cilium_lb4_reverse_sk, &lru_x));
+
+	/* Neither getpeername() nor recvmsg() report A any more. */
+	sk.dst_ip4 = v4_pod_one;
+	sk.dst_port = BACKEND_PORT;
+	ret = rev4(&addr, GETPEERNAME);
+	assert(ret == -ENXIO);
+	assert(addr.user_ip4 == v4_pod_one);
+	assert(addr.user_port == BACKEND_PORT);
+	ret = rev4(&addr, RECVMSG);
+	assert(ret == -ENXIO);
+	assert(addr.user_ip4 == v4_pod_one);
+
+	/* The same for a socket without storage, e.g. one that connected to A
+	 * before the upgrade, or failed to allocate its storage.
+	 */
+	ret = connect4(&addr, v4_svc_one, SVC_PORT_A);
+	assert(ret == 0);
+	st4_valid = false;
+	ret = connect4(&addr, v4_pod_one, BACKEND_PORT);
+	assert(ret == -ENXIO);
+	assert(!map_lookup_elem(&cilium_lb4_reverse_sk, &lru_x));
+
+	/* connect() to A, then to B, then directly to Y and to X. The storage
+	 * only describes the last connection, while the legacy map keeps an
+	 * entry per backend.
+	 */
+	ret = connect4(&addr, v4_svc_one, SVC_PORT_A);
+	assert(ret == 0);
+	ret = connect4(&addr, v4_svc_two, SVC_PORT_B);
+	assert(ret == 0);
+	assert(addr.user_ip4 == v4_pod_two);
+	assert(st4_valid);
+	assert(st4.address == v4_svc_two);
+	assert(map_lookup_elem(&cilium_lb4_reverse_sk, &lru_x));
+	assert(map_lookup_elem(&cilium_lb4_reverse_sk, &lru_y));
+	ret = connect4(&addr, v4_pod_two, BACKEND_PORT);
+	assert(ret == -ENXIO);
+	assert(!st4_valid);
+	assert(!map_lookup_elem(&cilium_lb4_reverse_sk, &lru_y));
+	ret = connect4(&addr, v4_pod_one, BACKEND_PORT);
+	assert(ret == -ENXIO);
+	assert(!map_lookup_elem(&cilium_lb4_reverse_sk, &lru_x));
+	ret = rev4(&addr, GETPEERNAME);
+	assert(ret == -ENXIO);
+	assert(addr.user_ip4 == v4_pod_one);
+
+	/* A NodePort whose host-network backend listens on the same address and
+	 * port: connect() is translated without changing the destination, and
+	 * keeps the state it records.
+	 */
+	lb_v4_add_service_with_flags(v4_node_one, NODEPORT, IPPROTO_UDP, 1,
+				     REVNAT_NODEPORT, SVC_FLAG_NODEPORT, 0);
+	lb_v4_add_backend(v4_node_one, NODEPORT, 1, 126, v4_node_one, NODEPORT,
+			  IPPROTO_UDP, 0);
+	ipcache_v4_add_entry(v4_node_one, 0, HOST_ID, 0, 0);
+	map_delete_elem(&cilium_lb4_reverse_sk, &lru_node);
+	ret = connect4(&addr, v4_node_one, NODEPORT);
+	assert(ret == 0);
+	assert(addr.user_ip4 == v4_node_one);
+	assert(addr.user_port == NODEPORT);
+	assert(st4_valid);
+	assert(st4.rev_nat_index == REVNAT_NODEPORT);
+	assert(map_lookup_elem(&cilium_lb4_reverse_sk, &lru_node));
+
+	/* An IPv4-mapped IPv6 socket uses the IPv4 state. */
+	memset(&addr, 0, sizeof(addr));
+	addr.protocol = IPPROTO_UDP;
+	addr.sk = &sk;
+	ret = connect46(&addr, v4_svc_one, SVC_PORT_A);
+	assert(ret == 0);
+	assert(addr.user_ip6[3] == v4_pod_one);
+	assert(st4_valid);
+	assert(st4.address == v4_svc_one);
+	assert(map_lookup_elem(&cilium_lb4_reverse_sk, &lru_x));
+	ret = connect46(&addr, v4_pod_one, BACKEND_PORT);
+	assert(ret == -ENXIO);
+	assert(addr.user_ip6[3] == v4_pod_one);
+	assert(addr.user_port == BACKEND_PORT);
+	assert(!st4_valid);
+	assert(!map_lookup_elem(&cilium_lb4_reverse_sk, &lru_x));
+
+	test_finish();
+}
+
+/* See test_sock4_revnat_direct_reconnect. */
+CHECK("xdp", "sock6_revnat_direct_reconnect")
+int test_sock6_revnat_direct_reconnect(__maybe_unused struct xdp_md *ctx)
+{
+	union v6addr svc_a = {}, svc_b = {}, backend_x = {}, backend_y = {};
+	union v6addr node = {};
+	struct bpf_sock sk = {};
+	struct bpf_sock_addr addr = {
+		.protocol = IPPROTO_UDP,
+		.sk = &sk,
+	};
+	struct ipv6_revnat_tuple lru_x = {
+		.cookie = 0,
+		.port = BACKEND_PORT,
+	};
+	struct ipv6_revnat_tuple lru_y = {
+		.cookie = 0,
+		.port = BACKEND_PORT,
+	};
+	struct ipv6_revnat_tuple lru_node = {
+		.cookie = 0,
+		.port = NODEPORT,
+	};
+	int ret;
+
+	memcpy(svc_a.addr, (void *)v6_node_one, 16);
+	memcpy(svc_b.addr, (void *)v6_node_two, 16);
+	memcpy(backend_x.addr, (void *)v6_pod_one, 16);
+	memcpy(backend_y.addr, (void *)v6_pod_two, 16);
+	memcpy(node.addr, (void *)v6_node_three, 16);
+	memcpy(&lru_x.address, &backend_x, sizeof(backend_x));
+	memcpy(&lru_y.address, &backend_y, sizeof(backend_y));
+	memcpy(&lru_node.address, &node, sizeof(node));
+
+	lb_v6_add_service(&svc_a, SVC_PORT_A, IPPROTO_UDP, 1, REVNAT_A);
+	lb_v6_add_backend(&svc_a, SVC_PORT_A, 1, 124, &backend_x, BACKEND_PORT,
+			  IPPROTO_UDP, 0);
+	lb_v6_add_service(&svc_b, SVC_PORT_B, IPPROTO_UDP, 1, REVNAT_B);
+	lb_v6_add_backend(&svc_b, SVC_PORT_B, 1, 125, &backend_y, BACKEND_PORT,
+			  IPPROTO_UDP, 0);
+	ipcache_v6_add_entry(&backend_x, 0, 112233, 0, 0);
+	ipcache_v6_add_entry(&backend_y, 0, 112233, 0, 0);
+	map_delete_elem(&cilium_lb6_reverse_sk, &lru_x);
+	map_delete_elem(&cilium_lb6_reverse_sk, &lru_y);
+	st6_valid = false;
+	fail_revnat_update = false;
+
+	test_init();
+
+	ret = connect6(&addr, &svc_a, SVC_PORT_A);
+	assert(ret == 0);
+	assert(!memcmp(addr.user_ip6, &backend_x, 16));
+	assert(st6_valid);
+	assert(map_lookup_elem(&cilium_lb6_reverse_sk, &lru_x));
+	ret = connect6(&addr, &backend_x, BACKEND_PORT);
+	assert(ret == -ENXIO);
+	assert(!memcmp(addr.user_ip6, &backend_x, 16));
+	assert(addr.user_port == BACKEND_PORT);
+	assert(!st6_valid);
+	assert(!map_lookup_elem(&cilium_lb6_reverse_sk, &lru_x));
+
+	sk.dst_port = BACKEND_PORT;
+	ret = rev6(&addr, &backend_x, GETPEERNAME);
+	assert(ret == -ENXIO);
+	assert(!memcmp(addr.user_ip6, &backend_x, 16));
+	assert(addr.user_port == BACKEND_PORT);
+	ret = rev6(&addr, &backend_x, RECVMSG);
+	assert(ret == -ENXIO);
+	assert(!memcmp(addr.user_ip6, &backend_x, 16));
+
+	ret = connect6(&addr, &svc_a, SVC_PORT_A);
+	assert(ret == 0);
+	st6_valid = false;
+	ret = connect6(&addr, &backend_x, BACKEND_PORT);
+	assert(ret == -ENXIO);
+	assert(!map_lookup_elem(&cilium_lb6_reverse_sk, &lru_x));
+
+	ret = connect6(&addr, &svc_a, SVC_PORT_A);
+	assert(ret == 0);
+	ret = connect6(&addr, &svc_b, SVC_PORT_B);
+	assert(ret == 0);
+	assert(!memcmp(addr.user_ip6, &backend_y, 16));
+	assert(st6_valid);
+	assert(ipv6_addr_equals(&st6.address, &svc_b));
+	assert(map_lookup_elem(&cilium_lb6_reverse_sk, &lru_x));
+	assert(map_lookup_elem(&cilium_lb6_reverse_sk, &lru_y));
+	ret = connect6(&addr, &backend_y, BACKEND_PORT);
+	assert(ret == -ENXIO);
+	assert(!st6_valid);
+	assert(!map_lookup_elem(&cilium_lb6_reverse_sk, &lru_y));
+	ret = connect6(&addr, &backend_x, BACKEND_PORT);
+	assert(ret == -ENXIO);
+	assert(!map_lookup_elem(&cilium_lb6_reverse_sk, &lru_x));
+	ret = rev6(&addr, &backend_x, GETPEERNAME);
+	assert(ret == -ENXIO);
+	assert(!memcmp(addr.user_ip6, &backend_x, 16));
+
+	lb_v6_add_service_with_flags(&node, NODEPORT, IPPROTO_UDP, 1,
+				     REVNAT_NODEPORT, SVC_FLAG_NODEPORT, 0);
+	lb_v6_add_backend(&node, NODEPORT, 1, 126, &node, NODEPORT,
+			  IPPROTO_UDP, 0);
+	ipcache_v6_add_entry(&node, 0, HOST_ID, 0, 0);
+	map_delete_elem(&cilium_lb6_reverse_sk, &lru_node);
+	ret = connect6(&addr, &node, NODEPORT);
+	assert(ret == 0);
+	assert(!memcmp(addr.user_ip6, &node, 16));
+	assert(addr.user_port == NODEPORT);
+	assert(st6_valid);
+	assert(st6.rev_nat_index == REVNAT_NODEPORT);
+	assert(map_lookup_elem(&cilium_lb6_reverse_sk, &lru_node));
+
+	test_finish();
+}
+
+#define SVC_PORT_C	bpf_htons(5003)
+#define REVNAT_C	4
+
+/* A connect() that socket LB rejects leaves the socket connected to its
+ * previous peer, so it must leave the reverse NAT state of that connection
+ * alone too: the storage may be all that is left of it, and the legacy entry
+ * may name the service of a later sendto() instead.
+ */
+CHECK("xdp", "sock4_revnat_rejected_connect")
+int test_sock4_revnat_rejected_connect(__maybe_unused struct xdp_md *ctx)
+{
+	struct bpf_sock sk = {};
+	struct bpf_sock_addr addr = {
+		.protocol = IPPROTO_UDP,
+		.sk = &sk,
+	};
+	struct ipv4_revnat_tuple lru_key = {
+		.cookie = 0,
+		.address = v4_pod_one,
+		.port = BACKEND_PORT,
+	};
+	int ret;
+
+	/* A and B front the same backend, C has none. */
+	lb_v4_add_service(v4_svc_one, SVC_PORT_A, IPPROTO_UDP, 1, REVNAT_A);
+	lb_v4_add_backend(v4_svc_one, SVC_PORT_A, 1, 124, v4_pod_one,
+			  BACKEND_PORT, IPPROTO_UDP, 0);
+	lb_v4_add_service(v4_svc_two, SVC_PORT_B, IPPROTO_UDP, 1, REVNAT_B);
+	lb_v4_add_backend(v4_svc_two, SVC_PORT_B, 1, 124, v4_pod_one,
+			  BACKEND_PORT, IPPROTO_UDP, 0);
+	lb_v4_add_service(v4_svc_two, SVC_PORT_C, IPPROTO_UDP, 0, REVNAT_C);
+	ipcache_v4_add_entry(v4_pod_one, 0, 112233, 0, 0);
+	map_delete_elem(&cilium_lb4_reverse_sk, &lru_key);
+	st4_valid = false;
+	fail_revnat_update = false;
+
+	test_init();
+
+	/* connect() to A, then lose the legacy entry to LRU eviction. */
+	ret = connect4(&addr, v4_svc_one, SVC_PORT_A);
+	assert(ret == 0);
+	sk.dst_ip4 = v4_pod_one;
+	sk.dst_port = BACKEND_PORT;
+	map_delete_elem(&cilium_lb4_reverse_sk, &lru_key);
+
+	/* connect() to C is rejected, and the socket stays connected to A. */
+	ret = connect4(&addr, v4_svc_two, SVC_PORT_C);
+	assert(ret == -EHOSTUNREACH);
+	assert(st4_valid);
+	assert(st4.address == v4_svc_one);
+	ret = rev4(&addr, GETPEERNAME);
+	assert(ret == 0);
+	assert(addr.user_ip4 == v4_svc_one);
+	assert(addr.user_port == SVC_PORT_A);
+	ret = rev4(&addr, RECVMSG);
+	assert(ret == 0);
+	assert(addr.user_ip4 == v4_svc_one);
+	assert(addr.user_port == SVC_PORT_A);
+
+	/* After sendto() B, a rejected connect() still leaves getpeername()
+	 * reporting A, while replies are from B.
+	 */
+	addr.user_ip4 = v4_svc_two;
+	addr.user_port = SVC_PORT_B;
+	ret = __sock4_xlate_fwd(&addr, &addr, true, false);
+	assert(ret == 0);
+	ret = connect4(&addr, v4_svc_two, SVC_PORT_C);
+	assert(ret == -EHOSTUNREACH);
+	ret = rev4(&addr, GETPEERNAME);
+	assert(ret == 0);
+	assert(addr.user_ip4 == v4_svc_one);
+	assert(addr.user_port == SVC_PORT_A);
+	ret = rev4(&addr, RECVMSG);
+	assert(ret == 0);
+	assert(addr.user_ip4 == v4_svc_two);
+	assert(addr.user_port == SVC_PORT_B);
+
+	/* The same through an IPv4-mapped IPv6 socket. */
+	memset(&addr, 0, sizeof(addr));
+	addr.protocol = IPPROTO_UDP;
+	addr.sk = &sk;
+	ret = connect46(&addr, v4_svc_one, SVC_PORT_A);
+	assert(ret == 0);
+	map_delete_elem(&cilium_lb4_reverse_sk, &lru_key);
+	ret = connect46(&addr, v4_svc_two, SVC_PORT_C);
+	assert(ret == -EHOSTUNREACH);
+	assert(st4_valid);
+	assert(st4.address == v4_svc_one);
+
+	test_finish();
+}
+
+/* See test_sock4_revnat_rejected_connect. */
+CHECK("xdp", "sock6_revnat_rejected_connect")
+int test_sock6_revnat_rejected_connect(__maybe_unused struct xdp_md *ctx)
+{
+	union v6addr svc_a = {}, svc_b = {}, backend = {};
+	struct bpf_sock sk = {};
+	struct bpf_sock_addr addr = {
+		.protocol = IPPROTO_UDP,
+		.sk = &sk,
+	};
+	struct ipv6_revnat_tuple lru_key = {
+		.cookie = 0,
+		.port = BACKEND_PORT,
+	};
+	int ret;
+
+	memcpy(svc_a.addr, (void *)v6_node_one, 16);
+	memcpy(svc_b.addr, (void *)v6_node_two, 16);
+	memcpy(backend.addr, (void *)v6_pod_one, 16);
+	memcpy(&lru_key.address, &backend, sizeof(backend));
+
+	lb_v6_add_service(&svc_a, SVC_PORT_A, IPPROTO_UDP, 1, REVNAT_A);
+	lb_v6_add_backend(&svc_a, SVC_PORT_A, 1, 124, &backend, BACKEND_PORT,
+			  IPPROTO_UDP, 0);
+	lb_v6_add_service(&svc_b, SVC_PORT_B, IPPROTO_UDP, 1, REVNAT_B);
+	lb_v6_add_backend(&svc_b, SVC_PORT_B, 1, 124, &backend, BACKEND_PORT,
+			  IPPROTO_UDP, 0);
+	lb_v6_add_service(&svc_b, SVC_PORT_C, IPPROTO_UDP, 0, REVNAT_C);
+	ipcache_v6_add_entry(&backend, 0, 112233, 0, 0);
+	map_delete_elem(&cilium_lb6_reverse_sk, &lru_key);
+	st6_valid = false;
+	fail_revnat_update = false;
+
+	test_init();
+
+	ret = connect6(&addr, &svc_a, SVC_PORT_A);
+	assert(ret == 0);
+	sk.dst_port = BACKEND_PORT;
+	map_delete_elem(&cilium_lb6_reverse_sk, &lru_key);
+
+	ret = connect6(&addr, &svc_b, SVC_PORT_C);
+	assert(ret == -EHOSTUNREACH);
+	assert(st6_valid);
+	assert(ipv6_addr_equals(&st6.address, &svc_a));
+	ret = rev6(&addr, &backend, GETPEERNAME);
+	assert(ret == 0);
+	assert(!memcmp(addr.user_ip6, &svc_a, 16));
+	assert(addr.user_port == SVC_PORT_A);
+	ret = rev6(&addr, &backend, RECVMSG);
+	assert(ret == 0);
+	assert(!memcmp(addr.user_ip6, &svc_a, 16));
+	assert(addr.user_port == SVC_PORT_A);
+
+	memcpy(addr.user_ip6, &svc_b, 16);
+	addr.user_port = SVC_PORT_B;
+	ret = __sock6_xlate_fwd(&addr, true, false);
+	assert(ret == 0);
+	ret = connect6(&addr, &svc_b, SVC_PORT_C);
+	assert(ret == -EHOSTUNREACH);
+	ret = rev6(&addr, &backend, GETPEERNAME);
+	assert(ret == 0);
+	assert(!memcmp(addr.user_ip6, &svc_a, 16));
+	assert(addr.user_port == SVC_PORT_A);
+	ret = rev6(&addr, &backend, RECVMSG);
+	assert(ret == 0);
+	assert(!memcmp(addr.user_ip6, &svc_b, 16));
+	assert(addr.user_port == SVC_PORT_B);
+
+	test_finish();
 }
 
 /* The connect hooks write the legacy entry before the socket storage. When the
@@ -657,6 +1084,72 @@ int test_sock6_revnat_update_failure(__maybe_unused struct xdp_md *ctx)
 	assert(ret == 0);
 	assert(!memcmp(addr.user_ip6, &svc_a, 16));
 	assert(addr.user_port == SVC_PORT_A);
+
+	test_finish();
+}
+
+/* An IPv6 socket can hold IPv6 state from a connect() to a native IPv6
+ * service and IPv4 state from one to an IPv4-mapped service. A connect() that
+ * socket LB lets through untranslated only drops the state of its own
+ * family: the other family's state cannot match the new peer.
+ */
+CHECK("xdp", "sock6_revnat_mapped_transition")
+int test_sock6_revnat_mapped_transition(__maybe_unused struct xdp_md *ctx)
+{
+	union v6addr svc = {}, backend = {};
+	struct bpf_sock sk = {};
+	struct bpf_sock_addr addr = {
+		.protocol = IPPROTO_UDP,
+		.sk = &sk,
+	};
+	int ret;
+
+	memcpy(svc.addr, (void *)v6_node_one, 16);
+	memcpy(backend.addr, (void *)v6_pod_one, 16);
+
+	lb_v6_add_service(&svc, SVC_PORT_A, IPPROTO_UDP, 1, REVNAT_A);
+	lb_v6_add_backend(&svc, SVC_PORT_A, 1, 124, &backend, BACKEND_PORT,
+			  IPPROTO_UDP, 0);
+	ipcache_v6_add_entry(&backend, 0, 112233, 0, 0);
+	lb_v4_add_service(v4_svc_one, SVC_PORT_A, IPPROTO_UDP, 1, REVNAT_A);
+	lb_v4_add_backend(v4_svc_one, SVC_PORT_A, 1, 124, v4_pod_one,
+			  BACKEND_PORT, IPPROTO_UDP, 0);
+	ipcache_v4_add_entry(v4_pod_one, 0, 112233, 0, 0);
+	st4_valid = false;
+	st6_valid = false;
+	fail_revnat_update = false;
+
+	test_init();
+
+	/* connect() through the IPv6 service, then through the IPv4 one. */
+	ret = connect6(&addr, &svc, SVC_PORT_A);
+	assert(ret == 0);
+	assert(st6_valid);
+	ret = connect46(&addr, v4_svc_one, SVC_PORT_A);
+	assert(ret == 0);
+	assert(st4_valid);
+	assert(st6_valid);
+
+	/* connect() directly to the IPv4 backend drops only the IPv4 state,
+	 * and the IPv4-mapped peer is reported as is.
+	 */
+	ret = connect46(&addr, v4_pod_one, BACKEND_PORT);
+	assert(ret == -ENXIO);
+	assert(!st4_valid);
+	assert(st6_valid);
+	sk.dst_port = BACKEND_PORT;
+	ret = __sock6_xlate_rev(&addr, GETPEERNAME);
+	assert(ret == -ENXIO);
+	assert(addr.user_ip6[3] == v4_pod_one);
+	assert(addr.user_port == BACKEND_PORT);
+
+	/* connect() directly to the IPv6 backend drops the IPv6 state. */
+	ret = connect6(&addr, &backend, BACKEND_PORT);
+	assert(ret == -ENXIO);
+	assert(!st6_valid);
+	ret = rev6(&addr, &backend, GETPEERNAME);
+	assert(ret == -ENXIO);
+	assert(!memcmp(addr.user_ip6, &backend, 16));
 
 	test_finish();
 }

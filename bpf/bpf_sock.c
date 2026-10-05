@@ -143,6 +143,22 @@ bool sock_is_connected(const struct bpf_sock *sk)
 	return sk->dst_port != 0;
 }
 
+/* How far forward translation got with a call. Whether socket LB rejects the
+ * call is up to the returned error, see sock_xlate_rejected().
+ */
+enum sock_xlate_outcome {
+	SOCK_XLATE_SKIPPED,	/* not subject to socket LB */
+	SOCK_XLATE_NONE,	/* subject to socket LB, but not translated */
+	SOCK_XLATE_DONE,	/* translated to a service backend */
+};
+
+/* The forward translation errors on which socket LB rejects the call. */
+static __always_inline __maybe_unused
+bool sock_xlate_rejected(int err)
+{
+	return err == -EHOSTUNREACH || err == -ENOMEM;
+}
+
 static __always_inline __maybe_unused
 bool sock_proto_enabled(__u8 proto)
 {
@@ -213,6 +229,32 @@ static __always_inline int sock4_update_revnat(struct bpf_sock_addr *ctx,
 	}
 
 	return ret;
+}
+
+/* A connect() that socket LB lets through untranslated replaces whatever the
+ * socket was connected to, but leaves the reverse NAT state recorded for it
+ * behind: the socket's storage, and a legacy entry for the new destination if
+ * the socket reached it through a service before, e.g. when it now connects to
+ * that backend directly. Either would make getpeername() and recvmsg() report
+ * the service, and socket termination destroy the socket along with the
+ * backend.
+ */
+static __always_inline void sock4_forget_revnat(struct bpf_sock_addr *ctx,
+						__be32 dst_ip, __be16 dst_port)
+{
+	struct ipv4_revnat_tuple key = {};
+
+	if (ctx->sk)
+		sk_storage_delete(&cilium_lb4_reverse_sk_v2, ctx->sk);
+
+	key.cookie = sock_local_cookie(ctx);
+	key.address = dst_ip;
+	key.port = dst_port;
+	/* Most destinations have no entry, and unlike the delete, the lookup
+	 * doesn't take the bucket lock.
+	 */
+	if (map_lookup_elem(&cilium_lb4_reverse_sk, &key))
+		map_delete_elem(&cilium_lb4_reverse_sk, &key);
 }
 
 static __always_inline int sock4_delete_revnat(const struct bpf_sock *ctx,
@@ -332,10 +374,10 @@ lookup:
 	return NULL;
 }
 
-static __always_inline int __sock4_xlate_fwd(struct bpf_sock_addr *ctx,
-					     struct bpf_sock_addr *ctx_full,
-					     const bool udp_only,
-					     const bool is_connect)
+static __always_inline int
+sock4_xlate_fwd_svc(struct bpf_sock_addr *ctx, struct bpf_sock_addr *ctx_full,
+		    const bool udp_only, const bool is_connect,
+		    enum sock_xlate_outcome *outcome)
 {
 	union lb4_affinity_client_id id;
 	const bool in_hostns = ctx_in_hostns(ctx_full, &id.client_cookie);
@@ -361,6 +403,8 @@ static __always_inline int __sock4_xlate_fwd(struct bpf_sock_addr *ctx,
 
 	if (!udp_only && !sock_proto_enabled(protocol))
 		return -ENOTSUP;
+
+	*outcome = SOCK_XLATE_NONE;
 
 	/* In case a direct match fails, we try to look-up surrogate
 	 * service entries via wildcarded lookup for NodePort and
@@ -496,8 +540,32 @@ out:
 
 	ctx->user_ip4 = backend->address;
 	ctx_set_port(ctx, backend->port);
+	*outcome = SOCK_XLATE_DONE;
 
 	return 0;
+}
+
+/* Forward translation for connect() and sendmsg(). A connect() that socket LB
+ * lets through untranslated drops the reverse NAT state of the socket's
+ * previous connection, see sock4_forget_revnat(). A translated connect()
+ * replaces that state instead, and a rejected one leaves it alone, as the
+ * kernel then keeps the socket's previous peer.
+ */
+static __always_inline int __sock4_xlate_fwd(struct bpf_sock_addr *ctx,
+					     struct bpf_sock_addr *ctx_full,
+					     const bool udp_only,
+					     const bool is_connect)
+{
+	enum sock_xlate_outcome outcome = SOCK_XLATE_SKIPPED;
+	__be16 dst_port = ctx_dst_port(ctx);
+	__be32 dst_ip = ctx->user_ip4;
+	int ret;
+
+	ret = sock4_xlate_fwd_svc(ctx, ctx_full, udp_only, is_connect, &outcome);
+	if (is_connect && outcome == SOCK_XLATE_NONE && !sock_xlate_rejected(ret))
+		sock4_forget_revnat(ctx_full, dst_ip, dst_port);
+
+	return ret;
 }
 
 __section("cgroup/connect4")
@@ -511,7 +579,7 @@ int cil_sock4_connect(struct bpf_sock_addr *ctx)
 	}
 
 	err = __sock4_xlate_fwd(ctx, ctx, false, true);
-	if (err == -EHOSTUNREACH || err == -ENOMEM) {
+	if (sock_xlate_rejected(err)) {
 		try_set_retval(err);
 		return SYS_REJECT;
 	}
@@ -747,7 +815,7 @@ int cil_sock4_sendmsg(struct bpf_sock_addr *ctx)
 	int err;
 
 	err = __sock4_xlate_fwd(ctx, ctx, true, false);
-	if (err == -EHOSTUNREACH || err == -ENOMEM) {
+	if (sock_xlate_rejected(err)) {
 		try_set_retval(err);
 		return SYS_REJECT;
 	}
@@ -827,6 +895,23 @@ static __always_inline int sock6_update_revnat(struct bpf_sock_addr *ctx,
 			*sk_val = sk_init;
 	}
 	return ret;
+}
+
+/* See sock4_forget_revnat(). */
+static __always_inline void sock6_forget_revnat(struct bpf_sock_addr *ctx,
+						const union v6addr *dst_ip,
+						__be16 dst_port)
+{
+	struct ipv6_revnat_tuple key = {};
+
+	if (ctx->sk)
+		sk_storage_delete(&cilium_lb6_reverse_sk_v2, ctx->sk);
+
+	key.cookie = sock_local_cookie(ctx);
+	key.address = *dst_ip;
+	key.port = dst_port;
+	if (map_lookup_elem(&cilium_lb6_reverse_sk, &key))
+		map_delete_elem(&cilium_lb6_reverse_sk, &key);
 }
 
 static __always_inline void ctx_get_v6_dst_address(const struct bpf_sock *ctx,
@@ -1169,11 +1254,11 @@ int cil_sock6_pre_bind(struct bpf_sock_addr *ctx)
 	return ret;
 }
 
-static __always_inline int __sock6_xlate_fwd(struct bpf_sock_addr *ctx,
-					     const bool udp_only,
-					     const bool is_connect)
-{
 #ifdef ENABLE_IPV6
+static __always_inline int
+sock6_xlate_fwd_svc(struct bpf_sock_addr *ctx, const bool udp_only,
+		    const bool is_connect, enum sock_xlate_outcome *outcome)
+{
 	union lb6_affinity_client_id id;
 	const bool in_hostns = ctx_in_hostns(ctx, &id.client_cookie);
 	const struct lb6_backend *backend;
@@ -1200,6 +1285,8 @@ static __always_inline int __sock6_xlate_fwd(struct bpf_sock_addr *ctx,
 
 	ctx_get_v6_address(ctx, &key.address);
 	ipv6_addr_copy(&dst_ip, &key.address);
+
+	*outcome = SOCK_XLATE_NONE;
 
 	svc = lb6_lookup_service(&key, true);
 	if (!svc)
@@ -1295,8 +1382,32 @@ out:
 
 	ctx_set_v6_address(ctx, &backend->address);
 	ctx_set_port(ctx, backend->port);
+	*outcome = SOCK_XLATE_DONE;
 
 	return 0;
+}
+#endif /* ENABLE_IPV6 */
+
+/* See __sock4_xlate_fwd(). */
+static __always_inline int __sock6_xlate_fwd(struct bpf_sock_addr *ctx,
+					     const bool udp_only,
+					     const bool is_connect)
+{
+#ifdef ENABLE_IPV6
+	enum sock_xlate_outcome outcome = SOCK_XLATE_SKIPPED;
+	__be16 dst_port = ctx_dst_port(ctx);
+	union v6addr dst_ip;
+	int ret;
+
+	ctx_get_v6_address(ctx, &dst_ip);
+
+	ret = sock6_xlate_fwd_svc(ctx, udp_only, is_connect, &outcome);
+	/* __sock4_xlate_fwd() takes care of IPv4-mapped destinations. */
+	if (is_connect && outcome == SOCK_XLATE_NONE &&
+	    !sock_xlate_rejected(ret) && !is_v4_in_v6(&dst_ip))
+		sock6_forget_revnat(ctx, &dst_ip, dst_port);
+
+	return ret;
 #else
 	return sock6_xlate_v4_in_v6(ctx, udp_only, is_connect);
 #endif /* ENABLE_IPV6 */
@@ -1313,7 +1424,7 @@ int cil_sock6_connect(struct bpf_sock_addr *ctx)
 	}
 
 	err = __sock6_xlate_fwd(ctx, false, true);
-	if (err == -EHOSTUNREACH || err == -ENOMEM) {
+	if (sock_xlate_rejected(err)) {
 		try_set_retval(err);
 		return SYS_REJECT;
 	}
@@ -1468,7 +1579,7 @@ int cil_sock6_sendmsg(struct bpf_sock_addr *ctx)
 	int err;
 
 	err = __sock6_xlate_fwd(ctx, true, false);
-	if (err == -EHOSTUNREACH || err == -ENOMEM) {
+	if (sock_xlate_rejected(err)) {
 		try_set_retval(err);
 		return SYS_REJECT;
 	}
