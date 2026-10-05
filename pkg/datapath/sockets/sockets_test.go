@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"syscall"
 	"testing"
 	"time"
@@ -237,6 +238,17 @@ type testBPFSocketDestroyer struct {
 
 func newTestBPFSocketDestroyer(tb testing.TB) socketDestroyerTester {
 	tb.Helper()
+
+	require.NoError(tb, bpf.MkdirBPF(bpf.TCGlobalsPath()))
+
+	// Loading the programs pins the socket storage maps by name. Remove those
+	// pins afterwards, unless they already existed, e.g. from a running agent.
+	for _, name := range []string{maps.SockRevNat4StMapName, maps.SockRevNat6StMapName} {
+		pin := filepath.Join(bpf.TCGlobalsPath(), name)
+		if _, err := os.Stat(pin); errors.Is(err, os.ErrNotExist) {
+			tb.Cleanup(func() { os.Remove(pin) })
+		}
+	}
 
 	sockRevNat4Map := bpf.NewMap(maps.SockRevNat4MapName,
 		ebpf.LRUHash,

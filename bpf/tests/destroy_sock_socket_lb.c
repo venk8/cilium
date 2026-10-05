@@ -53,7 +53,31 @@ static __always_inline __sock_cookie mock_get_socket_cookie(void *ctx __maybe_un
 #define ENABLE_IPV4 1
 #define ENABLE_IPV6 1
 
+#include <node_config.h>
 #include "lib/socket.h"
+#include "lib/sock.h"
+
+/* A single socket storage entry per family, standing in for the storage of
+ * whichever socket the test currently hands to the iterator.
+ */
+static struct ipv4_sk_storage_entry mock_st4;
+static struct ipv6_sk_storage_entry mock_st6;
+static bool mock_st4_valid;
+static bool mock_st6_valid;
+
+static __always_inline void *
+mock_sk_storage_get(const void *map, void *sk __maybe_unused,
+		    void *value __maybe_unused, __u64 flags __maybe_unused)
+{
+	if (map == &cilium_lb4_reverse_sk_v2 && mock_st4_valid)
+		return &mock_st4;
+	if (map == &cilium_lb6_reverse_sk_v2 && mock_st6_valid)
+		return &mock_st6;
+	return NULL;
+}
+
+#undef sk_storage_get
+#define sk_storage_get mock_sk_storage_get
 
 #include "bpf_sock_term.c"
 
@@ -61,6 +85,9 @@ const __sock_cookie no_match_cookie4 = 200;
 const __sock_cookie no_match_cookie6 = 201;
 const __sock_cookie match_cookie4 = 100;
 const __sock_cookie match_cookie6 = 101;
+/* Not in the reverse_sk maps: only socket storage can make these match. */
+const __sock_cookie storage_cookie4 = 300;
+const __sock_cookie storage_cookie6 = 301;
 const __be32 match_addr4 = 0xDEADBEEF;
 const union v6addr match_addr6 = { .d1 = 0x1, .d2 = 0x2 };
 const __u16 match_port = 8080;
@@ -106,9 +133,25 @@ static __always_inline void set_filter(struct sock_term_filter *filter)
 	memcpy(&cilium_sock_term_filter, filter, sizeof(*filter));
 }
 
+static __always_inline void storage4(__be32 addr, __u16 port)
+{
+	mock_st4_valid = true;
+	mock_st4.backend_address = addr;
+	mock_st4.backend_port = bpf_htons(port);
+}
+
+static __always_inline void storage6(const union v6addr *addr, __u16 port)
+{
+	mock_st6_valid = true;
+	memcpy(&mock_st6.backend_address, addr, sizeof(*addr));
+	mock_st6.backend_port = bpf_htons(port);
+}
+
 static __always_inline void reset(__sock_cookie cookie)
 {
 	current_cookie = cookie;
+	mock_st4_valid = false;
+	mock_st6_valid = false;
 	destroys = 0;
 	memset(write_data, 0, sizeof(__sock_cookie));
 	write_len = 0;
@@ -207,6 +250,54 @@ int test_sock_terminate(__maybe_unused struct xdp_md *ctx)
 	assert(destroys == 0);
 	assert(write_len == 0);
 
+	/* Destroy the socket if its storage says it was connected to the backend
+	 * via a service VIP, even without an entry in cilium_lb4_reverse_sk.
+	 */
+	reset(storage_cookie4);
+	storage4(match_addr4, match_port);
+	connect4(&sk, match_addr4, match_port);
+	sock_udp_destroy_v4(&iter_ctx_udp);
+	assert(destroys == 1);
+	assert(write_len == sizeof(__sock_cookie));
+	assert(*((__sock_cookie *)write_data) == storage_cookie4);
+	/* Storage for another backend doesn't match, and there is no legacy entry
+	 * to fall back to.
+	 */
+	reset(storage_cookie4);
+	storage4(match_addr4 + 1, match_port);
+	connect4(&sk, match_addr4, match_port);
+	sock_udp_destroy_v4(&iter_ctx_udp);
+	assert(destroys == 0);
+	assert(write_len == 0);
+	reset(storage_cookie4);
+	storage4(match_addr4, match_port + 1);
+	connect4(&sk, match_addr4, match_port);
+	sock_udp_destroy_v4(&iter_ctx_udp);
+	assert(destroys == 0);
+	assert(write_len == 0);
+	/* Storage doesn't bypass the destination check: a socket that has since
+	 * disconnected or connected elsewhere is left alone.
+	 */
+	reset(storage_cookie4);
+	storage4(match_addr4, match_port);
+	connect4(&sk, 0, 0);
+	sock_udp_destroy_v4(&iter_ctx_udp);
+	assert(destroys == 0);
+	assert(write_len == 0);
+	reset(storage_cookie4);
+	storage4(match_addr4, match_port);
+	connect4(&sk, match_addr4 + 1, match_port);
+	sock_udp_destroy_v4(&iter_ctx_udp);
+	assert(destroys == 0);
+	assert(write_len == 0);
+	/* Storage for another backend falls back to cilium_lb4_reverse_sk. */
+	reset(match_cookie4);
+	storage4(match_addr4 + 1, match_port);
+	connect4(&sk, match_addr4, match_port);
+	sock_udp_destroy_v4(&iter_ctx_udp);
+	assert(destroys == 1);
+	assert(write_len == sizeof(__sock_cookie));
+
 	/* TCP */
 
 	/* Don't destroy the socket if its cookie isn't in
@@ -233,6 +324,20 @@ int test_sock_terminate(__maybe_unused struct xdp_md *ctx)
 	assert(destroys == 0);
 	assert(write_len == 0);
 	reset(match_cookie4);
+	connect4(&sk, match_addr4 + 1, match_port);
+	sock_tcp_destroy_v4(&iter_ctx_tcp);
+	assert(destroys == 0);
+	assert(write_len == 0);
+	/* See the IPv4 UDP storage cases. */
+	reset(storage_cookie4);
+	storage4(match_addr4, match_port);
+	connect4(&sk, match_addr4, match_port);
+	sock_tcp_destroy_v4(&iter_ctx_tcp);
+	assert(destroys == 1);
+	assert(write_len == sizeof(__sock_cookie));
+	assert(*((__sock_cookie *)write_data) == storage_cookie4);
+	reset(storage_cookie4);
+	storage4(match_addr4, match_port);
 	connect4(&sk, match_addr4 + 1, match_port);
 	sock_tcp_destroy_v4(&iter_ctx_tcp);
 	assert(destroys == 0);
@@ -271,6 +376,44 @@ int test_sock_terminate(__maybe_unused struct xdp_md *ctx)
 	sock_udp_destroy_v6(&iter_ctx_udp);
 	assert(destroys == 0);
 	assert(write_len == 0);
+	/* See the IPv4 UDP storage cases. */
+	reset(storage_cookie6);
+	storage6(&match_addr6, match_port);
+	connect6(&sk, &match_addr6, match_port);
+	sock_udp_destroy_v6(&iter_ctx_udp);
+	assert(destroys == 1);
+	assert(write_len == sizeof(__sock_cookie));
+	assert(*((__sock_cookie *)write_data) == storage_cookie6);
+	reset(storage_cookie6);
+	storage6(&other_addr6, match_port);
+	connect6(&sk, &match_addr6, match_port);
+	sock_udp_destroy_v6(&iter_ctx_udp);
+	assert(destroys == 0);
+	assert(write_len == 0);
+	reset(storage_cookie6);
+	storage6(&match_addr6, match_port + 1);
+	connect6(&sk, &match_addr6, match_port);
+	sock_udp_destroy_v6(&iter_ctx_udp);
+	assert(destroys == 0);
+	assert(write_len == 0);
+	reset(storage_cookie6);
+	storage6(&match_addr6, match_port);
+	connect6(&sk, &(union v6addr){}, 0);
+	sock_udp_destroy_v6(&iter_ctx_udp);
+	assert(destroys == 0);
+	assert(write_len == 0);
+	reset(storage_cookie6);
+	storage6(&match_addr6, match_port);
+	connect6(&sk, &other_addr6, match_port);
+	sock_udp_destroy_v6(&iter_ctx_udp);
+	assert(destroys == 0);
+	assert(write_len == 0);
+	reset(match_cookie6);
+	storage6(&other_addr6, match_port);
+	connect6(&sk, &match_addr6, match_port);
+	sock_udp_destroy_v6(&iter_ctx_udp);
+	assert(destroys == 1);
+	assert(write_len == sizeof(__sock_cookie));
 
 	/* TCP */
 
@@ -298,6 +441,20 @@ int test_sock_terminate(__maybe_unused struct xdp_md *ctx)
 	assert(destroys == 0);
 	assert(write_len == 0);
 	reset(match_cookie6);
+	connect6(&sk, &other_addr6, match_port);
+	sock_tcp_destroy_v6(&iter_ctx_tcp);
+	assert(destroys == 0);
+	assert(write_len == 0);
+	/* See the IPv4 UDP storage cases. */
+	reset(storage_cookie6);
+	storage6(&match_addr6, match_port);
+	connect6(&sk, &match_addr6, match_port);
+	sock_tcp_destroy_v6(&iter_ctx_tcp);
+	assert(destroys == 1);
+	assert(write_len == sizeof(__sock_cookie));
+	assert(*((__sock_cookie *)write_data) == storage_cookie6);
+	reset(storage_cookie6);
+	storage6(&match_addr6, match_port);
 	connect6(&sk, &other_addr6, match_port);
 	sock_tcp_destroy_v6(&iter_ctx_tcp);
 	assert(destroys == 0);
