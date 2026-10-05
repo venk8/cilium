@@ -59,7 +59,7 @@ func fixedResources(spec *ebpf.CollectionSpec, opts ...*set.Set[string]) *set.Se
 // removeUnusedMaps analyzes the given spec to detect which parts of the code
 // will be unreachable given the VariableSpecs. It then removes any MapSpecs
 // that are not used by any Program.
-func removeUnusedMaps(spec *ebpf.CollectionSpec, fixed *set.Set[string], reach reachables, logger *slog.Logger) error {
+func removeUnusedMaps(spec *ebpf.CollectionSpec, fixed *set.Set[string], reach reachables, opts *CollectionOptions, logger *slog.Logger) error {
 	if reach == nil {
 		return fmt.Errorf("reachability information is required")
 	}
@@ -113,6 +113,15 @@ func removeUnusedMaps(spec *ebpf.CollectionSpec, fixed *set.Set[string], reach r
 	}
 	if logger != nil && len(deleted) > 0 {
 		logger.Debug("Removed unused maps from CollectionSpec", logfields.Maps, deleted)
+	}
+
+	// A replacement for a map pruned above has nothing left to replace, and
+	// ebpf-go rejects replacements for maps missing from the spec. Only drop
+	// those, so a replacement that never matched a map still fails loudly.
+	if opts != nil {
+		for _, name := range deleted {
+			delete(opts.CollectionOptions.MapReplacements, name)
+		}
 	}
 
 	return nil

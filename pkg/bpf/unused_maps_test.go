@@ -50,7 +50,7 @@ func TestPrivilegedUnusedMaps(t *testing.T) {
 
 	reach, err := computeReachability(spec)
 	require.NoError(t, err)
-	err = removeUnusedMaps(spec, nil, reach, nil)
+	err = removeUnusedMaps(spec, nil, reach, nil, nil)
 	require.NoError(t, err)
 
 	assert.NotNil(t, spec.Maps["map_a"])
@@ -76,7 +76,7 @@ func TestPrivilegedUnusedMaps(t *testing.T) {
 	require.NoError(t, err)
 	err = nopUnusedFuncs(spec, reach, nil)
 	require.NoError(t, err)
-	err = removeUnusedMaps(spec, nil, reach, nil)
+	err = removeUnusedMaps(spec, nil, reach, nil, nil)
 	require.NoError(t, err)
 
 	assert.Nil(t, spec.Maps["map_a"])
@@ -105,7 +105,7 @@ func TestPrivilegedUnusedMapsFalseNegative(t *testing.T) {
 	reach, err := computeReachability(spec)
 	require.NoError(t, err)
 
-	err = removeUnusedMaps(spec, nil, reach, nil)
+	err = removeUnusedMaps(spec, nil, reach, nil, nil)
 	require.NoError(t, err)
 
 	coll := mustNewCollection(t, spec)
@@ -125,8 +125,48 @@ func TestUnusedMapsFixedSet(t *testing.T) {
 	orig := set.NewSet("test")
 	fixed := orig.Clone()
 
-	err = removeUnusedMaps(spec, &fixed, reach, nil)
+	err = removeUnusedMaps(spec, &fixed, reach, nil, nil)
 	require.NoError(t, err)
 
 	assert.True(t, orig.Equal(fixed))
+}
+
+// Replacements for pruned maps are dropped, others are left for ebpf-go to
+// validate.
+func TestUnusedMapsReplacements(t *testing.T) {
+	spec, err := ebpf.LoadCollectionSpec("testdata/unused-map-pruning.o")
+	require.NoError(t, err)
+
+	obj := struct {
+		UseMapA      *ebpf.VariableSpec `ebpf:"__config_use_map_a"`
+		UseMapB      *ebpf.VariableSpec `ebpf:"__config_use_map_b"`
+		UseMapStatic *ebpf.VariableSpec `ebpf:"__config_use_map_static"`
+		UseMapGlobal *ebpf.VariableSpec `ebpf:"__config_use_map_global"`
+	}{}
+	require.NoError(t, spec.Assign(&obj))
+	require.NoError(t, obj.UseMapA.Set(false))
+	require.NoError(t, obj.UseMapB.Set(true))
+	require.NoError(t, obj.UseMapStatic.Set(false))
+	require.NoError(t, obj.UseMapGlobal.Set(false))
+
+	reach, err := computeReachability(spec)
+	require.NoError(t, err)
+	require.NoError(t, nopUnusedFuncs(spec, reach, nil))
+
+	opts := &CollectionOptions{
+		CollectionOptions: ebpf.CollectionOptions{
+			MapReplacements: map[string]*ebpf.Map{
+				"map_a":       nil,
+				"map_b":       nil,
+				"no_such_map": nil,
+			},
+		},
+	}
+	require.NoError(t, removeUnusedMaps(spec, nil, reach, opts, nil))
+
+	require.Nil(t, spec.Maps["map_a"])
+	require.NotNil(t, spec.Maps["map_b"])
+	assert.NotContains(t, opts.CollectionOptions.MapReplacements, "map_a")
+	assert.Contains(t, opts.CollectionOptions.MapReplacements, "map_b")
+	assert.Contains(t, opts.CollectionOptions.MapReplacements, "no_such_map")
 }
