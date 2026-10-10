@@ -395,27 +395,36 @@ func (w *Writer) UpsertServiceAndFrontends(txn WriteTxn, svc *loadbalancer.Servi
 		}
 	}
 
-	addrs := sets.New[loadbalancer.L3n4Addr]()
-
 	// Upsert the new frontends
 	for _, params := range fes {
 		params.ServiceName = svc.Name
 		if _, err := w.upsertFrontendParams(txn, params, svc); err != nil {
 			return err
 		}
-		addrs.Insert(params.Address)
 	}
 
-	// Delete orphan frontends
-	for fe := range w.fes.List(txn, loadbalancer.FrontendByServiceName(svc.Name)) {
-		if !addrs.Has(fe.Address) {
-			if _, _, err := w.fes.Delete(txn, fe); err != nil {
-				return err
+	// Delete orphan frontends if the service already existed
+	if found {
+		for fe := range w.fes.List(txn, loadbalancer.FrontendByServiceName(svc.Name)) {
+			if !hasFrontendAddress(fes, fe.Address) {
+				if _, _, err := w.fes.Delete(txn, fe); err != nil {
+					return err
+				}
 			}
 		}
 	}
 
 	return nil
+}
+
+// hasFrontendAddress reports whether addr matches any frontend in fes.
+func hasFrontendAddress(fes []loadbalancer.FrontendParams, addr loadbalancer.L3n4Addr) bool {
+	for i := range fes {
+		if fes[i].Address == addr {
+			return true
+		}
+	}
+	return false
 }
 
 func (w *Writer) updateServiceReferences(txn WriteTxn, svc *loadbalancer.Service) error {
@@ -443,7 +452,11 @@ func (w *Writer) refreshFrontend(txn statedb.ReadTxn, fe *loadbalancer.Frontend)
 	}
 	bes, _ := w.BackendsForService(txn, svc.Name)
 	fe.Backends = loadbalancer.BackendsSeq2(w.SelectBackends(txn, bes, svc, fe))
-	fe.HealthCheckBackends = loadbalancer.BackendsSeq2(w.SelectBackendsForHealthChecking(txn, bes, svc, fe))
+	if w.isServiceHealthCheckedFunc == nil || !w.isServiceHealthCheckedFunc(svc) {
+		fe.HealthCheckBackends = fe.Backends
+	} else {
+		fe.HealthCheckBackends = loadbalancer.BackendsSeq2(w.SelectBackendsForHealthChecking(txn, bes, svc, fe))
+	}
 }
 
 func (w *Writer) refreshFrontendSourceRanges(fe *loadbalancer.Frontend) {
