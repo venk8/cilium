@@ -5,109 +5,9 @@ package analyze
 
 import (
 	"fmt"
-	"slices"
 
 	"github.com/cilium/ebpf/asm"
 )
-
-// A target is the destination of a jump instruction. It is initially known only
-// by its raw instruction offset and is resolved to a logical instruction in a
-// second pass. It also holds a list of branches (jump instructions) that target
-// it.
-//
-// The raw instruction offset is the offset of the instruction in the raw
-// bytecode, which is not necessarily the same as its index in
-// [asm.Instructions] since some instructions can be larger than the standard
-// instruction size (e.g. dword loads).
-type target struct {
-	raw      asm.RawInstructionOffset
-	branches []*asm.Instruction
-}
-
-func (t *target) append(branch *asm.Instruction) {
-	t.branches = append(t.branches, branch)
-}
-
-// rawTargets tracks jump target instructions by their raw instruction offsets
-// and branch instructions pointing to it.
-type rawTargets struct {
-	targets []target
-}
-
-// add marks the given raw offset as the target of a jump instruction. If the
-// offset was seen before, it is not added again. fthrough should be set to the
-// instruction following the jump instruction, or nil if there is none.
-//
-// Offsets are encountered in random order while iterating instructions, since
-// jumps can go forward and backward, and sometimes jump over other branches.
-// targets are kept in a sorted queue to allow efficient resolution later.
-func (rt *rawTargets) add(jump *asm.Instruction, tgt asm.RawInstructionOffset) {
-	insertIdx, found := slices.BinarySearchFunc(rt.targets, tgt, func(t target, r asm.RawInstructionOffset) int {
-		if t.raw < r {
-			return -1
-		}
-		if t.raw > r {
-			return 1
-		}
-		return 0
-	})
-
-	if found {
-		rt.targets[insertIdx].append(jump)
-		return
-	}
-
-	rt.targets = slices.Insert(
-		rt.targets,
-		insertIdx,
-		target{
-			raw:      tgt,
-			branches: []*asm.Instruction{jump},
-		})
-}
-
-// resolve needs to be called sequentially for every instruction in a program
-// after all jump targets have been added using [rawTargets.add].
-//
-// The given raw offset is matched against the first entry in rt. If it matches,
-// all jumps pointing to this instruction get their branch targets updated to
-// point to tgt. tgtPrev turns into an edge falling through to tgt.
-//
-// Resolved targets are popped from the head of the list.
-func (rt *rawTargets) resolve(raw asm.RawInstructionOffset, tgt, tgtPrev *asm.Instruction) {
-	if len(rt.targets) == 0 {
-		return
-	}
-
-	target := rt.targets[0]
-	if target.raw != raw {
-		return
-	}
-
-	for _, branch := range target.branches {
-		setBranchTarget(branch, tgt, tgtPrev)
-	}
-
-	rt.targets = rt.targets[1:]
-}
-
-// previous returns the instruction preceding the current instruction in the
-// iterator, or nil if there is none.
-func previous(iter *asm.InstructionIterator, insns asm.Instructions) *asm.Instruction {
-	if iter.Index-1 >= 0 {
-		return &insns[iter.Index-1]
-	}
-	return nil
-}
-
-// next returns the instruction following the current instruction in the
-// iterator, or nil if there is none.
-func next(iter *asm.InstructionIterator, insns asm.Instructions) *asm.Instruction {
-	if iter.Index+1 < len(insns) {
-		return &insns[iter.Index+1]
-	}
-	return nil
-}
 
 // jumpTarget calculates the target of a jump instruction based on the current
 // raw instruction offset and the offset or constant present in the instruction.
@@ -194,7 +94,10 @@ func (bc bpfCallers) connect(blocks Blocks) {
 
 		// Link callers to this callee block.
 		for _, caller := range callers {
-			caller.calls = append(caller.calls, block)
+			if caller.calls == nil {
+				caller.calls = new([]*Block)
+			}
+			*caller.calls = append(*caller.calls, block)
 		}
 	}
 }
