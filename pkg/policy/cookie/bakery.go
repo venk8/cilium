@@ -4,6 +4,7 @@
 package cookie
 
 import (
+	"context"
 	"log/slog"
 
 	"golang.org/x/exp/constraints"
@@ -36,14 +37,13 @@ type bakery[C constraints.Unsigned, V comparable] struct {
 
 	mu                 lock.RWMutex
 	cookieSet          *bitset
-	cookieToValue      map[C]holder[V]
-	valueToCookie      map[V]C
+	cookieToValue      []entry[V]
 	lastSeenGeneration uint64
 }
 
 var _ Bakery[uint32, string] = (*bakery[uint32, string])(nil)
 
-type holder[T comparable] struct {
+type entry[T comparable] struct {
 	value T
 	since uint64
 }
@@ -59,8 +59,7 @@ func NewBakery[C constraints.Unsigned, V comparable](logger *slog.Logger) *baker
 	return &bakery[C, V]{
 		logger:             logger,
 		cookieSet:          newBitset(int(maxOf[C]())),
-		cookieToValue:      make(map[C]holder[V]),
-		valueToCookie:      make(map[V]C),
+		cookieToValue:      nil,
 		lastSeenGeneration: 0,
 	}
 }
@@ -73,9 +72,10 @@ func (b *bakery[C, V]) Allocate(value V) (cookie C, ok bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	cookie, ok = b.valueToCookie[value]
-	if ok {
-		return cookie, ok
+	for idx := range b.cookieToValue {
+		if b.cookieSet.IsSet(idx) && b.cookieToValue[idx].value == value {
+			return C(idx + 1), true
+		}
 	}
 	next, ok := b.cookieSet.Allocate()
 	if !ok {
@@ -83,12 +83,20 @@ func (b *bakery[C, V]) Allocate(value V) (cookie C, ok bool) {
 	}
 	// Offset of 1 because a non-zero cookie is needed. Cookie value 0 means no cookie.
 	cookie = C(next + 1)
-	b.cookieToValue[cookie] = holder[V]{value: value, since: b.lastSeenGeneration}
-	b.valueToCookie[value] = cookie
-	b.logger.Debug("Allocated policy log cookie",
-		logfields.PolicyLogCookie, cookie,
-		logfields.PolicyLogString, value,
-	)
+	if next < len(b.cookieToValue) {
+		b.cookieToValue[next] = entry[V]{value: value, since: b.lastSeenGeneration}
+	} else {
+		for len(b.cookieToValue) < next {
+			b.cookieToValue = append(b.cookieToValue, entry[V]{})
+		}
+		b.cookieToValue = append(b.cookieToValue, entry[V]{value: value, since: b.lastSeenGeneration})
+	}
+	if b.logger != nil && b.logger.Enabled(context.Background(), slog.LevelDebug) {
+		b.logger.Debug("Allocated policy log cookie",
+			logfields.PolicyLogCookie, cookie,
+			logfields.PolicyLogString, value,
+		)
+	}
 	return cookie, true
 }
 
@@ -98,8 +106,14 @@ func (b *bakery[C, V]) Get(cookie C) (value V, exists bool) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 
-	v, exists := b.cookieToValue[cookie]
-	return v.value, exists
+	if cookie == 0 {
+		return value, false
+	}
+	idx := int(cookie - 1)
+	if idx < 0 || idx >= len(b.cookieToValue) || !b.cookieSet.IsSet(idx) {
+		return value, false
+	}
+	return b.cookieToValue[idx].value, true
 }
 
 // MarkInUse marks a cookie as in-use for the next sweep.
@@ -107,11 +121,12 @@ func (b *bakery[C, V]) MarkInUse(cookie C) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	if value, ok := b.cookieToValue[cookie]; ok {
-		b.cookieToValue[cookie] = holder[V]{
-			value: value.value,
-			since: b.lastSeenGeneration,
-		}
+	if cookie == 0 {
+		return
+	}
+	idx := int(cookie - 1)
+	if idx >= 0 && idx < len(b.cookieToValue) && b.cookieSet.IsSet(idx) {
+		b.cookieToValue[idx].since = b.lastSeenGeneration
 	}
 }
 
@@ -120,18 +135,28 @@ func (b *bakery[C, V]) Sweep() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	for cookie, val := range b.cookieToValue {
-		if val.since < b.lastSeenGeneration {
-			delete(b.cookieToValue, cookie)
-			delete(b.valueToCookie, val.value)
-			// Correct for offset added during allocation. See comment in Allocate.
-			b.cookieSet.Release(int(cookie - 1))
-			b.logger.Debug("Released policy log cookie",
-				logfields.PolicyLogCookie, cookie,
-				logfields.PolicyLogCookie, val.value,
-			)
+	for idx := range b.cookieToValue {
+		if b.cookieSet.IsSet(idx) {
+			e := &b.cookieToValue[idx]
+			if e.since < b.lastSeenGeneration {
+				cookie := C(idx + 1)
+				// Correct for offset added during allocation. See comment in Allocate.
+				b.cookieSet.Release(idx)
+				if b.logger != nil && b.logger.Enabled(context.Background(), slog.LevelDebug) {
+					b.logger.Debug("Released policy log cookie",
+						logfields.PolicyLogCookie, cookie,
+						logfields.PolicyLogCookie, e.value,
+					)
+				}
+				*e = entry[V]{}
+			}
 		}
 	}
+	n := len(b.cookieToValue)
+	for n > 0 && !b.cookieSet.IsSet(n-1) {
+		n--
+	}
+	b.cookieToValue = b.cookieToValue[:n]
 	b.lastSeenGeneration++
 }
 

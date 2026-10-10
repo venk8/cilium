@@ -859,9 +859,9 @@ func (ms mapState) String() (res string) {
 	return res
 }
 
-// Equal returns true of two entries are equal.
+// Equal returns true if two entries are equal.
 func (e mapStateEntry) Equal(o mapStateEntry) bool {
-	return e.equivalent(o) && e.derivedFromRules == o.derivedFromRules
+	return e.derivedFromRules == o.derivedFromRules && e.equivalent(o)
 }
 
 // equivalent returns true if two entries have the same policy effect,
@@ -870,7 +870,7 @@ func (e mapStateEntry) equivalent(o mapStateEntry) bool {
 	return e.MapStateEntry == o.MapStateEntry &&
 		(e.passes == o.passes || (e.passes != nil && o.passes != nil &&
 			slices.Equal(*e.passes, *o.passes))) &&
-		(e.derivedFromRules == o.derivedFromRules || e.derivedFromRules.LogString() == o.derivedFromRules.LogString())
+		(e.derivedFromRules == o.derivedFromRules || e.derivedFromRules.Value().log == o.derivedFromRules.Value().log)
 }
 
 // String returns a string representation of the MapStateEntry
@@ -1430,41 +1430,17 @@ func (ms *mapState) insertWithChanges(tierMaxPrecedence types.Precedence, newKey
 	}
 
 	if newEntry.IsDeny() {
-		for k, v := range ms.CoveringBroaderOrEqualKeys(newKey) {
-			// Bail if covered by an allow/deny key of higher precedence
-			if v.IsValid() && (v.Precedence > newEntry.Precedence ||
-				// New deny entry is also bailed due to different covering deny key
-				// of the same precedence, equal keys need to be merged
-				v.Precedence == newEntry.Precedence && k != newKey) {
-				return
-			}
+		if ms.isCoveredByHigherOrSamePrecedence(newKey, newEntry) {
+			return
 		}
-
-		// Delete covered entries of lower precedence, and
-		// same precedence deny entries if the keys are different
-		for k, v := range ms.CoveredNarrowerOrEqualKeys(newKey) {
-			if v.Precedence < newEntry.Precedence ||
-				v.Precedence == newEntry.Precedence && k != newKey {
-				ms.deleteExistingWithChanges(k, v, changes)
-			}
-		}
+		ms.pruneCoveredNarrowerOrEqual(newKey, newEntry, changes)
 	} else {
 		// No pruning of allow rules if all rules have the same precedence level.
 		if features.contains(precedenceFeatures) {
-			for _, v := range ms.CoveringBroaderOrEqualKeys(newKey) {
-				// Bail if covered by an allow/deny key of higher precedence
-				if v.IsValid() && v.Precedence > newEntry.Precedence {
-					return
-				}
+			if ms.isCoveredByHigherOrSamePrecedence(newKey, newEntry) {
+				return
 			}
-
-			// Delete covered entries of lower precedence, and
-			// same precedence deny entries if the keys are different
-			for k, v := range ms.CoveredNarrowerOrEqualKeys(newKey) {
-				if v.Precedence < newEntry.Precedence {
-					ms.deleteExistingWithChanges(k, v, changes)
-				}
-			}
+			ms.pruneCoveredNarrowerOrEqual(newKey, newEntry, changes)
 		}
 	}
 
@@ -1522,6 +1498,81 @@ func (ms *mapState) pruneAggregated(newKey Key, newEntry mapStateEntry, changes 
 			ms.logger.Debug("Removing entry duplicated by aggregate",
 				logfields.PolicyKey, k)
 			ms.deleteExistingWithChanges(k, v, changes)
+		}
+	}
+}
+
+// isCoveredByHigherOrSamePrecedence returns true if newKey is covered by an existing
+// entry with higher precedence, or (for deny entries) same precedence with a different key.
+func (ms *mapState) isCoveredByHigherOrSamePrecedence(newKey Key, newEntry mapStateEntry) bool {
+	agg := aggregateFor(newKey.Identity, ms.clusterInfo)
+	isDeny := newEntry.IsDeny()
+
+	iter := ms.trie.AncestorIterator(newKey.PrefixLength(), newKey.LPMKey)
+	for ok, lpmKey, idSet := iter.Next(); ok; ok, lpmKey, idSet = iter.Next() {
+		k := Key{LPMKey: lpmKey}
+
+		// aggregate identity is broader or equal to all identities, visit it first if it exists
+		if _, exists := idSet[agg]; exists {
+			kAgg := k.WithIdentity(agg)
+			if v, ok := ms.entries[kAgg]; ok {
+				if v.IsValid() && (v.Precedence > newEntry.Precedence ||
+					(isDeny && v.Precedence == newEntry.Precedence && kAgg != newKey)) {
+					return true
+				}
+			}
+		}
+
+		// Visit key with the same identity, if it exists.
+		// aggregate identity was already visited above.
+		if newKey.Identity != agg {
+			if _, exists := idSet[newKey.Identity]; exists {
+				kID := k.WithIdentity(newKey.Identity)
+				if v, ok := ms.entries[kID]; ok {
+					if v.IsValid() && (v.Precedence > newEntry.Precedence ||
+						(isDeny && v.Precedence == newEntry.Precedence && kID != newKey)) {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
+}
+
+// pruneCoveredNarrowerOrEqual deletes covered entries of lower precedence, and
+// (for deny entries) same precedence entries if the keys are different.
+func (ms *mapState) pruneCoveredNarrowerOrEqual(newKey Key, newEntry mapStateEntry, changes ChangeState) {
+	agg := aggregateFor(newKey.Identity, ms.clusterInfo)
+	isDeny := newEntry.IsDeny()
+	prune := func(k Key) {
+		if v, ok := ms.entries[k]; ok {
+			if v.Precedence < newEntry.Precedence ||
+				(isDeny && v.Precedence == newEntry.Precedence && k != newKey) {
+				ms.deleteExistingWithChanges(k, v, changes)
+			}
+		}
+	}
+
+	iter := ms.trie.DescendantIterator(newKey.PrefixLength(), newKey.LPMKey)
+	for ok, lpmKey, idSet := iter.Next(); ok; ok, lpmKey, idSet = iter.Next() {
+		k := Key{LPMKey: lpmKey}
+
+		// All identities are narrower or equal to aggregate identity.
+		if newKey.Identity == agg {
+			for id := range idSet {
+				if aggregates(agg, id, ms.clusterInfo) {
+					prune(k.WithIdentity(id))
+				}
+			}
+			if _, exists := idSet[agg]; exists {
+				prune(k.WithIdentity(agg))
+			}
+		} else { // key has a specific identity
+			// Need to visit the key with the same identity, if it exists.
+			if _, exists := idSet[newKey.Identity]; exists {
+				prune(k.WithIdentity(newKey.Identity))
+			}
 		}
 	}
 }
