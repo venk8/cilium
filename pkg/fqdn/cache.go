@@ -74,10 +74,9 @@ func (entry *cacheEntry) isExpiredBy(pointInTime time.Time) bool {
 // Note: They are guarded by the DNSCache mutex.
 type ipEntries map[netip.Addr]*cacheEntry
 
-// nameEntries maps a DNS name to the cache entry that inserted it into the
-// cache. It used in reverse DNS lookups. It is similar to ipEntries, above,
-// but the key is a DNS name.
-type nameEntries map[string]*cacheEntry
+// nameEntries contains the cache entries that inserted the IP into the
+// cache. It is used in reverse DNS lookups.
+type nameEntries []*cacheEntry
 
 // getIPs returns an unsorted list of non-expired unique IPs.
 // This needs a read-lock
@@ -532,9 +531,9 @@ func (c *DNSCache) lookupIPByTime(now time.Time, ip netip.Addr) (names []string)
 		return nil
 	}
 
-	for name, entry := range cacheEntries {
+	for _, entry := range cacheEntries {
 		if entry != nil && !entry.isExpiredBy(now) {
-			names = append(names, name)
+			names = append(names, entry.Name)
 		}
 	}
 
@@ -555,8 +554,9 @@ func (c *DNSCache) RemoveKnown(mappings map[netip.Addr][]string) {
 		}
 
 		mappings[ip] = slices.DeleteFunc(names, func(name string) bool {
-			_, ok := rnames[name]
-			return ok
+			return slices.ContainsFunc(rnames, func(e *cacheEntry) bool {
+				return e != nil && e.Name == name
+			})
 		})
 	}
 }
@@ -572,7 +572,7 @@ func (c *DNSCache) updateWithEntryIPs(entries ipEntries, entry *cacheEntry) Upda
 		old, exists := entries[ip]
 		if old == nil || !exists || old.isExpiredBy(entry.ExpirationTime) {
 			entries[ip] = entry
-			c.upsertReverse(ip, entry)
+			c.upsertReverse(ip, entry, !exists)
 			updated = true
 		}
 		if !exists {
@@ -615,13 +615,20 @@ func (c *DNSCache) removeExpired(entries ipEntries, now time.Time, expireLookups
 // later than the already-stored entry.
 // It is assumed that entry includes ip.
 // This needs a write lock
-func (c *DNSCache) upsertReverse(ip netip.Addr, entry *cacheEntry) {
-	entries, exists := c.reverse[ip]
-	if entries == nil || !exists {
-		entries = make(map[string]*cacheEntry)
-		c.reverse[ip] = entries
+func (c *DNSCache) upsertReverse(ip netip.Addr, entry *cacheEntry, isNew bool) {
+	if isNew {
+		c.reverse[ip] = append(c.reverse[ip], entry)
+		return
 	}
-	entries[entry.Name] = entry
+
+	entries := c.reverse[ip]
+	for i, e := range entries {
+		if e.Name == entry.Name {
+			entries[i] = entry
+			return
+		}
+	}
+	c.reverse[ip] = append(entries, entry)
 }
 
 // remove removes the reference between ip and the name stored in entry from
@@ -651,12 +658,16 @@ func (c *DNSCache) removeForward(ip netip.Addr, entry *cacheEntry) {
 // removeReverse is the equivalent of removeForward() but for the reverse map.
 func (c *DNSCache) removeReverse(ip netip.Addr, entry *cacheEntry) {
 	entries, exists := c.reverse[ip]
-	if entries == nil || !exists {
+	if !exists {
 		return
 	}
-	delete(entries, entry.Name)
+	entries = slices.DeleteFunc(entries, func(e *cacheEntry) bool {
+		return e.Name == entry.Name
+	})
 	if len(entries) == 0 {
 		delete(c.reverse, ip)
+	} else {
+		c.reverse[ip] = entries
 	}
 }
 
@@ -672,8 +683,14 @@ func (c *DNSCache) GetIPs() map[netip.Addr][]string {
 func (c *DNSCache) getIPsLocked() map[netip.Addr][]string {
 	out := make(map[netip.Addr][]string, len(c.reverse))
 
-	for ip, names := range c.reverse {
-		out[ip] = slices.Collect(maps.Keys(names))
+	for ip, entries := range c.reverse {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			if e != nil {
+				names = append(names, e.Name)
+			}
+		}
+		out[ip] = names
 	}
 
 	return out
