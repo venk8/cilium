@@ -183,7 +183,7 @@ func defaultProxyPortMap() proxyPortsMap {
 	}
 }
 
-func (p *ProxyPorts) isPortAvailable(openLocalPorts map[uint16]struct{}, port uint16, reuse bool) bool {
+func (p *ProxyPorts) isPortAvailable(openLocalPorts *portBitmap, port uint16, reuse bool) bool {
 	if port == 0 {
 		return false // zero port requested
 	}
@@ -191,7 +191,7 @@ func (p *ProxyPorts) isPortAvailable(openLocalPorts map[uint16]struct{}, port ui
 		return false // port already used
 	}
 	// Check that the port is not already open
-	if _, alreadyOpen := openLocalPorts[port]; alreadyOpen {
+	if openLocalPorts.get(port) {
 		return false // port already open
 	}
 
@@ -203,23 +203,28 @@ func (p *ProxyPorts) isPortAvailable(openLocalPorts map[uint16]struct{}, port ui
 // Returns a non-zero allocated port if successful, or 0 and error if not.
 func (p *ProxyPorts) allocatePort(port, min, max uint16) (uint16, error) {
 	// Get a snapshot of the TCP and UDP ports already open locally.
-	openLocalPorts := p.GetOpenLocalPorts()
+	var openLocalPorts portBitmap
+	p.fillOpenLocalPorts(&openLocalPorts)
 
-	if port != 0 && p.isPortAvailable(openLocalPorts, port, false) {
+	if port != 0 && p.isPortAvailable(&openLocalPorts, port, false) {
 		return port, nil
 	}
 
-	// TODO: Maybe not create a large permutation each time?
-	portRange := rand.Perm(int(max - min + 1))
+	numPorts := int(max) - int(min) + 1
+	if numPorts <= 0 {
+		return 0, fmt.Errorf("no available proxy ports")
+	}
+
+	offset := rand.IntN(numPorts)
 
 	// Allow reuse of previously used ports only if no ports are otherwise available.
 	// This allows the same port to be used again by a listener being reconfigured
 	// after deletion.
-	for _, reuse := range []bool{false, true} {
-		for _, r := range portRange {
-			resPort := uint16(r) + min
+	for _, reuse := range [...]bool{false, true} {
+		for i := range numPorts {
+			resPort := min + uint16((offset+i)%numPorts)
 
-			if p.isPortAvailable(openLocalPorts, resPort, reuse) {
+			if p.isPortAvailable(&openLocalPorts, resPort, reuse) {
 				return resPort, nil
 			}
 		}
