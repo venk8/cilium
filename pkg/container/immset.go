@@ -6,6 +6,7 @@ package container
 import (
 	"cmp"
 	"encoding/json"
+	"math/bits"
 	"slices"
 )
 
@@ -157,21 +158,61 @@ func (s ImmSet[T]) Difference(s2 ImmSet[T]) ImmSet[T] {
 	if len(s.xs) == 0 || len(s2.xs) == 0 {
 		return s
 	}
-	result := make([]T, 0, len(s.xs))
+
+	const maxStackWords = 256 // 256 * 64 = 16,384 elements (2 KB on stack)
+	nWords := (len(s.xs) + 63) / 64
+	var bitBuf [maxStackWords]uint64
+	var bitsSlice []uint64
+	if nWords <= maxStackWords {
+		bitsSlice = bitBuf[:nWords]
+	} else {
+		bitsSlice = make([]uint64, nWords)
+	}
+
 	xs1, xs2 := s.xs, s2.xs
+	i := 0
+	count := 0
 	for len(xs1) > 0 && len(xs2) > 0 {
 		switch diff := s.cmp(xs1[0], xs2[0]); {
 		case diff < 0:
-			result = append(result, xs1[0])
+			bitsSlice[i/64] |= uint64(1) << (i % 64)
+			count++
+			i++
 			xs1 = xs1[1:]
 		case diff > 0:
 			xs2 = xs2[1:]
 		default:
+			i++
 			xs1 = xs1[1:]
 			xs2 = xs2[1:]
 		}
 	}
-	result = append(result, xs1...)
+	for ; i < len(s.xs); i++ {
+		bitsSlice[i/64] |= uint64(1) << (i % 64)
+		count++
+	}
+
+	if count == len(s.xs) {
+		return s
+	}
+	if count == 0 {
+		return ImmSet[T]{cmp: s.cmp}
+	}
+
+	result := make([]T, count)
+	dst := 0
+	for wordIdx, word := range bitsSlice {
+		if word == 0 {
+			continue
+		}
+		base := wordIdx * 64
+		for word != 0 {
+			bit := bits.TrailingZeros64(word)
+			result[dst] = s.xs[base+bit]
+			dst++
+			word &= word - 1
+		}
+	}
 	return ImmSet[T]{xs: result, cmp: s.cmp}
 }
 
