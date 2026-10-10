@@ -2141,16 +2141,21 @@ func (c *DaemonConfig) validateIPv6NAT46x64CIDR() error {
 	return nil
 }
 
+var (
+	containerIPLocalReservedPortsRegex      = regexp.MustCompile(`^(\d+(-\d+)?)(,\d+(-\d+)?)*$`)
+	errInvalidContainerIPLocalReservedPorts = fmt.Errorf("Invalid comma separated list of ranges for %s option", ContainerIPLocalReservedPorts)
+)
+
 func (c *DaemonConfig) validateContainerIPLocalReservedPorts() error {
 	if c.ContainerIPLocalReservedPorts == "" || c.ContainerIPLocalReservedPorts == defaults.ContainerIPLocalReservedPortsAuto {
 		return nil
 	}
 
-	if regexp.MustCompile(`^(\d+(-\d+)?)(,\d+(-\d+)?)*$`).MatchString(c.ContainerIPLocalReservedPorts) {
+	if containerIPLocalReservedPortsRegex.MatchString(c.ContainerIPLocalReservedPorts) {
 		return nil
 	}
 
-	return fmt.Errorf("Invalid comma separated list of ranges for %s option", ContainerIPLocalReservedPorts)
+	return errInvalidContainerIPLocalReservedPorts
 }
 
 // Validate validates the daemon configuration
