@@ -4,7 +4,7 @@
 package bpf
 
 import (
-	"regexp"
+	"strings"
 
 	"github.com/cilium/cilium/pkg/controller"
 	"github.com/cilium/cilium/pkg/time"
@@ -58,22 +58,69 @@ func (d DesiredAction) String() string {
 	}
 }
 
-var commonNameRegexps = []*regexp.Regexp{
-	regexp.MustCompile(`^(cilium_)(.+)_v[0-9]+_reserved_[0-9]+$`),
-	regexp.MustCompile(`^(cilium_)(.+)_reserved_[0-9]+$`),
-	regexp.MustCompile(`^(cilium_)(.+)_netdev_ns_[0-9]+$`),
-	regexp.MustCompile(`^(cilium_)(.+)_overlay_[0-9]+$`),
-	regexp.MustCompile(`^(cilium_)(.+)_v[0-9]+_[0-9]+$`),
-	regexp.MustCompile(`^(cilium_)(.+)_[0-9]+$`),
-	regexp.MustCompile(`^(cilium_)(.+)+$`),
-}
-
 func extractCommonName(name string) string {
-	for _, r := range commonNameRegexps {
-		if replaced := r.ReplaceAllString(name, `$2`); replaced != name {
-			return replaced
+	s := strings.TrimPrefix(name, "cilium_")
+	if s == name || len(s) == 0 {
+		return name
+	}
+
+	p, ok := trimDigitsSuffix(s)
+	if !ok {
+		return s
+	}
+
+	const reservedSuffix = "_reserved"
+	if strings.HasSuffix(p, reservedSuffix) {
+		rem := p[:len(p)-len(reservedSuffix)]
+		if len(rem) > 0 {
+			if v, ok := trimVersionSuffix(rem); ok {
+				return v
+			}
+			return rem
 		}
 	}
 
-	return name
+	const netdevSuffix = "_netdev_ns"
+	if strings.HasSuffix(p, netdevSuffix) {
+		rem := p[:len(p)-len(netdevSuffix)]
+		if len(rem) > 0 {
+			return rem
+		}
+	}
+
+	const overlaySuffix = "_overlay"
+	if strings.HasSuffix(p, overlaySuffix) {
+		rem := p[:len(p)-len(overlaySuffix)]
+		if len(rem) > 0 {
+			return rem
+		}
+	}
+
+	if v, ok := trimVersionSuffix(p); ok {
+		return v
+	}
+
+	return p
+}
+
+func trimDigitsSuffix(s string) (string, bool) {
+	i := len(s) - 1
+	for i >= 0 && s[i] >= '0' && s[i] <= '9' {
+		i--
+	}
+	if i >= 1 && i < len(s)-1 && s[i] == '_' {
+		return s[:i], true
+	}
+	return s, false
+}
+
+func trimVersionSuffix(s string) (string, bool) {
+	i := len(s) - 1
+	for i >= 0 && s[i] >= '0' && s[i] <= '9' {
+		i--
+	}
+	if i >= 2 && i < len(s)-1 && s[i] == 'v' && s[i-1] == '_' {
+		return s[:i-1], true
+	}
+	return s, false
 }
