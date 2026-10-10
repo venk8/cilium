@@ -24,7 +24,16 @@ const (
 	// when fswatcher detects that it runs in a test, it will poll the filesystem
 	// more frequently
 	testInterval = 50 * time.Millisecond
+
+	copyBufferSize = 32 * 1024
 )
+
+var copyBufPool = sync.Pool{
+	New: func() any {
+		var buf [copyBufferSize]byte
+		return &buf
+	},
+}
 
 // Event closely resembles what fsnotify.Event provided
 type Event struct {
@@ -97,7 +106,6 @@ type Watcher struct {
 }
 
 type state struct {
-	path  string      // tracked path as asked by the user
 	info  os.FileInfo // stat info of the file, or the target if symlink
 	sum64 uint64      // checksum of the file, or the target if symlink
 }
@@ -136,7 +144,7 @@ func New(defaultLogger *slog.Logger, trackedFiles []string, options ...Option) (
 	// make a map of tracked files and assign them all empty state at the start
 	tracked := make(map[string]state, len(trackedFiles))
 	for _, f := range trackedFiles {
-		tracked[f] = state{path: f}
+		tracked[f] = state{}
 	}
 	w.tracked = tracked
 
@@ -196,7 +204,7 @@ func (w *Watcher) tick() {
 
 		var (
 			oldInfo  = oldState.info
-			newState = state{path: oldState.path}
+			newState = state{}
 		)
 
 		// os.Stat follows symlinks, os.Lstat doesn't
@@ -214,7 +222,7 @@ func (w *Watcher) tick() {
 				})
 
 				// clear out old state from the map
-				w.tracked[oldState.path] = newState
+				w.tracked[path] = newState
 			}
 
 			continue
@@ -243,7 +251,7 @@ func (w *Watcher) tick() {
 
 				// "schedule" this file to be checked at the end the order
 				order = append(order, fp)
-				w.tracked[fp] = state{path: fp}
+				w.tracked[fp] = state{}
 			}
 
 			// nothing else needs to be done for directory handling
@@ -259,7 +267,21 @@ func (w *Watcher) tick() {
 		}
 
 		h := fnv.New64()
-		_, err = io.Copy(h, file)
+		buf := copyBufPool.Get().(*[copyBufferSize]byte)
+		for {
+			var n int
+			n, err = file.Read(buf[:])
+			if n > 0 {
+				_, _ = h.Write(buf[:n])
+			}
+			if err != nil {
+				if err == io.EOF {
+					err = nil
+				}
+				break
+			}
+		}
+		copyBufPool.Put(buf)
 		_ = file.Close()
 		if err != nil {
 			w.sendError(err)
@@ -290,7 +312,7 @@ func (w *Watcher) tick() {
 				})
 			}
 		}
-		w.tracked[oldState.path] = newState
+		w.tracked[path] = newState
 	}
 }
 
