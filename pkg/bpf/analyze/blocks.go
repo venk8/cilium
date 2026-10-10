@@ -588,6 +588,7 @@ func computeBlocks(insns asm.Instructions) (Blocks, error) {
 		return nil, errors.New("no blocks created, this is a bug")
 	}
 
+	arena := make([]Block, numBlocks)
 	blocks := make(Blocks, numBlocks)
 	k := 0
 	for i := range insns {
@@ -597,12 +598,13 @@ func computeBlocks(insns asm.Instructions) (Blocks, error) {
 		if k > 0 {
 			blocks[k-1].end = i - 1
 		}
-		blocks[k] = &Block{
+		arena[k] = Block{
 			id:    uint64(k),
 			raw:   rawOffsets[i],
 			start: i,
 			sym:   insns[i].Symbol(),
 		}
+		blocks[k] = &arena[k]
 		k++
 	}
 	blocks[numBlocks-1].end = n - 1
@@ -651,13 +653,33 @@ func computeBlocks(insns asm.Instructions) (Blocks, error) {
 
 	// Step 6: Connect calls lazily.
 	if hasFuncRef {
-		callers := make(bpfCallers)
+		funcs := make(map[string]*Block)
 		for _, blk := range blocks {
-			for idx := blk.start; idx <= blk.end; idx++ {
-				callers.record(&insns[idx], blk)
+			if blk.sym != "" {
+				funcs[blk.sym] = blk
 			}
 		}
-		callers.connect(blocks)
+
+		for _, blk := range blocks {
+			var calls []*Block
+			for idx := blk.start; idx <= blk.end; idx++ {
+				ins := &insns[idx]
+				if !ins.IsFunctionReference() {
+					continue
+				}
+				sym := ins.Reference()
+				if sym == "" {
+					continue
+				}
+				if target, ok := funcs[sym]; ok {
+					calls = append(calls, target)
+				}
+			}
+			if len(calls) > 0 {
+				calls := calls
+				blk.calls = &calls
+			}
+		}
 	}
 
 	return blocks, nil
