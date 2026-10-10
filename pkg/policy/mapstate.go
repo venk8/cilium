@@ -91,13 +91,15 @@ type mapState struct {
 	// entries is the map containing the MapStateEntries
 	entries mapStateMap
 	// trie is a Trie that indexes policy Keys without their identity
-	// and stores the identities in an associated builtin map.
-	trie bitlpm.Trie[types.LPMKey, IDSet]
+	// and stores the identities in an associated slice.
+	trie bitlpm.Trie[types.LPMKey, *idSlice]
 	// idIndex indexes entries by ID
 	byId map[identity.NumericIdentity]LPMKeys
 }
 
 type IDSet map[identity.NumericIdentity]struct{}
+
+type idSlice = []identity.NumericIdentity
 
 // Valid returns true if the entries map has been initialized
 func (ms *mapState) Valid() bool {
@@ -117,12 +119,13 @@ func (ms *mapState) upsert(k Key, e mapStateEntry) {
 	// Update indices if 'k' is a new key
 	if !exists {
 		// Update trie
-		idSet, ok := ms.trie.ExactLookup(k.PrefixLength(), k.LPMKey)
+		ids, ok := ms.trie.ExactLookup(k.PrefixLength(), k.LPMKey)
 		if !ok {
-			idSet = make(IDSet)
-			ms.trie.Upsert(k.PrefixLength(), k.LPMKey, idSet)
+			s := idSlice{k.Identity}
+			ms.trie.Upsert(k.PrefixLength(), k.LPMKey, &s)
+		} else {
+			*ids = append(*ids, k.Identity)
 		}
-		idSet[k.Identity] = struct{}{}
 
 		// update byId if in use
 		if ms.byId != nil {
@@ -141,11 +144,15 @@ func (ms *mapState) delete(k Key) {
 	if exists {
 		delete(ms.entries, k)
 
-		idSet, ok := ms.trie.ExactLookup(k.PrefixLength(), k.LPMKey)
-		if ok {
-			delete(idSet, k.Identity)
-			if len(idSet) == 0 {
-				ms.trie.Delete(k.PrefixLength(), k.LPMKey)
+		ids, ok := ms.trie.ExactLookup(k.PrefixLength(), k.LPMKey)
+		if ok && ids != nil {
+			if i := slices.Index(*ids, k.Identity); i >= 0 {
+				n := len(*ids) - 1
+				(*ids)[i] = (*ids)[n]
+				*ids = (*ids)[:n]
+				if n == 0 {
+					ms.trie.Delete(k.PrefixLength(), k.LPMKey)
+				}
 			}
 		}
 
@@ -192,9 +199,12 @@ func (ms *mapState) forKey(k Key, f func(Key, mapStateEntry) bool) bool {
 	return true
 }
 
-// forCoveredIDs calls 'f' for each covered non-aggregate ID in 'idSet' with port/proto from 'k'.
-func (ms *mapState) forCoveredIDs(agg identity.NumericIdentity, k Key, idSet IDSet, f func(Key, mapStateEntry) bool) bool {
-	for id := range idSet {
+// forCoveredIDs calls 'f' for each covered non-aggregate ID in 'ids' with port/proto from 'k'.
+func (ms *mapState) forCoveredIDs(agg identity.NumericIdentity, k Key, ids *idSlice, f func(Key, mapStateEntry) bool) bool {
+	if ids == nil {
+		return true
+	}
+	for _, id := range *ids {
 		if aggregates(agg, id, ms.clusterInfo) {
 			k.Identity = id
 			if !ms.forKey(k, f) {
@@ -205,12 +215,10 @@ func (ms *mapState) forCoveredIDs(agg identity.NumericIdentity, k Key, idSet IDS
 	return true
 }
 
-// forID calls 'f' for 'k' if 'k.Identity' exists in 'idSet'.
-func (ms *mapState) forID(k Key, idSet IDSet, f func(Key, mapStateEntry) bool) bool {
-	if _, exists := idSet[k.Identity]; exists {
-		if !ms.forKey(k, f) {
-			return false
-		}
+// forID calls 'f' for 'k' if 'k' exists in 'ms.entries'.
+func (ms *mapState) forID(k Key, _ *idSlice, f func(Key, mapStateEntry) bool) bool {
+	if e, ok := ms.entries[k]; ok {
+		return f(k, e)
 	}
 	return true
 }
@@ -723,7 +731,7 @@ func newMapState(logger *slog.Logger, sizes MapStateSizes, features policyFeatur
 		logger:      logger,
 		clusterInfo: clusterInfo,
 		entries:     make(mapStateMap, sizes.entries),
-		trie:        bitlpm.NewTrie[types.LPMKey, IDSet](types.MapStatePrefixLen),
+		trie:        bitlpm.NewTrie[types.LPMKey, *idSlice](types.MapStatePrefixLen),
 	}
 
 	if features&(passRules|namedPortRules) != 0 {
@@ -1480,21 +1488,20 @@ func (ms *mapState) pruneAggregated(newKey Key, newEntry mapStateEntry, changes 
 	}
 
 	// Lookup all entries on this level.
-	idSet, ok := ms.trie.ExactLookup(newKey.PrefixLength(), newKey.LPMKey)
-	if !ok {
+	ids, ok := ms.trie.ExactLookup(newKey.PrefixLength(), newKey.LPMKey)
+	if !ok || ids == nil {
 		return
 	}
 
-	for id := range idSet {
+	for _, id := range *ids {
 		if !aggregates(newKey.Identity, id, ms.clusterInfo) {
 			// skip if this ID is not aggregated by newKey
 			continue
 		}
 
-		k := newKey
-		k.Identity = id
-		v := ms.entries[k]
-		if v.equivalent(newEntry) {
+		k := newKey.WithIdentity(id)
+		v, ok := ms.entries[k]
+		if ok && v.equivalent(newEntry) {
 			ms.logger.Debug("Removing entry duplicated by aggregate",
 				logfields.PolicyKey, k)
 			ms.deleteExistingWithChanges(k, v, changes)
@@ -1509,30 +1516,26 @@ func (ms *mapState) isCoveredByHigherOrSamePrecedence(newKey Key, newEntry mapSt
 	isDeny := newEntry.IsDeny()
 
 	iter := ms.trie.AncestorIterator(newKey.PrefixLength(), newKey.LPMKey)
-	for ok, lpmKey, idSet := iter.Next(); ok; ok, lpmKey, idSet = iter.Next() {
+	for ok, lpmKey, _ := iter.Next(); ok; ok, lpmKey, _ = iter.Next() {
 		k := Key{LPMKey: lpmKey}
 
 		// aggregate identity is broader or equal to all identities, visit it first if it exists
-		if _, exists := idSet[agg]; exists {
-			kAgg := k.WithIdentity(agg)
-			if v, ok := ms.entries[kAgg]; ok {
-				if v.IsValid() && (v.Precedence > newEntry.Precedence ||
-					(isDeny && v.Precedence == newEntry.Precedence && kAgg != newKey)) {
-					return true
-				}
+		kAgg := k.WithIdentity(agg)
+		if v, ok := ms.entries[kAgg]; ok {
+			if v.IsValid() && (v.Precedence > newEntry.Precedence ||
+				(isDeny && v.Precedence == newEntry.Precedence && kAgg != newKey)) {
+				return true
 			}
 		}
 
 		// Visit key with the same identity, if it exists.
 		// aggregate identity was already visited above.
 		if newKey.Identity != agg {
-			if _, exists := idSet[newKey.Identity]; exists {
-				kID := k.WithIdentity(newKey.Identity)
-				if v, ok := ms.entries[kID]; ok {
-					if v.IsValid() && (v.Precedence > newEntry.Precedence ||
-						(isDeny && v.Precedence == newEntry.Precedence && kID != newKey)) {
-						return true
-					}
+			kID := k.WithIdentity(newKey.Identity)
+			if v, ok := ms.entries[kID]; ok {
+				if v.IsValid() && (v.Precedence > newEntry.Precedence ||
+					(isDeny && v.Precedence == newEntry.Precedence && kID != newKey)) {
+					return true
 				}
 			}
 		}
@@ -1554,24 +1557,35 @@ func (ms *mapState) pruneCoveredNarrowerOrEqual(newKey Key, newEntry mapStateEnt
 		}
 	}
 
+	// A fully-specific key (non-aggregate identity, specific protocol, non-wildcard port)
+	// cannot cover any other key. Only newKey itself can be pruned if an existing entry has
+	// lower precedence.
+	if newKey.Identity != agg && newKey.Nexthdr != 0 && !newKey.HasPortWildcard() {
+		prune(newKey)
+		return
+	}
+
 	iter := ms.trie.DescendantIterator(newKey.PrefixLength(), newKey.LPMKey)
-	for ok, lpmKey, idSet := iter.Next(); ok; ok, lpmKey, idSet = iter.Next() {
+	for ok, lpmKey, ids := iter.Next(); ok; ok, lpmKey, ids = iter.Next() {
 		k := Key{LPMKey: lpmKey}
 
 		// All identities are narrower or equal to aggregate identity.
 		if newKey.Identity == agg {
-			for id := range idSet {
-				if aggregates(agg, id, ms.clusterInfo) {
-					prune(k.WithIdentity(id))
+			if ids != nil {
+				for _, id := range *ids {
+					if aggregates(agg, id, ms.clusterInfo) {
+						prune(k.WithIdentity(id))
+					}
 				}
 			}
-			if _, exists := idSet[agg]; exists {
-				prune(k.WithIdentity(agg))
+			kAgg := k.WithIdentity(agg)
+			if _, exists := ms.entries[kAgg]; exists {
+				prune(kAgg)
 			}
 		} else { // key has a specific identity
-			// Need to visit the key with the same identity, if it exists.
-			if _, exists := idSet[newKey.Identity]; exists {
-				prune(k.WithIdentity(newKey.Identity))
+			kID := k.WithIdentity(newKey.Identity)
+			if _, exists := ms.entries[kID]; exists {
+				prune(kID)
 			}
 		}
 	}
