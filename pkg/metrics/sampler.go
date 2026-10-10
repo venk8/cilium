@@ -63,14 +63,21 @@ type sampler struct {
 	mu               lock.Mutex
 	metrics          map[metricKey]debugSamples
 	maxWarningLogged bool
+
+	// Scratch buffers and persistent descriptor inclusion map protected by mu.
+	shouldSampleDesc map[*prometheus.Desc]bool
+	metricMsg        dto.Metric
+	bucketBuf        []histogramBucket
+	deltaBuf         []histogramBucket
 }
 
 func newSampler(log *slog.Logger, reg *Registry, jg job.Group, cfg samplerConfig) *sampler {
 	sampler := &sampler{
-		log:     log,
-		cfg:     cfg,
-		reg:     reg,
-		metrics: make(map[metricKey]debugSamples),
+		log:              log,
+		cfg:              cfg,
+		reg:              reg,
+		metrics:          make(map[metricKey]debugSamples),
+		shouldSampleDesc: make(map[*prometheus.Desc]bool),
 	}
 	jg.Add(
 		job.OneShot("collect", sampler.collectLoop),
@@ -342,35 +349,42 @@ func (dc *sampler) collect(health cell.Health) {
 
 	numSampled := 0
 
-	// The *Desc's we're sampling. Used to quickly decide whether or not
-	// to sample a metric without calling 'Write'.
-	shouldSampleDesc := map[*prometheus.Desc]bool{}
+	if dc.shouldSampleDesc == nil {
+		dc.shouldSampleDesc = make(map[*prometheus.Desc]bool)
+	}
 
 	for metric := range metricChan {
+		if metric == nil {
+			break
+		}
 		desc := metric.Desc()
-		included, known := shouldSampleDesc[desc]
+		included, known := dc.shouldSampleDesc[desc]
 		if known && !included {
 			continue
 		}
-		var msg dto.Metric
-		if err := metric.Write(&msg); err != nil {
+		dc.metricMsg.Reset()
+		if err := metric.Write(&dc.metricMsg); err != nil {
 			continue
 		}
-		key := newMetricKey(desc, msg.Label)
-		name := key.fqName()
+		key := newMetricKey(desc, dc.metricMsg.Label)
+		var name string
 		if !known {
+			name = key.fqName()
 			included = !excludedFromSampling(name)
-			shouldSampleDesc[desc] = included
+			dc.shouldSampleDesc[desc] = included
 			if !included {
 				continue
 			}
 		}
 
-		if msg.Histogram != nil {
+		if dc.metricMsg.Histogram != nil {
 			var histogram *histogramSamples
 			if samples, ok := dc.metrics[key]; !ok {
+				if name == "" {
+					name = key.fqName()
+				}
 				histogram = &histogramSamples{
-					baseSamples: baseSamples{name: name, labels: concatLabels(msg.Label)},
+					baseSamples: baseSamples{name: name, labels: concatLabels(dc.metricMsg.Label)},
 					isSeconds:   strings.Contains(name, "seconds"),
 				}
 				if !addNewMetric(key, histogram) {
@@ -380,16 +394,17 @@ func (dc *sampler) collect(health cell.Health) {
 				histogram = samples.(*histogramSamples)
 			}
 			histogram.updatedAt = t0
-			buckets := convertHistogram(msg.GetHistogram())
+			dc.bucketBuf = convertHistogram(dc.bucketBuf, dc.metricMsg.GetHistogram())
 
-			updated := histogramSampleCount(buckets) != histogramSampleCount(histogram.prev)
+			updated := histogramSampleCount(dc.bucketBuf) != histogramSampleCount(histogram.prev)
 			if updated {
-				b := buckets
+				b := dc.bucketBuf
 				if histogram.prev != nil {
 					// Previous sample exists, deduct the counts from it to get the quantiles
 					// of the last period.
-					b = slices.Clone(buckets)
-					subtractHistogram(b, histogram.prev)
+					dc.deltaBuf = append(dc.deltaBuf[:0], dc.bucketBuf...)
+					subtractHistogram(dc.deltaBuf, histogram.prev)
+					b = dc.deltaBuf
 				}
 				histogram.p50.push(float32(getHistogramQuantile(b, 0.50)))
 				histogram.p90.push(float32(getHistogramQuantile(b, 0.90)))
@@ -401,12 +416,19 @@ func (dc *sampler) collect(health cell.Health) {
 				histogram.p99.push(0.0)
 				histogram.bits.mark(false)
 			}
-			histogram.prev = buckets
+			if len(histogram.prev) != len(dc.bucketBuf) {
+				histogram.prev = slices.Clone(dc.bucketBuf)
+			} else {
+				copy(histogram.prev, dc.bucketBuf)
+			}
 		} else {
 			var s *gaugeOrCounterSamples
 			if samples, ok := dc.metrics[key]; !ok {
+				if name == "" {
+					name = key.fqName()
+				}
 				s = &gaugeOrCounterSamples{
-					baseSamples: baseSamples{name: key.fqName(), labels: concatLabels(msg.Label)},
+					baseSamples: baseSamples{name: name, labels: concatLabels(dc.metricMsg.Label)},
 				}
 				if !addNewMetric(key, s) {
 					continue
@@ -418,12 +440,12 @@ func (dc *sampler) collect(health cell.Health) {
 
 			var value float64
 			switch {
-			case msg.Counter != nil:
-				value = msg.Counter.GetValue()
-			case msg.Gauge != nil:
-				value = msg.Gauge.GetValue()
-			case msg.Summary != nil:
-				value = msg.Summary.GetSampleSum() / float64(msg.Summary.GetSampleCount())
+			case dc.metricMsg.Counter != nil:
+				value = dc.metricMsg.Counter.GetValue()
+			case dc.metricMsg.Gauge != nil:
+				value = dc.metricMsg.Gauge.GetValue()
+			case dc.metricMsg.Summary != nil:
+				value = dc.metricMsg.Summary.GetSampleSum() / float64(dc.metricMsg.Summary.GetSampleCount())
 			default:
 				value = -1.0
 			}
@@ -433,6 +455,7 @@ func (dc *sampler) collect(health cell.Health) {
 
 		numSampled++
 	}
+	dc.metricMsg.Reset()
 
 	health.OK(fmt.Sprintf("Sampled %d metrics in %s, next collection at %s", numSamples, time.Since(t0), t0.Add(dc.cfg.MetricsSamplingInterval)))
 }

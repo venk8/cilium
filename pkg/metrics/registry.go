@@ -273,14 +273,23 @@ func (r *Registry) RegisterList(list []prometheus.Collector) error {
 type collectorSet struct {
 	mu         lock.Mutex
 	collectors map[prometheus.Collector]struct{}
+	metricChan chan prometheus.Metric
 }
 
 func (cs *collectorSet) collect() <-chan prometheus.Metric {
-	ch := make(chan prometheus.Metric, 100)
+	cs.mu.Lock()
+	if cs.metricChan == nil {
+		cs.metricChan = make(chan prometheus.Metric, 100)
+	}
+	ch := cs.metricChan
+	cs.mu.Unlock()
+
 	go func() {
 		cs.mu.Lock()
-		defer cs.mu.Unlock()
-		defer close(ch)
+		defer func() {
+			cs.mu.Unlock()
+			ch <- nil
+		}()
 		for c := range cs.collectors {
 			c.Collect(ch)
 		}

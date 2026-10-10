@@ -17,16 +17,17 @@ type histogramBucket struct {
 	upperBound      float64
 }
 
-func convertHistogram(h *dto.Histogram) []histogramBucket {
-	histogram := make([]histogramBucket, len(h.GetBucket()))
-	for i, b := range h.GetBucket() {
-		histogram[i] = histogramBucket{b.GetCumulativeCount(), b.GetUpperBound()}
+func convertHistogram(dst []histogramBucket, h *dto.Histogram) []histogramBucket {
+	buckets := h.GetBucket()
+	dst = slices.Grow(dst[:0], len(buckets))[:len(buckets)]
+	for i, b := range buckets {
+		dst[i] = histogramBucket{b.GetCumulativeCount(), b.GetUpperBound()}
 	}
-	slices.SortFunc(histogram,
+	slices.SortFunc(dst,
 		func(a, b histogramBucket) int {
 			return cmp.Compare(a.upperBound, b.upperBound)
 		})
-	return histogram
+	return dst
 }
 
 // subtractHistogram removes from 'a' the observations from 'b'.
@@ -52,7 +53,7 @@ func histogramSampleCount(histogram []histogramBucket) uint64 {
 // HistogramQuantiles calculates p50, p90, and p99 quantiles from a Prometheus
 // Histogram proto message. These values are suitable for display and API output.
 func HistogramQuantiles(h *dto.Histogram) (p50, p90, p99 float64) {
-	b := convertHistogram(h)
+	b := convertHistogram(nil, h)
 	return getHistogramQuantile(b, 0.50),
 		getHistogramQuantile(b, 0.90),
 		getHistogramQuantile(b, 0.99)
