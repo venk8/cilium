@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 
 	"github.com/cilium/cilium/pkg/backoff"
 	"github.com/cilium/cilium/pkg/idpool"
@@ -32,6 +33,9 @@ const (
 	// defaultMaxAllocAttempts is the default number of attempted allocation
 	// requests performed before failing.
 	defaultMaxAllocAttempts = 16
+
+	// maxVerifiedKeysPoolCap is the maximum capacity of a verifiedKey slice to retain in the pool.
+	maxVerifiedKeysPoolCap = 4096
 )
 
 // Allocator is a distributed ID allocator backed by a KVstore. It maps
@@ -166,6 +170,9 @@ type Allocator struct {
 	// backend is the upstream, shared, backend to which we syncronize local
 	// information
 	backend Backend
+
+	// verifiedKeysPool is a pool of *[]verifiedKey scratch buffers used by syncLocalKeys.
+	verifiedKeysPool sync.Pool
 }
 
 // AllocatorOption is the base type for allocator options
@@ -979,11 +986,28 @@ func (a *Allocator) syncLocalKeys() {
 	// To ensure slave keys are not leaked, we do an extra check after the upsert,
 	// to ensure the key is still in use. If it's not in use, we grab the slave key mutex
 	// and hold it until we have released the key knowing that no new usage has started during the operation.
-	ids := a.localKeys.getVerifiedIDs()
+	var buf []verifiedKey
+	var bufPtr *[]verifiedKey
+	if v := a.verifiedKeysPool.Get(); v != nil {
+		bufPtr = v.(*[]verifiedKey)
+		buf = *bufPtr
+	}
+
+	keys := a.localKeys.appendVerifiedKeys(buf[:0])
 	ctx := context.TODO()
 
-	for id, key := range ids {
-		a.syncLocalKey(ctx, id, key)
+	for _, k := range keys {
+		a.syncLocalKey(ctx, k.id, k.key)
+	}
+
+	if cap(keys) <= maxVerifiedKeysPoolCap {
+		clear(keys)
+		keys = keys[:0]
+		if bufPtr == nil {
+			bufPtr = new([]verifiedKey)
+		}
+		*bufPtr = keys
+		a.verifiedKeysPool.Put(bufPtr)
 	}
 }
 

@@ -161,6 +161,29 @@ func (lk *localKeys) release(key string) (lastUse bool, id idpool.ID, err error)
 	return false, idpool.NoID, fmt.Errorf("unable to find key in local cache")
 }
 
+type verifiedKey struct {
+	id  idpool.ID
+	key AllocatorKey
+}
+
+func (lk *localKeys) appendVerifiedKeys(dst []verifiedKey) []verifiedKey {
+	lk.RLock()
+	defer lk.RUnlock()
+
+	needed := len(dst) + len(lk.ids)
+	if cap(dst) < needed {
+		newDst := make([]verifiedKey, len(dst), needed)
+		copy(newDst, dst)
+		dst = newDst
+	}
+	for id, localKey := range lk.ids {
+		if localKey.verified {
+			dst = append(dst, verifiedKey{id: id, key: localKey.key})
+		}
+	}
+	return dst
+}
+
 func (lk *localKeys) getVerifiedIDs() map[idpool.ID]AllocatorKey {
 	ids := map[idpool.ID]AllocatorKey{}
 	lk.RLock()
