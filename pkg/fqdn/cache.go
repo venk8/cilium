@@ -219,9 +219,13 @@ func (c *DNSCache) Update(lookupTime time.Time, name string, ips []netip.Addr, t
 // It returns two booleans that indicate if the dns cache was updated, and if one
 // or more IPs were new and therefore upserted
 func (c *DNSCache) updateWithEntry(entry *cacheEntry) UpdateStatus {
+	if entry == nil || len(entry.IPs) == 0 {
+		return UpdateStatus{}
+	}
+
 	entries, exists := c.forward[entry.Name]
 	if !exists {
-		entries = make(map[netip.Addr]*cacheEntry)
+		entries = make(map[netip.Addr]*cacheEntry, len(entry.IPs))
 		c.forward[entry.Name] = entries
 	}
 
@@ -244,11 +248,7 @@ func (c *DNSCache) addNameToCleanup(entry *cacheEntry) {
 		c.lastCleanup = entry.ExpirationTime
 	}
 	expiration := entry.ExpirationTime.Unix()
-	expiredEntries, exists := c.cleanup[expiration]
-	if !exists {
-		expiredEntries = []string{}
-	}
-	c.cleanup[expiration] = append(expiredEntries, entry.Name)
+	c.cleanup[expiration] = append(c.cleanup[expiration], entry.Name)
 }
 
 // cleanupExpiredEntries cleans all the expired entries since lastCleanup up to
@@ -573,18 +573,19 @@ func (c *DNSCache) updateWithEntryIPs(entries ipEntries, entry *cacheEntry) Upda
 		if old == nil || !exists || old.isExpiredBy(entry.ExpirationTime) {
 			entries[ip] = entry
 			c.upsertReverse(ip, entry)
-			c.addNameToCleanup(entry)
 			updated = true
 		}
 		if !exists {
 			upserted = true
 		}
 	}
+	if updated {
+		c.addNameToCleanup(entry)
+	}
 	return UpdateStatus{
 		Upserted: upserted,
 		Updated:  updated,
 	}
-
 }
 
 // removeExpired removes expired (or nil) cacheEntry pointers from entries, an
@@ -807,7 +808,7 @@ func (c *DNSCache) MarshalJSON() ([]byte, error) {
 // Note: This is destructive to any correct data. Use UpdateFromCache for bulk
 // updates.
 func (c *DNSCache) UnmarshalJSON(raw []byte) error {
-	lookups := make([]*cacheEntry, 0)
+	var lookups []*cacheEntry
 	if err := json.Unmarshal(raw, &lookups); err != nil {
 		return err
 	}
@@ -815,7 +816,7 @@ func (c *DNSCache) UnmarshalJSON(raw []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	c.forward = make(map[string]ipEntries)
+	c.forward = make(map[string]ipEntries, len(lookups))
 	c.reverse = make(map[netip.Addr]nameEntries)
 
 	for _, newLookup := range lookups {
