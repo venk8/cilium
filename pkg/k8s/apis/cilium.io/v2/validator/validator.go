@@ -4,7 +4,6 @@
 package validator
 
 import (
-	"encoding/json"
 	"fmt"
 	"log/slog"
 
@@ -23,61 +22,40 @@ type NPValidator struct {
 	ccnpValidator validation.SchemaCreateValidator
 }
 
+func compileSchemaValidator(crv *apiextensionsv1.CustomResourceValidation) (validation.SchemaCreateValidator, error) {
+	if crv == nil {
+		return nil, fmt.Errorf("schema validation is nil")
+	}
+	var internal apiextensionsinternal.CustomResourceValidation
+	if err := apiextensionsv1.Convert_v1_CustomResourceValidation_To_apiextensions_CustomResourceValidation(
+		crv,
+		&internal,
+		nil,
+	); err != nil {
+		return nil, err
+	}
+	validator, _, err := validation.NewSchemaValidator(internal.OpenAPIV3Schema)
+	if err != nil {
+		return nil, err
+	}
+	return validator, nil
+}
+
 func NewNPValidator(logger *slog.Logger) (*NPValidator, error) {
-	// There are some default variables set by the CustomResourceValidation
-	// Marshaller so we need to marshal and unmarshal the CNPCRV to have those
-	// default values, the same way k8s api-server has it.
-	cnpCRVJSONBytes, err := json.Marshal(
-		client.GetPregeneratedCRD(logger, client.CNPCRDName).Spec.Versions[0].Schema,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("BUG: unable to marshall CNPCRV: %w", err)
+	cnpCRD := client.GetPregeneratedCRD(logger, client.CNPCRDName)
+	if len(cnpCRD.Spec.Versions) == 0 {
+		return nil, fmt.Errorf("no versions found for CRD %s", client.CNPCRDName)
 	}
-	var cnpCRV apiextensionsv1.CustomResourceValidation
-	err = json.Unmarshal(cnpCRVJSONBytes, &cnpCRV)
-	if err != nil {
-		return nil, fmt.Errorf("BUG: unable to unmarshall CNPCRV: %w", err)
-	}
-
-	var cnpInternal apiextensionsinternal.CustomResourceValidation
-	err = apiextensionsv1.Convert_v1_CustomResourceValidation_To_apiextensions_CustomResourceValidation(
-		&cnpCRV,
-		&cnpInternal,
-		nil,
-	)
-	if err != nil {
-		return nil, err
-	}
-	cnpValidator, _, err := validation.NewSchemaValidator(cnpInternal.OpenAPIV3Schema)
+	cnpValidator, err := compileSchemaValidator(cnpCRD.Spec.Versions[0].Schema)
 	if err != nil {
 		return nil, err
 	}
 
-	// There are some default variables set by the CustomResourceValidation
-	// Marshaller so we need to marshal and unmarshal the CCNPCRV to have those
-	// default values, the same way k8s api-server has it.
-	ccnpCRVJSONBytes, err := json.Marshal(
-		client.GetPregeneratedCRD(logger, client.CCNPCRDName).Spec.Versions[0].Schema,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("BUG: unable to marshall CCNPCRV: %w", err)
+	ccnpCRD := client.GetPregeneratedCRD(logger, client.CCNPCRDName)
+	if len(ccnpCRD.Spec.Versions) == 0 {
+		return nil, fmt.Errorf("no versions found for CRD %s", client.CCNPCRDName)
 	}
-	var ccnpCRV apiextensionsv1.CustomResourceValidation
-	err = json.Unmarshal(ccnpCRVJSONBytes, &ccnpCRV)
-	if err != nil {
-		return nil, fmt.Errorf("BUG: unable to unmarshall CCNPCRV: %w", err)
-	}
-
-	var ccnpInternal apiextensionsinternal.CustomResourceValidation
-	err = apiextensionsv1.Convert_v1_CustomResourceValidation_To_apiextensions_CustomResourceValidation(
-		&ccnpCRV,
-		&ccnpInternal,
-		nil,
-	)
-	if err != nil {
-		return nil, err
-	}
-	ccnpValidator, _, err := validation.NewSchemaValidator(ccnpInternal.OpenAPIV3Schema)
+	ccnpValidator, err := compileSchemaValidator(ccnpCRD.Spec.Versions[0].Schema)
 	if err != nil {
 		return nil, err
 	}
