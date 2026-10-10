@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"strconv"
 
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -15,7 +16,6 @@ import (
 
 	operator_k8s "github.com/cilium/cilium/operator/k8s"
 	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
-	"github.com/cilium/cilium/pkg/identity/basicallocator"
 	"github.com/cilium/cilium/pkg/identity/key"
 	"github.com/cilium/cilium/pkg/idpool"
 	"github.com/cilium/cilium/pkg/k8s"
@@ -37,7 +37,7 @@ type reconciler struct {
 	ctx             context.Context
 	clusterInfo     cmtypes.ClusterInfo
 	clientset       k8sClient.Clientset
-	idAllocator     *basicallocator.BasicIDAllocator
+	idAllocator     *idAllocator
 	desiredCIDState *CIDState
 	cidUsageInPods  *CIDUsageInPods
 	cidUsageInCES   *CIDUsageInCES
@@ -71,7 +71,7 @@ func newReconciler(
 
 	minIDValue := idpool.ID(clusterInfo.MinimalAllocationIdentity())
 	maxIDValue := idpool.ID(clusterInfo.MaximumAllocationIdentity())
-	idAllocator := basicallocator.NewBasicIDAllocator(minIDValue, maxIDValue)
+	idAllocator := newIDAllocator(minIDValue, maxIDValue)
 
 	nsStore, err := namespace.Store(ctx)
 	if err != nil {
@@ -503,4 +503,92 @@ func (r *reconciler) updateAllPodsInNamespace(namespace string) error {
 	}
 
 	return lastErr
+}
+
+type idAllocator struct {
+	mu        lock.Mutex
+	minID     idpool.ID
+	maxID     idpool.ID
+	allocated map[idpool.ID]struct{}
+}
+
+func newIDAllocator(minID, maxID idpool.ID) *idAllocator {
+	return &idAllocator{
+		minID:     minID,
+		maxID:     maxID,
+		allocated: make(map[idpool.ID]struct{}),
+	}
+}
+
+func (a *idAllocator) IsInPoolRange(id idpool.ID) bool {
+	return id >= a.minID && id <= a.maxID
+}
+
+func (a *idAllocator) ValidateIDString(idStr string) (int64, error) {
+	idInt, err := strconv.Atoi(idStr)
+	if err != nil {
+		return 0, fmt.Errorf("failed to validate id(%d): %w", idInt, err)
+	}
+
+	if idInt < 0 {
+		return 0, fmt.Errorf("failed to validate id(%d), id cannot be negative", idInt)
+	}
+
+	idInt64 := int64(idInt)
+	if !a.IsInPoolRange(idpool.ID(idInt64)) {
+		return 0, fmt.Errorf("failed to validate id(%d), out of the pool range [%d, %d]", idInt, a.minID, a.maxID)
+	}
+
+	return idInt64, nil
+}
+
+func (a *idAllocator) Allocate(id idpool.ID) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if !a.IsInPoolRange(id) {
+		return fmt.Errorf("cannot allocate %d because it's out of the pool range [%d, %d]", id, a.minID, a.maxID)
+	}
+	if _, exists := a.allocated[id]; exists {
+		return fmt.Errorf("failed to allocate ID=%d", id)
+	}
+	a.allocated[id] = struct{}{}
+	return nil
+}
+
+func (a *idAllocator) ReturnToAvailablePool(id idpool.ID) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if !a.IsInPoolRange(id) {
+		return fmt.Errorf("cannot return %d to the available pool because it's out of the pool range [%d, %d]", id, a.minID, a.maxID)
+	}
+	if _, exists := a.allocated[id]; !exists {
+		return fmt.Errorf("failed to return ID %d to available pool", id)
+	}
+	delete(a.allocated, id)
+	return nil
+}
+
+func (a *idAllocator) AllocateRandom() (idpool.ID, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.minID > a.maxID {
+		return idpool.NoID, fmt.Errorf("failed to allocate random ID")
+	}
+	poolSize := int(a.maxID - a.minID + 1)
+	if poolSize <= 0 || len(a.allocated) >= poolSize {
+		return idpool.NoID, fmt.Errorf("failed to allocate random ID")
+	}
+
+	start := rand.IntN(poolSize)
+	for i := 0; i < poolSize; i++ {
+		candidate := a.minID + idpool.ID((start+i)%poolSize)
+		if _, exists := a.allocated[candidate]; !exists {
+			a.allocated[candidate] = struct{}{}
+			return candidate, nil
+		}
+	}
+	return idpool.NoID, fmt.Errorf("failed to allocate random ID")
 }
