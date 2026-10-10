@@ -19,6 +19,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode"
 	"unicode/utf8"
 
@@ -3277,16 +3278,31 @@ func (c *DaemonConfig) StoreInFile(logger *slog.Logger, dir string) error {
 	return err
 }
 
+var daemonConfigPool = sync.Pool{
+	New: func() any {
+		return new(DaemonConfig)
+	},
+}
+
 func (c *DaemonConfig) checksum() [32]byte {
-	// take a shallow copy for summing
-	sumConfig := *c
+	sumConfig := daemonConfigPool.Get().(*DaemonConfig)
+	*sumConfig = *c
 	// Ignore variable parts
 	sumConfig.Opts = nil
-	cBytes, err := json.Marshal(&sumConfig)
+
+	h := sha256.New()
+	err := json.NewEncoder(h).Encode(sumConfig)
+
+	*sumConfig = DaemonConfig{}
+	daemonConfigPool.Put(sumConfig)
+
 	if err != nil {
 		return [32]byte{}
 	}
-	return sha256.Sum256(cBytes)
+
+	var sum [32]byte
+	h.Sum(sum[:0])
+	return sum
 }
 
 // ValidateUnchanged checks that invariable parts of the config have not changed since init.
@@ -3300,26 +3316,19 @@ func (c *DaemonConfig) ValidateUnchanged() error {
 }
 
 func (c *DaemonConfig) diffFromFile() error {
-	f, err := os.Open(backupFileNames[0])
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	fi, err := f.Stat()
+	fileBytes, err := os.ReadFile(backupFileNames[0])
 	if err != nil {
 		return err
 	}
 
-	fileBytes := make([]byte, fi.Size())
-	count, err := f.Read(fileBytes)
-	if err != nil {
-		return err
-	}
-	fileBytes = fileBytes[:count]
+	config := daemonConfigPool.Get().(*DaemonConfig)
+	*config = DaemonConfig{}
+	defer func() {
+		*config = DaemonConfig{}
+		daemonConfigPool.Put(config)
+	}()
 
-	var config DaemonConfig
-	err = json.Unmarshal(fileBytes, &config)
+	err = json.Unmarshal(fileBytes, config)
 
 	var diff string
 	if err != nil {
@@ -3336,7 +3345,7 @@ func (c *DaemonConfig) diffFromFile() error {
 			return !unicode.IsUpper(r)
 		}, cmp.Ignore())
 
-		diff = cmp.Diff(&config, c, opts,
+		diff = cmp.Diff(config, c, opts,
 			cmpopts.IgnoreTypes(&IntOptions{}),
 			cmpopts.IgnoreTypes(&OptionLibrary{}))
 	}
