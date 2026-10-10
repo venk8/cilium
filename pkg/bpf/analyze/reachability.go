@@ -80,7 +80,9 @@ type Reachable struct {
 
 	// j is a bitmap tracking predicted jumps. If the nth bit is 1, the jump
 	// at the end of block n is predicted to always be taken.
-	j Bitmap
+	j *Bitmap
+
+	lArr [16]uint64
 }
 
 // Reachability determines whether or not each Block in blocks is reachable
@@ -117,19 +119,27 @@ func Reachability(blocks Blocks, insns asm.Instructions, variables map[string]*e
 	// lookup map. This notably includes references to non-constant variables,
 	// which will be rejected later in the branch evaluation logic. They are
 	// included here to ensure that the reachability analysis is conclusive.
-	vars := make(map[mapOffset]*ebpf.VariableSpec)
-	for _, v := range variables {
-		vars[mapOffset{
-			mapName: unique.Make(v.SectionName),
-			offset:  v.Offset,
-		}] = v
+	var vars map[mapOffset]*ebpf.VariableSpec
+	if len(variables) > 0 {
+		vars = make(map[mapOffset]*ebpf.VariableSpec, len(variables))
+		for _, v := range variables {
+			vars[mapOffset{
+				mapName: unique.Make(v.SectionName),
+				offset:  v.Offset,
+			}] = v
+		}
 	}
 
 	r := &Reachable{
 		blocks: blocks,
 		insns:  insns,
-		l:      NewBitmap(uint64(blocks.count())),
-		j:      NewBitmap(uint64(blocks.count())),
+	}
+
+	numWords := (uint64(blocks.count()) + (wordSize - 1)) / wordSize
+	if numWords <= uint64(len(r.lArr)) {
+		r.l = r.lArr[:numWords]
+	} else {
+		r.l = NewBitmap(uint64(blocks.count()))
 	}
 
 	// Start recursing at first block since it is always live.
@@ -194,7 +204,7 @@ func (r *Reachable) Dump(insns asm.Instructions) string {
 
 		sb.WriteString(fmt.Sprintf("Live: %t, ", r.l.Get(uint64(block.id))))
 		sb.WriteString("branch: ")
-		if r.j.Get(uint64(block.id)) {
+		if r.j != nil && r.j.Get(uint64(block.id)) {
 			sb.WriteString("jump")
 		} else {
 			sb.WriteString("fallthrough")
@@ -419,6 +429,10 @@ func (r *Reachable) visitBlock(b *Block, vars map[mapOffset]*ebpf.VariableSpec) 
 
 	// If the branch is always taken, only visit the branch target.
 	if jump {
+		if r.j == nil {
+			bm := NewBitmap(uint64(r.blocks.count()))
+			r.j = &bm
+		}
 		r.j.Set(uint64(b.id), true)
 		return r.visitBlock(b.branch, vars)
 	}

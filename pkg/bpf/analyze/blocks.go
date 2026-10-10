@@ -292,8 +292,10 @@ func (i *Iterator) Backtrack() *Backtracker {
 type Backtracker struct {
 	insns asm.Instructions
 
-	block   *Block
-	visited []*Block
+	block      *Block
+	firstBlock *Block
+	firstPred  *Block
+	visited    []*Block
 
 	index int
 	ins   *asm.Instruction
@@ -376,11 +378,19 @@ func (bt *Backtracker) previousBlock() bool {
 		// Never roll over to self.
 		return false
 	}
-	if len(bt.visited) == 0 {
-		// First rollover, initialize visited list in a single allocation.
-		bt.visited = []*Block{bt.block, pred}
+	if bt.firstPred == nil {
+		// First rollover: record the start block and the first predecessor in
+		// dedicated fields to avoid allocating a slice for the common case.
+		bt.firstBlock = bt.block
+		bt.firstPred = pred
+	} else if len(bt.visited) == 0 {
+		// Second rollover: check against previously visited blocks before allocating.
+		if pred == bt.firstBlock {
+			return false
+		}
+		bt.visited = []*Block{bt.firstBlock, bt.firstPred, pred}
 	} else {
-		// Subsequent rollovers, check visited list and append if needed.
+		// Subsequent rollovers: check visited list and append if needed.
 		if slices.Contains(bt.visited, pred) {
 			return false
 		}
