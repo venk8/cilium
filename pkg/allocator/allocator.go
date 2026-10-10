@@ -534,12 +534,13 @@ type AllocatorKey interface {
 //  3. whether this is the first owner that holds a reference to the key in
 //     localkeys store
 //  4. error in case of failure
-func (a *Allocator) lockedAllocate(ctx context.Context, key AllocatorKey) (idpool.ID, bool, bool, error) {
+func (a *Allocator) lockedAllocate(ctx context.Context, key AllocatorKey, k string) (idpool.ID, bool, bool, error) {
 	var firstUse bool
 
-	kvstore.Trace(a.logger, "Allocating key in kvstore", fieldKey, key)
+	if a.logger.Enabled(ctx, slog.LevelDebug) {
+		kvstore.Trace(a.logger, "Allocating key in kvstore", fieldKey, key)
+	}
 
-	k := key.GetKey()
 	lock, err := a.backend.Lock(ctx, key)
 	if err != nil {
 		return 0, false, false, err
@@ -553,7 +554,9 @@ func (a *Allocator) lockedAllocate(ctx context.Context, key AllocatorKey) (idpoo
 		return 0, false, false, err
 	}
 
-	kvstore.Trace(a.logger, "kvstore state is: ", fieldID, value)
+	if a.logger.Enabled(ctx, slog.LevelDebug) {
+		kvstore.Trace(a.logger, "kvstore state is: ", fieldID, value)
+	}
 
 	a.slaveKeysMutex.Lock()
 	defer a.slaveKeysMutex.Unlock()
@@ -575,15 +578,19 @@ func (a *Allocator) lockedAllocate(ctx context.Context, key AllocatorKey) (idpoo
 			return 0, false, false, fmt.Errorf("unable to reserve local key '%s': %w", k, err)
 		}
 
-		if firstUse {
-			a.logger.Debug("Reserved new local key", logfields.Key, k)
-		} else {
-			a.logger.Debug("Reusing existing local key", logfields.Key, k)
+		if a.logger.Enabled(ctx, slog.LevelDebug) {
+			if firstUse {
+				a.logger.Debug("Reserved new local key", logfields.Key, k)
+			} else {
+				a.logger.Debug("Reusing existing local key", logfields.Key, k)
+			}
 		}
 	}
 
 	if value != 0 {
-		a.logger.Debug("Reusing existing global key", logfields.Key, k)
+		if a.logger.Enabled(ctx, slog.LevelDebug) {
+			a.logger.Debug("Reusing existing global key", logfields.Key, k)
+		}
 
 		if err = a.backend.AcquireReference(ctx, value, key, lock); err != nil {
 			a.localKeys.release(k)
@@ -598,13 +605,17 @@ func (a *Allocator) lockedAllocate(ctx context.Context, key AllocatorKey) (idpoo
 		return value, false, firstUse, nil
 	}
 
-	a.logger.Debug("Allocating new master ID", logfields.Key, k)
+	if a.logger.Enabled(ctx, slog.LevelDebug) {
+		a.logger.Debug("Allocating new master ID", logfields.Key, k)
+	}
 	id, strID, unmaskedID := a.selectAvailableID()
 	if id == 0 {
 		return 0, false, false, fmt.Errorf("no more available IDs in configured space")
 	}
 
-	kvstore.Trace(a.logger, "Selected available key ID", fieldID, id)
+	if a.logger.Enabled(ctx, slog.LevelDebug) {
+		kvstore.Trace(a.logger, "Selected available key ID", fieldID, id)
+	}
 
 	releaseKeyAndID := func() {
 		a.localKeys.release(k)
@@ -663,7 +674,9 @@ func (a *Allocator) lockedAllocate(ctx context.Context, key AllocatorKey) (idpoo
 		a.logger.Error("BUG: Unable to verify local key", logfields.Error, err)
 	}
 
-	a.logger.Debug("Allocated new global key", logfields.Key, k)
+	if a.logger.Enabled(ctx, slog.LevelDebug) {
+		a.logger.Debug("Allocated new global key", logfields.Key, k)
+	}
 
 	return id, true, firstUse, nil
 }
@@ -687,7 +700,9 @@ func (a *Allocator) Allocate(ctx context.Context, key AllocatorKey) (idpool.ID, 
 		firstUse bool
 	)
 
-	a.logger.Debug("Allocating key", logfields.Key, key)
+	if a.logger.Enabled(ctx, slog.LevelDebug) {
+		a.logger.Debug("Allocating key", logfields.Key, key)
+	}
 
 	select {
 	case <-a.initialListDone:
@@ -704,11 +719,14 @@ func (a *Allocator) Allocate(ctx context.Context, key AllocatorKey) (idpool.ID, 
 		return id, false, false, err
 	}
 
-	kvstore.Trace(a.logger, "Allocating from kvstore", fieldKey, key)
+	if a.logger.Enabled(ctx, slog.LevelDebug) {
+		kvstore.Trace(a.logger, "Allocating from kvstore", fieldKey, key)
+	}
 
-	// make a copy of the template and customize it
-	boff := a.backoffTemplate
-	boff.Name = key.String()
+	k := key.GetKey()
+
+	var boff backoff.Exponential
+	var boffInit bool
 
 	for attempt := range a.maxAllocAttempts {
 		// Check our list of local keys already in use and increment the
@@ -718,23 +736,29 @@ func (a *Allocator) Allocate(ctx context.Context, key AllocatorKey) (idpool.ID, 
 		// allocated the key while we are attempting to allocate in this
 		// execution thread. It does not hurt to check if localKeys contains a
 		// reference for the key that we are attempting to allocate.
-		if val := a.localKeys.use(key.GetKey()); val != idpool.NoID {
-			kvstore.Trace(a.logger, "Reusing local id",
-				fieldID, val,
-				fieldKey, key,
-			)
-			a.mainCache.insert(key, val)
+		if val := a.localKeys.use(k); val != idpool.NoID {
+			if a.logger.Enabled(ctx, slog.LevelDebug) {
+				kvstore.Trace(a.logger, "Reusing local id",
+					fieldID, val,
+					fieldKey, key,
+				)
+			}
+			if a.mainCache.get(k) != val {
+				a.mainCache.insert(key, k, val)
+			}
 			return val, false, false, nil
 		}
 
 		// FIXME: Add non-locking variant
-		value, isNew, firstUse, err = a.lockedAllocate(ctx, key)
+		value, isNew, firstUse, err = a.lockedAllocate(ctx, key, k)
 		if err == nil {
-			a.mainCache.insert(key, value)
-			a.logger.Debug("Allocated key",
-				logfields.Key, key,
-				logfields.ID, value,
-			)
+			a.mainCache.insert(key, k, value)
+			if a.logger.Enabled(ctx, slog.LevelDebug) {
+				a.logger.Debug("Allocated key",
+					logfields.Key, key,
+					logfields.ID, value,
+				)
+			}
 			return value, isNew, firstUse, nil
 		}
 
@@ -754,10 +778,18 @@ func (a *Allocator) Allocate(ctx context.Context, key AllocatorKey) (idpool.ID, 
 			)
 		}
 
-		kvstore.Trace(a.logger, "Allocation attempt failed",
-			fieldKey, key,
-			logfields.Attempt, attempt,
-		)
+		if a.logger.Enabled(ctx, slog.LevelDebug) {
+			kvstore.Trace(a.logger, "Allocation attempt failed",
+				fieldKey, key,
+				logfields.Attempt, attempt,
+			)
+		}
+
+		if !boffInit {
+			boff = a.backoffTemplate
+			boff.Name = key.String()
+			boffInit = true
+		}
 
 		if waitErr := boff.Wait(ctx); waitErr != nil {
 			return 0, false, false, waitErr
@@ -924,11 +956,15 @@ func (a *Allocator) GetByIDIncludeRemoteCaches(ctx context.Context, id idpool.ID
 // the returned lastUse value is true.
 func (a *Allocator) Release(ctx context.Context, key AllocatorKey) (lastUse bool, err error) {
 	if a.operatorIDManagement {
-		a.logger.Debug("Skipping key release when cilium-operator ID management is enabled", logfields.Key, key)
+		if a.logger.Enabled(ctx, slog.LevelDebug) {
+			a.logger.Debug("Skipping key release when cilium-operator ID management is enabled", logfields.Key, key)
+		}
 		return false, nil
 	}
 
-	a.logger.Debug("Releasing key", logfields.Key, key)
+	if a.logger.Enabled(ctx, slog.LevelDebug) {
+		a.logger.Debug("Releasing key", logfields.Key, key)
+	}
 
 	select {
 	case <-a.initialListDone:
