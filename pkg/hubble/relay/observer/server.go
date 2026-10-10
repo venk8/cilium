@@ -6,6 +6,7 @@ package observer
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc/codes"
@@ -141,13 +142,14 @@ func (s *Server) GetNodes(ctx context.Context, req *observerpb.GetNodesRequest) 
 	if md, ok := metadata.FromIncomingContext(ctx); ok {
 		ctx = metadata.NewOutgoingContext(ctx, md)
 	}
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	g, ctx := errgroup.WithContext(ctx)
 
 	peers := s.peers.List()
-	nodes := make([]*observerpb.Node, 0, len(peers))
-	for _, p := range peers {
+	nodes := make([]*observerpb.Node, len(peers))
+	statusReq := &observerpb.ServerStatusRequest{}
+	var wg sync.WaitGroup
+
+	for i := range peers {
+		p := &peers[i]
 		n := &observerpb.Node{
 			Name: p.Name,
 			Tls: &observerpb.TLS{
@@ -158,7 +160,7 @@ func (s *Server) GetNodes(ctx context.Context, req *observerpb.GetNodesRequest) 
 		if p.Address != nil {
 			n.Address = p.Address.String()
 		}
-		nodes = append(nodes, n)
+		nodes[i] = n
 		if !isAvailable(p.Conn) {
 			n.State = relaypb.NodeState_NODE_UNAVAILABLE
 			s.opts.log.Info(
@@ -169,30 +171,28 @@ func (s *Server) GetNodes(ctx context.Context, req *observerpb.GetNodesRequest) 
 			continue
 		}
 		n.State = relaypb.NodeState_NODE_CONNECTED
-		g.Go(func() error {
-			n := n
-			client := s.opts.ocb.observerClient(&p)
-			status, err := client.ServerStatus(ctx, &observerpb.ServerStatusRequest{})
+		client := s.opts.ocb.observerClient(p)
+		wg.Add(1)
+		go func(n *observerpb.Node, client observerpb.ObserverClient, peerName string) {
+			defer wg.Done()
+			status, err := client.ServerStatus(ctx, statusReq)
 			if err != nil {
 				n.State = relaypb.NodeState_NODE_ERROR
 				s.opts.log.Warn(
 					"Failed to retrieve server status",
 					logfields.Error, err,
-					logfields.Peer, p.Name,
+					logfields.Peer, peerName,
 				)
-				return nil
+				return
 			}
 			n.Version = status.GetVersion()
 			n.UptimeNs = status.GetUptimeNs()
 			n.MaxFlows = status.GetMaxFlows()
 			n.NumFlows = status.GetNumFlows()
 			n.SeenFlows = status.GetSeenFlows()
-			return nil
-		})
+		}(n, client, p.Name)
 	}
-	if err := g.Wait(); err != nil {
-		return nil, err
-	}
+	wg.Wait()
 	return &observerpb.GetNodesResponse{Nodes: nodes}, nil
 }
 
