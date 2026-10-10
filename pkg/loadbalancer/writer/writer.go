@@ -17,6 +17,7 @@ import (
 
 	"github.com/cilium/hive/cell"
 	"github.com/cilium/statedb"
+	"github.com/cilium/statedb/index"
 	"github.com/cilium/statedb/reconciler"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -49,6 +50,10 @@ type Writer struct {
 	selectBackendsFunc         SelectBackendsFunc
 	isServiceHealthCheckedFunc IsServiceHealthCheckedFunc
 	frontendSourceRangesFunc   FrontendSourceRangesFunc
+
+	backendKeyIndex statedb.Index[*loadbalancer.Backend, loadbalancer.BackendKey]
+
+	backendUpdateCtxPool sync.Pool
 }
 
 type SelectBackendsFunc = func(statedb.ReadTxn, iter.Seq2[*loadbalancer.Backend, statedb.Revision], *loadbalancer.Service, *loadbalancer.Frontend) iter.Seq2[*loadbalancer.Backend, statedb.Revision]
@@ -87,6 +92,9 @@ func NewWriter(p writerParams) (*Writer, error) {
 		nodes:            p.Nodes,
 		nodeAddrs:        p.NodeAddresses,
 		sourcePriorities: priorityMapFromSlice(p.SourcePriorities),
+	}
+	if p.Backends != nil {
+		w.backendKeyIndex, _ = p.Backends.PrimaryIndexer().(statedb.Index[*loadbalancer.Backend, loadbalancer.BackendKey])
 	}
 	w.selectBackendsFunc = w.DefaultSelectBackends
 	return w, nil
@@ -778,21 +786,38 @@ type backendUpdateContext struct {
 	clusterID   uint32
 	srcPrio     uint8
 	err         error
+	yield       func(loadbalancer.Backend) bool
+	keyBuf      []byte
 }
 
-func (ctx *backendUpdateContext) yield(be loadbalancer.Backend) bool {
+func (ctx *backendUpdateContext) doYield(be loadbalancer.Backend) bool {
 	be.Source = ctx.source
 	be.ClusterID = ctx.clusterID
 	be.SetSourcePriority(ctx.srcPrio)
 	be.ServiceName = ctx.serviceName
 
-	key := loadbalancer.BackendKey{
-		ServiceName:    ctx.serviceName,
-		Address:        be.Address,
-		SourcePriority: ctx.srcPrio,
+	var (
+		old *loadbalancer.Backend
+		ok  bool
+	)
+	if ctx.w.backendKeyIndex.Name != "" {
+		ctx.keyBuf = ctx.keyBuf[:0]
+		ctx.keyBuf = append(ctx.keyBuf, ctx.serviceName.Key()...)
+		ctx.keyBuf = append(ctx.keyBuf, 0x00)
+		ctx.keyBuf = append(ctx.keyBuf, be.Address.Bytes()...)
+		ctx.keyBuf = append(ctx.keyBuf, 0x00)
+		ctx.keyBuf = append(ctx.keyBuf, ctx.srcPrio)
+		old, _, ok = ctx.w.bes.Get(ctx.txn.WriteTxn, ctx.w.backendKeyIndex.QueryFromKey(index.Key(ctx.keyBuf)))
+	} else {
+		key := loadbalancer.BackendKey{
+			ServiceName:    ctx.serviceName,
+			Address:        be.Address,
+			SourcePriority: ctx.srcPrio,
+		}
+		old, _, ok = ctx.w.bes.Get(ctx.txn.WriteTxn, loadbalancer.BackendByKey(key))
 	}
 
-	if old, _, ok := ctx.w.bes.Get(ctx.txn.WriteTxn, loadbalancer.BackendByKey(key)); ok {
+	if ok {
 		// Preserve health information.
 		be.Unhealthy = old.Unhealthy
 		be.UnhealthyUpdatedAt = old.UnhealthyUpdatedAt
@@ -809,19 +834,50 @@ func (ctx *backendUpdateContext) yield(be loadbalancer.Backend) bool {
 	return true
 }
 
+func (w *Writer) getBackendUpdateContext() *backendUpdateContext {
+	if v := w.backendUpdateCtxPool.Get(); v != nil {
+		return v.(*backendUpdateContext)
+	}
+	ctx := &backendUpdateContext{
+		keyBuf: make([]byte, 0, 128),
+	}
+	ctx.yield = ctx.doYield
+	return ctx
+}
+
+func (w *Writer) putBackendUpdateContext(ctx *backendUpdateContext) {
+	ctx.w = nil
+	ctx.txn = WriteTxn{}
+	ctx.serviceName = loadbalancer.ServiceName{}
+	ctx.source = ""
+	ctx.clusterID = 0
+	ctx.srcPrio = 0
+	ctx.err = nil
+	if cap(ctx.keyBuf) > 1024 {
+		ctx.keyBuf = make([]byte, 0, 128)
+	} else {
+		ctx.keyBuf = ctx.keyBuf[:0]
+	}
+	w.backendUpdateCtxPool.Put(ctx)
+}
+
 func (w *Writer) updateBackends(txn WriteTxn, serviceName loadbalancer.ServiceName, source source.Source, clusterID uint32, bes iter.Seq[loadbalancer.Backend]) (bool, error) {
 	revBefore := w.bes.Revision(txn.WriteTxn)
-	ctx := &backendUpdateContext{
-		w:           w,
-		txn:         txn,
-		serviceName: serviceName,
-		source:      source,
-		clusterID:   clusterID,
-		srcPrio:     w.sourcePriority(source),
-	}
+	ctx := w.getBackendUpdateContext()
+	ctx.w = w
+	ctx.txn = txn
+	ctx.serviceName = serviceName
+	ctx.source = source
+	ctx.clusterID = clusterID
+	ctx.srcPrio = w.sourcePriority(source)
+	ctx.err = nil
+
 	bes(ctx.yield)
-	if ctx.err != nil {
-		return false, ctx.err
+
+	err := ctx.err
+	w.putBackendUpdateContext(ctx)
+	if err != nil {
+		return false, err
 	}
 	return w.bes.Revision(txn.WriteTxn) != revBefore, nil
 }
