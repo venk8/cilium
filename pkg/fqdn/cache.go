@@ -13,6 +13,7 @@ import (
 	"slices"
 	"sort"
 	"strconv"
+	"sync"
 
 	"k8s.io/apimachinery/pkg/util/sets"
 
@@ -751,10 +752,21 @@ func (c *DNSCache) forceExpireByNames(expireLookupsBefore time.Time, names []str
 // Dump returns unexpired cache entries in the cache. They are deduplicated,
 // but not usefully sorted. These objects should not be modified.
 func (c *DNSCache) Dump() (lookups []*cacheEntry) {
+	return c.dumpTo(nil)
+}
+
+func (c *DNSCache) dumpTo(dst []*cacheEntry) (lookups []*cacheEntry) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	lookups = make([]*cacheEntry, 0, len(c.forward))
+	if dst == nil {
+		lookups = make([]*cacheEntry, 0, len(c.forward))
+	} else {
+		lookups = dst[:0]
+		if cap(lookups) < len(c.forward) {
+			lookups = make([]*cacheEntry, 0, len(c.forward))
+		}
+	}
 	for _, entries := range c.forward {
 		var seenBuf [4]*cacheEntry
 		seen := seenBuf[:0]
@@ -799,12 +811,29 @@ func (c *DNSCache) Count() (uint64, uint64) {
 	return uint64(len(c.forward)), ips
 }
 
+var lookupSlicePool = sync.Pool{
+	New: func() any {
+		s := make([]*cacheEntry, 0, 128)
+		return &s
+	},
+}
+
 // MarshalJSON serialises the set of DNS lookup cacheEntries needed to
 // reconstruct this cache instance.
 // Note: Expiration times are honored and the reconstructed cache instance is
 // expected to return the same values as the original at that point in time.
 func (c *DNSCache) MarshalJSON() ([]byte, error) {
-	lookups := c.Dump()
+	slicePtr := lookupSlicePool.Get().(*[]*cacheEntry)
+	lookups := c.dumpTo(*slicePtr)
+	defer func() {
+		const maxPooledLookups = 65536
+		if cap(lookups) <= maxPooledLookups {
+			clear(lookups)
+			*slicePtr = lookups[:0]
+			lookupSlicePool.Put(slicePtr)
+		}
+	}()
+
 	if len(lookups) == 0 {
 		return []byte("[]"), nil
 	}
