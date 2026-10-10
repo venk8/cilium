@@ -9,6 +9,8 @@ import (
 	"log/slog"
 	"net/netip"
 	"regexp"
+	"slices"
+	"strings"
 
 	"github.com/cilium/hive/cell"
 	"github.com/cilium/hive/job"
@@ -31,6 +33,27 @@ import (
 	"github.com/cilium/cilium/pkg/time"
 )
 
+type selectorEntry struct {
+	sel      api.FQDNSelector
+	regex    *regexp.Regexp       // nil for exact match selectors, compiled regex for pattern selectors
+	label    labels.Label         // precomputed sel.IdentityLabel()
+	labels   labels.Labels        // precomputed 1-element labels.Labels{label.Key: label}
+	metadata []ipcache.IPMetadata // precomputed []ipcache.IPMetadata{labels}
+}
+
+type exactEntry struct {
+	entries  []selectorEntry
+	labels   labels.Labels           // precomputed merged labels for this exact domain (exact + matching pattern selectors)
+	metadata []ipcache.IPMetadata    // precomputed []ipcache.IPMetadata{labels}
+	resource ipcacheTypes.ResourceID // precomputed ipcacheResource(canon)
+}
+
+type suffixEntry struct {
+	entries  []selectorEntry
+	labels   labels.Labels        // precomputed merged labels for this wildcard suffix
+	metadata []ipcache.IPMetadata // precomputed []ipcache.IPMetadata{labels}
+}
+
 // The implementation of the NameManager interface.
 type manager struct {
 	logger *slog.Logger
@@ -44,6 +67,15 @@ type manager struct {
 	// allSelectors contains all FQDNSelectors which are present in all policy. We
 	// use these selectors to map selectors --> IPs.
 	allSelectors map[api.FQDNSelector]*regexp.Regexp
+
+	// exactSelectors contains exact match selectors (MatchName != "") keyed by canonical FQDN.
+	exactSelectors map[string]*exactEntry
+
+	// suffixSelectors contains single-label wildcard selectors (*.domain) keyed by canonical suffix (domain.).
+	suffixSelectors map[string]*suffixEntry
+
+	// generalPatternSelectors contains general regex/wildcard match selectors (e.g. foo.*.bar, **).
+	generalPatternSelectors []selectorEntry
 
 	cache *fqdn.DNSCache
 
@@ -73,12 +105,14 @@ func New(params ManagerParams) *manager {
 	cache.DisableCleanupTrack()
 
 	n := &manager{
-		logger:       params.Logger,
-		params:       params,
-		allSelectors: make(map[api.FQDNSelector]*regexp.Regexp),
-		selectorIDs:  make(map[api.FQDNSelector][]identity.NumericIdentity),
-		cache:        cache,
-		nameLocks:    make([]*lock.Mutex, params.Config.DNSProxyLockCount),
+		logger:          params.Logger,
+		params:          params,
+		allSelectors:    make(map[api.FQDNSelector]*regexp.Regexp),
+		exactSelectors:  make(map[string]*exactEntry),
+		suffixSelectors: make(map[string]*suffixEntry),
+		selectorIDs:     make(map[api.FQDNSelector][]identity.NumericIdentity),
+		cache:           cache,
+		nameLocks:       make([]*lock.Mutex, params.Config.DNSProxyLockCount),
 	}
 
 	for i := range n.nameLocks {
@@ -132,6 +166,17 @@ func New(params ManagerParams) *manager {
 	return n
 }
 
+func isSingleWildcardPrefix(pattern string) (suffix string, ok bool) {
+	pattern = strings.TrimSpace(pattern)
+	if strings.HasPrefix(pattern, "*.") && strings.Count(pattern, "*") == 1 {
+		trimmed := strings.TrimPrefix(pattern, "*.")
+		if trimmed != "" {
+			return prepareMatchName(trimmed), true
+		}
+	}
+	return "", false
+}
+
 // RegisterFQDNSelector exposes this FQDNSelector so that the identity labels
 // of IPs contained in a DNS response that matches said selector can be
 // associated with that selector.
@@ -162,6 +207,88 @@ func (n *manager) RegisterFQDNSelector(selector api.FQDNSelector) (ipcacheRevisi
 		if metrics.FQDNSelectors.IsEnabled() {
 			metrics.FQDNSelectors.Set(float64(len(n.allSelectors)))
 		}
+
+		label := selector.IdentityLabel()
+		singleLabels := labels.Labels{label.Key: label}
+		singleMetadata := []ipcache.IPMetadata{singleLabels}
+
+		if selector.MatchName != "" {
+			canon := prepareMatchName(selector.MatchName)
+			entry, exists := n.exactSelectors[canon]
+			if !exists {
+				entry = &exactEntry{
+					labels:   make(labels.Labels),
+					resource: ipcacheResource(canon),
+				}
+				n.exactSelectors[canon] = entry
+				// Incorporate any existing suffix selectors matching this exact domain
+				if dot := strings.IndexByte(canon, '.'); dot > 0 {
+					if sEntry, found := n.suffixSelectors[canon[dot+1:]]; found {
+						for k, v := range sEntry.labels {
+							entry.labels[k] = v
+						}
+					}
+				}
+				// Incorporate any existing general pattern selectors matching this exact domain
+				for _, p := range n.generalPatternSelectors {
+					if p.regex.MatchString(canon) {
+						entry.labels[p.label.Key] = p.label
+					}
+				}
+			}
+			entry.entries = append(entry.entries, selectorEntry{
+				sel:      selector,
+				label:    label,
+				labels:   singleLabels,
+				metadata: singleMetadata,
+			})
+			entry.labels[label.Key] = label
+			entry.metadata = []ipcache.IPMetadata{entry.labels}
+		}
+		if selector.MatchPattern != "" {
+			if suffix, ok := isSingleWildcardPrefix(selector.MatchPattern); ok {
+				sEntry, exists := n.suffixSelectors[suffix]
+				if !exists {
+					sEntry = &suffixEntry{
+						labels: make(labels.Labels),
+					}
+					n.suffixSelectors[suffix] = sEntry
+				}
+				sEntry.entries = append(sEntry.entries, selectorEntry{
+					sel:      selector,
+					regex:    regex,
+					label:    label,
+					labels:   singleLabels,
+					metadata: singleMetadata,
+				})
+				sEntry.labels[label.Key] = label
+				sEntry.metadata = []ipcache.IPMetadata{sEntry.labels}
+				// Update any existing exactSelectors matching this new suffix
+				for canon, e := range n.exactSelectors {
+					if dot := strings.IndexByte(canon, '.'); dot > 0 && canon[dot+1:] == suffix {
+						e.labels[label.Key] = label
+						e.metadata = []ipcache.IPMetadata{e.labels}
+					}
+				}
+			} else {
+				pEntry := selectorEntry{
+					sel:      selector,
+					regex:    regex,
+					label:    label,
+					labels:   singleLabels,
+					metadata: singleMetadata,
+				}
+				n.generalPatternSelectors = append(n.generalPatternSelectors, pEntry)
+				// Update any existing exactSelectors matching this new pattern
+				for canon, e := range n.exactSelectors {
+					if regex.MatchString(canon) {
+						e.labels[label.Key] = label
+						e.metadata = []ipcache.IPMetadata{e.labels}
+					}
+				}
+			}
+		}
+
 		if n.selectorChanges != nil {
 			select {
 			case n.selectorChanges <- selectorChange{sel: selector, added: true}:
@@ -178,8 +305,32 @@ func (n *manager) RegisterFQDNSelector(selector api.FQDNSelector) (ipcacheRevisi
 	// The newly added FQDN selector could match DNS Names in the cache. If
 	// that is the case, we want to update the IPCache metadata for all
 	// associated IPs
-	selectedNamesAndIPs := n.mapSelectorsToNamesLocked(selector)
-	return n.updateMetadata(deriveLabelsForNames(selectedNamesAndIPs, n.allSelectors))
+	regex := n.allSelectors[selector]
+	selectedNamesAndIPs := n.mapSelectorsToNamesLocked(selector, regex)
+	if len(selectedNamesAndIPs) == 0 {
+		return 0
+	}
+	return n.updateMetadata(n.deriveLabelsForNames(selectedNamesAndIPs))
+}
+
+func (n *manager) rebuildExactEntryLabels(canon string, e *exactEntry) {
+	e.labels = make(labels.Labels, len(e.entries))
+	for _, entry := range e.entries {
+		e.labels[entry.label.Key] = entry.label
+	}
+	if dot := strings.IndexByte(canon, '.'); dot > 0 {
+		if sEntry, found := n.suffixSelectors[canon[dot+1:]]; found {
+			for k, v := range sEntry.labels {
+				e.labels[k] = v
+			}
+		}
+	}
+	for _, p := range n.generalPatternSelectors {
+		if p.regex.MatchString(canon) {
+			e.labels[p.label.Key] = p.label
+		}
+	}
+	e.metadata = []ipcache.IPMetadata{e.labels}
 }
 
 // UnregisterFQDNSelector removes this FQDNSelector from the set of
@@ -190,11 +341,72 @@ func (n *manager) UnregisterFQDNSelector(selector api.FQDNSelector) (ipcacheRevi
 	n.Lock()
 	defer n.Unlock()
 
+	regex, _ := n.allSelectors[selector]
 	// Remove selector
 	delete(n.allSelectors, selector)
 	if metrics.FQDNSelectors.IsEnabled() {
 		metrics.FQDNSelectors.Set(float64(len(n.allSelectors)))
 	}
+
+	if selector.MatchName != "" {
+		canon := prepareMatchName(selector.MatchName)
+		if entry, ok := n.exactSelectors[canon]; ok {
+			prevLen := len(entry.entries)
+			entry.entries = slices.DeleteFunc(entry.entries, func(e selectorEntry) bool {
+				return e.sel == selector
+			})
+			if len(entry.entries) == 0 {
+				delete(n.exactSelectors, canon)
+			} else if len(entry.entries) < prevLen {
+				n.rebuildExactEntryLabels(canon, entry)
+			}
+		}
+	}
+
+	if selector.MatchPattern != "" {
+		if suffix, ok := isSingleWildcardPrefix(selector.MatchPattern); ok {
+			if sEntry, ok := n.suffixSelectors[suffix]; ok {
+				prevLen := len(sEntry.entries)
+				sEntry.entries = slices.DeleteFunc(sEntry.entries, func(e selectorEntry) bool {
+					return e.sel == selector
+				})
+				if len(sEntry.entries) == 0 {
+					delete(n.suffixSelectors, suffix)
+				} else if len(sEntry.entries) < prevLen {
+					sEntry.labels = make(labels.Labels, len(sEntry.entries))
+					for _, entry := range sEntry.entries {
+						sEntry.labels[entry.label.Key] = entry.label
+					}
+					sEntry.metadata = []ipcache.IPMetadata{sEntry.labels}
+				}
+				if len(sEntry.entries) < prevLen {
+					for canon, e := range n.exactSelectors {
+						if dot := strings.IndexByte(canon, '.'); dot > 0 && canon[dot+1:] == suffix {
+							n.rebuildExactEntryLabels(canon, e)
+						}
+					}
+				}
+			}
+		} else {
+			prevLen := len(n.generalPatternSelectors)
+			n.generalPatternSelectors = slices.DeleteFunc(n.generalPatternSelectors, func(e selectorEntry) bool {
+				return e.sel == selector
+			})
+			if len(n.generalPatternSelectors) < prevLen {
+				if regex == nil {
+					regex, _ = selector.ToRegex()
+				}
+				if regex != nil {
+					for canon, e := range n.exactSelectors {
+						if regex.MatchString(canon) {
+							n.rebuildExactEntryLabels(canon, e)
+						}
+					}
+				}
+			}
+		}
+	}
+
 	if n.selectorChanges != nil {
 		select {
 		case n.selectorChanges <- selectorChange{sel: selector, added: false}:
@@ -205,8 +417,11 @@ func (n *manager) UnregisterFQDNSelector(selector api.FQDNSelector) (ipcacheRevi
 	}
 
 	// Re-compute labels for affected names and IPs
-	selectedNamesAndIPs := n.mapSelectorsToNamesLocked(selector)
-	return n.updateMetadata(deriveLabelsForNames(selectedNamesAndIPs, n.allSelectors))
+	selectedNamesAndIPs := n.mapSelectorsToNamesLocked(selector, regex)
+	if len(selectedNamesAndIPs) == 0 {
+		return 0
+	}
+	return n.updateMetadata(n.deriveLabelsForNames(selectedNamesAndIPs))
 }
 
 // UpdateGenerateDNS inserts the new DNS information into the cache. If the IPs
@@ -218,11 +433,13 @@ func (n *manager) UpdateGenerateDNS(ctx context.Context, lookupTime time.Time, n
 	// Update IPs in n
 	res, ipcacheRevision := n.updateDNSIPs(lookupTime, name, record, caches...)
 	if res.Upserted {
-		n.logger.Debug(
-			"Updated FQDN with new IPs",
-			logfields.MatchName, name,
-			logfields.IPAddrs, record.IPs,
-		)
+		if n.logger.Enabled(context.Background(), slog.LevelDebug) {
+			n.logger.Debug(
+				"Updated FQDN with new IPs",
+				logfields.MatchName, name,
+				logfields.IPAddrs, record.IPs,
+			)
+		}
 	}
 
 	c := make(chan error)
@@ -259,26 +476,30 @@ func (n *manager) updateDNSIPs(lookupTime time.Time, dnsName string, lookupIPs *
 
 	// The IPs didn't change. No more to be done for this dnsName
 	if !res.Upserted && n.bootstrapCompleted {
-		n.logger.Debug(
-			"FQDN: IPs didn't change for DNS name",
-			logfields.DNSName, dnsName,
-			logfields.LookupIPAddrs, lookupIPs,
-		)
+		if n.logger.Enabled(context.Background(), slog.LevelDebug) {
+			n.logger.Debug(
+				"FQDN: IPs didn't change for DNS name",
+				logfields.DNSName, dnsName,
+				logfields.LookupIPAddrs, lookupIPs,
+			)
+		}
 		return
 	}
 
 	// accumulate the new labels affected by new IPs
 	if len(n.allSelectors) == 0 {
-		n.logger.Debug(
-			"FQDN: No selectors registered for updates",
-			logfields.DNSName, dnsName,
-			logfields.LookupIPAddrs, lookupIPs,
-		)
+		if n.logger.Enabled(context.Background(), slog.LevelDebug) {
+			n.logger.Debug(
+				"FQDN: No selectors registered for updates",
+				logfields.DNSName, dnsName,
+				logfields.LookupIPAddrs, lookupIPs,
+			)
+		}
 		return
 	}
 
 	// derive labels for this DNS name
-	nameLabels := deriveLabelsForName(dnsName, n.allSelectors)
+	nameLabels, metadataSlice, resource := n.deriveLabelsAndMetadata(dnsName)
 	if len(nameLabels) == 0 {
 		// If no selectors care about this name, then skip IPCache updates
 		// for this name.
@@ -286,17 +507,49 @@ func (n *manager) updateDNSIPs(lookupTime time.Time, dnsName string, lookupIPs *
 		return
 	}
 
-	updates := map[string]nameMetadata{
-		dnsName: {
-			addrs:  lookupIPs.IPs,
-			labels: nameLabels,
-		},
-	}
-
 	// If new IPs were detected, and these IPs are selected by selectors,
 	// then ensure they have an identity allocated to them via the ipcache.
-	ipcacheRevision = n.updateMetadata(updates)
+	ipcacheRevision = n.updateMetadataForName(dnsName, lookupIPs.IPs, nameLabels, metadataSlice, resource)
 	return res, ipcacheRevision
+}
+
+// updateMetadataForName directly updates the metadata in IPCache for a single
+// DNS name and its associated IP addresses.
+func (n *manager) updateMetadataForName(dnsName string, addrs []netip.Addr, nameLabels labels.Labels, metadataSlice []ipcache.IPMetadata, resource ipcacheTypes.ResourceID) (ipcacheRevision uint64) {
+	if len(addrs) == 0 {
+		return 0
+	}
+
+	if n.logger.Enabled(context.Background(), slog.LevelDebug) {
+		n.logger.Debug(
+			"Updating prefix labels in IPCache",
+			logfields.Name, dnsName,
+			logfields.IPAddrs, addrs,
+			logfields.Labels, nameLabels,
+		)
+	}
+
+	updates := make([]ipcache.MU, len(addrs))
+	if resource == "" {
+		resource = ipcacheResource(dnsName)
+	}
+	if metadataSlice == nil {
+		metadataSlice = []ipcache.IPMetadata{nameLabels}
+	}
+
+	for i, addr := range addrs {
+		updates[i] = ipcache.MU{
+			Prefix:   cmtypes.NewLocalPrefixCluster(netip.PrefixFrom(addr, addr.BitLen())),
+			Source:   source.Generated,
+			Resource: resource,
+			Metadata: metadataSlice,
+		}
+	}
+
+	if len(nameLabels) > 0 {
+		return n.params.IPCache.UpsertMetadataBatch(updates...)
+	}
+	return n.params.IPCache.RemoveMetadataBatch(updates...)
 }
 
 // updateIPsName will update the IPs for dnsName. It always retains a copy of
@@ -307,7 +560,7 @@ func (n *manager) updateIPsForName(lookupTime time.Time, dnsName string, newIPs 
 }
 
 func ipcacheResource(dnsName string) ipcacheTypes.ResourceID {
-	return ipcacheTypes.NewResourceID(ipcacheTypes.ResourceKindDaemon, "fqdn-name-manager", dnsName)
+	return ipcacheTypes.ResourceID("daemon/fqdn-name-manager/" + dnsName)
 }
 
 // updateMetadata updates (i.e. upserts or removes) the metadata in IPCache for
@@ -319,12 +572,14 @@ func (n *manager) updateMetadata(nameToMetadata map[string]nameMetadata) (ipcach
 		var updates []ipcache.MU
 		resource := ipcacheResource(dnsName)
 
-		n.logger.Debug(
-			"Updating prefix labels in IPCache",
-			logfields.Name, dnsName,
-			logfields.IPAddrs, metadata.addrs,
-			logfields.Labels, metadata.labels,
-		)
+		if n.logger.Enabled(context.Background(), slog.LevelDebug) {
+			n.logger.Debug(
+				"Updating prefix labels in IPCache",
+				logfields.Name, dnsName,
+				logfields.IPAddrs, metadata.addrs,
+				logfields.Labels, metadata.labels,
+			)
+		}
 
 		for _, addr := range metadata.addrs {
 			updates = append(updates, ipcache.MU{
@@ -418,6 +673,74 @@ type nameMetadata struct {
 }
 
 // deriveLabelsForName derives what `fqdn:` labels we want to associate with
+// IPs for this DNS name using the partitioned index of exact, suffix, and pattern selectors.
+func (n *manager) deriveLabelsForName(dnsName string) labels.Labels {
+	lbls, _, _ := n.deriveLabelsAndMetadata(dnsName)
+	return lbls
+}
+
+func (n *manager) deriveLabelsAndMetadata(dnsName string) (labels.Labels, []ipcache.IPMetadata, ipcacheTypes.ResourceID) {
+	// Fast path 1: Exact domain match in exactSelectors
+	if entry, found := n.exactSelectors[dnsName]; found {
+		return entry.labels, entry.metadata, entry.resource
+	}
+
+	var matchedLabels labels.Labels
+	var matchedMetadata []ipcache.IPMetadata
+	var matchCount int
+
+	// Fast path 2: Suffix wildcard match in suffixSelectors
+	if dot := strings.IndexByte(dnsName, '.'); dot > 0 {
+		suffix := dnsName[dot+1:]
+		if sEntry, found := n.suffixSelectors[suffix]; found {
+			matchCount++
+			matchedLabels = sEntry.labels
+			matchedMetadata = sEntry.metadata
+		}
+	}
+
+	// Fallback: General regex pattern scan if any general patterns exist
+	if len(n.generalPatternSelectors) > 0 {
+		for _, entry := range n.generalPatternSelectors {
+			if entry.regex.MatchString(dnsName) {
+				matchCount++
+				if matchCount == 1 {
+					matchedLabels = entry.labels
+					matchedMetadata = entry.metadata
+				} else if matchCount == 2 {
+					multiLabels := make(labels.Labels, len(matchedLabels)+1)
+					for k, v := range matchedLabels {
+						multiLabels[k] = v
+					}
+					multiLabels[entry.label.Key] = entry.label
+					matchedLabels = multiLabels
+					matchedMetadata = []ipcache.IPMetadata{matchedLabels}
+				} else {
+					matchedLabels[entry.label.Key] = entry.label
+				}
+			}
+		}
+	}
+
+	if matchCount == 0 {
+		return labels.Labels{}, nil, ""
+	}
+	return matchedLabels, matchedMetadata, ipcacheResource(dnsName)
+}
+
+// deriveLabelsForNames derives the labels for all names found in nameToIPs
+func (n *manager) deriveLabelsForNames(nameToIPs map[string][]netip.Addr) (namesWithMetadata map[string]nameMetadata) {
+	namesWithMetadata = make(map[string]nameMetadata, len(nameToIPs))
+	for dnsName, addrs := range nameToIPs {
+		namesWithMetadata[dnsName] = nameMetadata{
+			addrs:  addrs,
+			labels: n.deriveLabelsForName(dnsName),
+		}
+	}
+	return namesWithMetadata
+}
+
+// deriveLabelsForName derives what `fqdn:` labels we want to associate with
 // IPs for this DNS name, i.e. what selectors match the DNS name.
 func deriveLabelsForName(dnsName string, selectors map[api.FQDNSelector]*regexp.Regexp) labels.Labels {
 	lbls := labels.Labels{}
@@ -448,7 +771,7 @@ func deriveLabelsForNames(nameToIPs map[string][]netip.Addr, selectors map[api.F
 // Name with all its associated IPs is collected.
 //
 // Returns the mapping of DNS names to all IPs selected by that selector.
-func (n *manager) mapSelectorsToNamesLocked(fqdnSelector api.FQDNSelector) (namesIPMapping map[string][]netip.Addr) {
+func (n *manager) mapSelectorsToNamesLocked(fqdnSelector api.FQDNSelector, regexes ...*regexp.Regexp) (namesIPMapping map[string][]netip.Addr) {
 	namesIPMapping = make(map[string][]netip.Addr)
 
 	// lookup matching DNS names
@@ -456,39 +779,46 @@ func (n *manager) mapSelectorsToNamesLocked(fqdnSelector api.FQDNSelector) (name
 		dnsName := prepareMatchName(fqdnSelector.MatchName)
 		lookupIPs := n.cache.Lookup(dnsName)
 		if len(lookupIPs) > 0 {
-			n.logger.Debug(
-				"Emitting matching DNS Name -> IPs for FQDNSelector",
-				logfields.DNSName, dnsName,
-				logfields.IPAddrs, lookupIPs,
-				logfields.MatchName, fqdnSelector.MatchName,
-			)
+			if n.logger.Enabled(context.Background(), slog.LevelDebug) {
+				n.logger.Debug(
+					"Emitting matching DNS Name -> IPs for FQDNSelector",
+					logfields.DNSName, dnsName,
+					logfields.IPAddrs, lookupIPs,
+					logfields.MatchName, fqdnSelector.MatchName,
+				)
+			}
 			namesIPMapping[dnsName] = lookupIPs
 		}
 	}
 
 	if len(fqdnSelector.MatchPattern) > 0 {
-		// lookup matching DNS names
-		dnsPattern := matchpattern.Sanitize(fqdnSelector.MatchPattern)
-		patternREStr := matchpattern.ToAnchoredRegexp(dnsPattern)
-		var (
-			err       error
-			patternRE *regexp.Regexp
-		)
-
-		if patternRE, err = re.CompileRegex(patternREStr); err != nil {
-			n.logger.Error("Error compiling matchPattern", logfields.Error, err)
-			return namesIPMapping
+		var patternRE *regexp.Regexp
+		if len(regexes) > 0 && regexes[0] != nil {
+			patternRE = regexes[0]
+		} else if existingRE, ok := n.allSelectors[fqdnSelector]; ok && existingRE != nil {
+			patternRE = existingRE
+		} else {
+			// lookup matching DNS names
+			dnsPattern := matchpattern.Sanitize(fqdnSelector.MatchPattern)
+			patternREStr := matchpattern.ToAnchoredRegexp(dnsPattern)
+			var err error
+			if patternRE, err = re.CompileRegex(patternREStr); err != nil {
+				n.logger.Error("Error compiling matchPattern", logfields.Error, err)
+				return namesIPMapping
+			}
 		}
 		lookupIPs := n.cache.LookupByRegexp(patternRE)
 
 		for dnsName, ips := range lookupIPs {
 			if len(ips) > 0 {
-				n.logger.Debug(
-					"Emitting matching DNS Name -> IPs for FQDNSelector",
-					logfields.DNSName, dnsName,
-					logfields.IPAddrs, ips,
-					logfields.MatchPattern, fqdnSelector.MatchPattern,
-				)
+				if n.logger.Enabled(context.Background(), slog.LevelDebug) {
+					n.logger.Debug(
+						"Emitting matching DNS Name -> IPs for FQDNSelector",
+						logfields.DNSName, dnsName,
+						logfields.IPAddrs, ips,
+						logfields.MatchPattern, fqdnSelector.MatchPattern,
+					)
+				}
 				namesIPMapping[dnsName] = append(namesIPMapping[dnsName], ips...)
 			}
 		}
