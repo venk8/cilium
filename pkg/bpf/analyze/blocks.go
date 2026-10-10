@@ -26,20 +26,38 @@ import (
 // This is a problem when modifying instructions through
 // [Blocks.LiveInstructions] after reachability analysis, since it would modify
 // the original ProgramSpec's instructions.
+// blockFunc holds function-level metadata for blocks that define or call functions.
+type blockFunc struct {
+	sym   string
+	calls []*Block
+}
+
 type Block struct {
-	id         uint64
-	raw        asm.RawInstructionOffset
+	id         uint32
+	raw        uint32
 	start, end int
 
-	// If this block is the start of a function, sym is set to the function name.
-	sym string
+	// fn holds function-level metadata (symbol name, outgoing calls) for the
+	// minority of blocks that require it.
+	fn *blockFunc
 
 	predecessors []*Block
 	branch       *Block
 	fthrough     *Block
+}
 
-	// calls are blocks that are called from this block.
-	calls *[]*Block
+func (b *Block) sym() string {
+	if b == nil || b.fn == nil {
+		return ""
+	}
+	return b.fn.sym
+}
+
+func (b *Block) calls() []*Block {
+	if b == nil || b.fn == nil {
+		return nil
+	}
+	return b.fn.calls
 }
 
 func (b *Block) first(insns asm.Instructions) *asm.Instruction {
@@ -75,7 +93,7 @@ func (b *Block) iterate(insns asm.Instructions) *Iterator {
 		block:   b,
 		insns:   insns,
 		insnIdx: b.start,
-		offset:  b.raw,
+		offset:  asm.RawInstructionOffset(b.raw),
 	}
 }
 
@@ -90,7 +108,7 @@ func (b *Block) backtrack(insns asm.Instructions) *Backtracker {
 // Func returns the BTF function metadata associated with the block, if any. If
 // the block is not the start of a function, it returns nil.
 func (b *Block) Func(insns asm.Instructions) *btf.Func {
-	if b.sym == "" {
+	if b.sym() == "" {
 		return nil
 	}
 
@@ -109,8 +127,8 @@ func (b *Block) String() string {
 func (b *Block) Dump(insns asm.Instructions) string {
 	var sb strings.Builder
 
-	if b.sym != "" {
-		sb.WriteString(fmt.Sprintf("Function: %s\n", b.sym))
+	if sym := b.sym(); sym != "" {
+		sb.WriteString(fmt.Sprintf("Function: %s\n", sym))
 	}
 
 	sb.WriteString("Predecessors: [")
@@ -145,9 +163,9 @@ func (b *Block) Dump(insns asm.Instructions) string {
 		sb.WriteString("Instructions: not provided, call Dump() with insns\n")
 	}
 
-	if b.calls != nil && len(*b.calls) > 0 {
+	if calls := b.calls(); len(calls) > 0 {
 		sb.WriteString("Calls: [")
-		for i, callee := range *b.calls {
+		for i, callee := range calls {
 			if i > 0 {
 				sb.WriteString(", ")
 			}
@@ -221,7 +239,7 @@ func (i *Iterator) NextBlock() bool {
 	i.blockIdx++
 	i.block = i.blocks[i.blockIdx]
 	i.insnIdx = i.block.start
-	i.offset = i.block.raw
+	i.offset = asm.RawInstructionOffset(i.block.raw)
 	i.ins = &i.insns[i.insnIdx]
 
 	return true
@@ -418,7 +436,7 @@ func (bl Blocks) Name() string {
 	if len(bl) == 0 {
 		return ""
 	}
-	return bl.first().sym
+	return bl.first().sym()
 }
 
 // Func returns the BTF function metadata associated with the first block, if
@@ -524,23 +542,23 @@ func computeBlocks(insns asm.Instructions) (Blocks, error) {
 		return nil, errors.New("insns is empty, cannot compute blocks")
 	}
 
-	// Step 1: Precompute raw instruction offsets.
-	rawOffsets := make([]asm.RawInstructionOffset, n)
-	var offset asm.RawInstructionOffset
+	// Step 1: Precompute total raw offset and allocate leader bitmap.
+	var totalRaw asm.RawInstructionOffset
 	for i := range insns {
-		rawOffsets[i] = offset
-		offset += asm.RawInstructionOffset(insns[i].Size() / asm.InstructionSize)
+		totalRaw += asm.RawInstructionOffset(insns[i].Size() / asm.InstructionSize)
 	}
+	isLeader := NewBitmap(uint64(totalRaw))
+	isLeader.Set(0, true)
 
 	// Step 2: Identify block starts (leaders).
-	isLeader := make([]bool, n)
-	isLeader[0] = true
-
+	var curRaw asm.RawInstructionOffset
 	var hasFuncRef bool
 	for i := range insns {
 		ins := &insns[i]
+		rawSize := asm.RawInstructionOffset(ins.Size() / asm.InstructionSize)
+
 		if ins.Symbol() != "" {
-			isLeader[i] = true
+			isLeader.Set(uint64(curRaw), true)
 		}
 
 		if ins.IsFunctionReference() {
@@ -552,38 +570,34 @@ func computeBlocks(insns asm.Instructions) (Blocks, error) {
 		switch jump {
 		case asm.InvalidJumpOp, asm.Call:
 			// No branch, regular instruction.
-			continue
 
 		case asm.Exit:
 			// Exit ends the block. The next instruction, if any, starts a new block.
 			if i+1 < n {
-				isLeader[i+1] = true
+				isLeader.Set(uint64(curRaw+rawSize), true)
 			}
 
 		default:
 			// Jump instruction (Ja or conditional jump). It ends the current block.
 			if i+1 < n {
-				isLeader[i+1] = true
+				isLeader.Set(uint64(curRaw+rawSize), true)
 			}
 
-			raw, err := jumpTarget(rawOffsets[i], ins)
+			raw, err := jumpTarget(curRaw, ins)
 			if err != nil {
 				return nil, fmt.Errorf("determine jump target instruction offset: %w", err)
 			}
 
-			if tgtIdx, found := slices.BinarySearch(rawOffsets, raw); found {
-				isLeader[tgtIdx] = true
+			if raw < totalRaw {
+				isLeader.Set(uint64(raw), true)
 			}
 		}
+
+		curRaw += rawSize
 	}
 
 	// Step 3: Count and allocate blocks.
-	numBlocks := 0
-	for _, l := range isLeader {
-		if l {
-			numBlocks++
-		}
-	}
+	numBlocks := int(isLeader.Popcount())
 	if numBlocks == 0 {
 		return nil, errors.New("no blocks created, this is a bug")
 	}
@@ -591,23 +605,30 @@ func computeBlocks(insns asm.Instructions) (Blocks, error) {
 	arena := make([]Block, numBlocks)
 	blocks := make(Blocks, numBlocks)
 	k := 0
+	curRaw = 0
 	for i := range insns {
-		if !isLeader[i] {
-			continue
+		if isLeader.Get(uint64(curRaw)) {
+			if k > 0 {
+				blocks[k-1].end = i - 1
+			}
+			var fn *blockFunc
+			if sym := insns[i].Symbol(); sym != "" {
+				fn = &blockFunc{sym: sym}
+			}
+			arena[k] = Block{
+				id:    uint32(k),
+				raw:   uint32(curRaw),
+				start: i,
+				fn:    fn,
+			}
+			blocks[k] = &arena[k]
+			k++
 		}
-		if k > 0 {
-			blocks[k-1].end = i - 1
-		}
-		arena[k] = Block{
-			id:    uint64(k),
-			raw:   rawOffsets[i],
-			start: i,
-			sym:   insns[i].Symbol(),
-		}
-		blocks[k] = &arena[k]
-		k++
+		curRaw += asm.RawInstructionOffset(insns[i].Size() / asm.InstructionSize)
 	}
-	blocks[numBlocks-1].end = n - 1
+	blocks = blocks[:k]
+	arena = arena[:k]
+	blocks[k-1].end = n - 1
 
 	if start := blocks.first().start; start != 0 {
 		return nil, fmt.Errorf("first block starts at instruction index %d; this could be a bug, or the first insn is not a symbol", start)
@@ -620,19 +641,24 @@ func computeBlocks(insns asm.Instructions) (Blocks, error) {
 		jump := op.JumpOp()
 
 		if jump != asm.InvalidJumpOp && jump != asm.Call && jump != asm.Exit {
-			raw, err := jumpTarget(rawOffsets[blk.end], lastIns)
+			endRaw := asm.RawInstructionOffset(blk.raw)
+			for j := blk.start; j < blk.end; j++ {
+				endRaw += asm.RawInstructionOffset(insns[j].Size() / asm.InstructionSize)
+			}
+
+			raw, err := jumpTarget(endRaw, lastIns)
 			if err != nil {
 				return nil, fmt.Errorf("determine jump target instruction offset: %w", err)
 			}
 
 			if targetBlockIdx, found := slices.BinarySearchFunc(blocks, raw, func(b *Block, r asm.RawInstructionOffset) int {
-				return cmp.Compare(b.raw, r)
+				return cmp.Compare(asm.RawInstructionOffset(b.raw), r)
 			}); found {
 				blk.branch = blocks[targetBlockIdx]
 			}
 		}
 
-		if canFallthrough(lastIns) && blk.id+1 < uint64(len(blocks)) {
+		if canFallthrough(lastIns) && blk.id+1 < uint32(len(blocks)) {
 			blk.fthrough = blocks[blk.id+1]
 		}
 	}
@@ -655,8 +681,8 @@ func computeBlocks(insns asm.Instructions) (Blocks, error) {
 	if hasFuncRef {
 		funcs := make(map[string]*Block)
 		for _, blk := range blocks {
-			if blk.sym != "" {
-				funcs[blk.sym] = blk
+			if sym := blk.sym(); sym != "" {
+				funcs[sym] = blk
 			}
 		}
 
@@ -676,8 +702,11 @@ func computeBlocks(insns asm.Instructions) (Blocks, error) {
 				}
 			}
 			if len(calls) > 0 {
-				calls := calls
-				blk.calls = &calls
+				if blk.fn == nil {
+					blk.fn = &blockFunc{calls: calls}
+				} else {
+					blk.fn.calls = calls
+				}
 			}
 		}
 	}
