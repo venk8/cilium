@@ -10,6 +10,7 @@ import (
 	"reflect"
 
 	"cel.dev/cel-go/cel"
+	"cel.dev/cel-go/checker"
 	"cel.dev/cel-go/common/types"
 
 	flowpb "github.com/cilium/cilium/api/v1/flow"
@@ -90,6 +91,16 @@ func compile(env *cel.Env, expr string, celType *cel.Type) (*cel.Ast, error) {
 	return ast, nil
 }
 
+type celCostEstimator struct{}
+
+func (celCostEstimator) EstimateSize(element checker.AstNode) *checker.SizeEstimate {
+	return nil
+}
+
+func (celCostEstimator) EstimateCallCost(function, overloadID string, target *checker.AstNode, args []checker.AstNode) *checker.CallEstimate {
+	return nil
+}
+
 func compileCELFilters(exprs []string) ([]cel.Program, error) {
 	var programs []cel.Program
 	for _, expr := range exprs {
@@ -100,12 +111,17 @@ func compileCELFilters(exprs []string) ([]cel.Program, error) {
 			return nil, fmt.Errorf("error compiling CEL expression: %w", err)
 		}
 
-		prg, err := celEnv.Program(
-			ast,
+		prgOpts := []cel.ProgramOption{
 			cel.EvalOptions(cel.OptOptimize),
-			cel.CostLimit(celProgramMaxRuntimeCost),
 			cel.InterruptCheckFrequency(celProgramInterruptCheckFrequency),
-		)
+		}
+
+		costEst, err := celEnv.EstimateCost(ast, celCostEstimator{})
+		if err != nil || costEst.Max > celProgramMaxRuntimeCost {
+			prgOpts = append(prgOpts, cel.CostLimit(celProgramMaxRuntimeCost))
+		}
+
+		prg, err := celEnv.Program(ast, prgOpts...)
 		if err != nil {
 			return nil, fmt.Errorf("error building CEL program: %w", err)
 		}
