@@ -60,6 +60,12 @@ type NeighLink struct {
 	Name string `json:"link-name"`
 }
 
+type nodeIDPool interface {
+	AllocateID() idpool.ID
+	Insert(id idpool.ID) bool
+	Remove(id idpool.ID) bool
+}
+
 type linuxNodeHandler struct {
 	log *slog.Logger
 
@@ -80,7 +86,7 @@ type linuxNodeHandler struct {
 	localNodeStore *node.LocalNodeStore
 	nodeMap        nodemap.MapV2
 	// Pool of available IDs for nodes.
-	nodeIDs *idpool.IDPool
+	nodeIDs nodeIDPool
 	// Node-scoped unique IDs for the nodes.
 	nodeIDsByIPs map[string]uint16
 	// reverse map of the above
@@ -364,7 +370,7 @@ func newNodeHandler(
 		pendingNodes:         map[nodeTypes.Identity]*nodeTypes.Node{},
 		localNodeStore:       localNodeStore,
 		nodeMap:              nodeMap,
-		nodeIDs:              idpool.NewIDPool(minNodeID, maxNodeID),
+		nodeIDs:              newNodeIDPool(minNodeID, maxNodeID),
 		nodeIDsByIPs:         map[string]uint16{},
 		nodeIPsByIDs:         map[uint16]sets.Set[string]{},
 		ipsecMetricCollector: ipsec.NewXFRMCollector(log),

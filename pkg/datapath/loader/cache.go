@@ -243,5 +243,20 @@ func (o *objectCache) fetchOrCompile(ctx context.Context, cfg endpoint.Config, d
 		o.logger.Debug("Precomputed Blocks", logfields.Object, name)
 	}
 
+	// Discard the ELF's BTF type database from the cached CollectionSpec.
+	// Loading collections into the kernel only uses the BTF types referenced
+	// by individual MapSpec and ProgramSpec fields, while spec.Types is only
+	// used for offline code generation (e.g. bpf2go). Dropping it avoids
+	// deep-copying the entire BTF type graph on every cache hit.
+	obj.spec.Types = nil
+
+	// Discard BTF type information from cached VariableSpecs. Kernel loading
+	// only relies on the datasec bytes (v.Value) and map BTF attributes; v.Type
+	// is purely userspace metadata. Clearing it avoids deep-copying BTF type
+	// subtrees on every cache hit.
+	for _, v := range obj.spec.Variables {
+		v.Type = nil
+	}
+
 	return obj.spec.Copy(), hash, nil
 }

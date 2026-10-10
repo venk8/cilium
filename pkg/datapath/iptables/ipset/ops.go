@@ -38,11 +38,7 @@ func (ops *ops) UpdateBatch(ctx context.Context, txn statedb.ReadTxn, batch []re
 		return
 	}
 
-	addrsByName := map[string][]netip.Addr{}
-	for _, entry := range batch {
-		addrsByName[entry.Object.Name] = append(addrsByName[entry.Object.Name], entry.Object.Addr)
-	}
-	err := ops.ipset.addBatch(ctx, addrsByName)
+	err := ops.ipset.restoreBatch(ctx, "add", batch)
 	if err != nil {
 		// Fail the whole batch.
 		for i := range batch {
@@ -57,11 +53,7 @@ func (ops *ops) DeleteBatch(ctx context.Context, txn statedb.ReadTxn, batch []re
 		return
 	}
 
-	addrsByName := map[string][]netip.Addr{}
-	for _, entry := range batch {
-		addrsByName[entry.Object.Name] = append(addrsByName[entry.Object.Name], entry.Object.Addr)
-	}
-	err := ops.ipset.delBatch(ctx, addrsByName)
+	err := ops.ipset.restoreBatch(ctx, "del", batch)
 	if err != nil {
 		// Fail the whole batch.
 		for i := range batch {
@@ -78,8 +70,7 @@ func (ops *ops) Update(ctx context.Context, _ statedb.ReadTxn, _ statedb.Revisio
 		return nil
 	}
 
-	addrsByName := map[string][]netip.Addr{entry.Name: {entry.Addr}}
-	return ops.ipset.addBatch(ctx, addrsByName)
+	return ops.ipset.restoreEntry(ctx, "add", entry.Name, entry.Addr)
 }
 
 func (ops *ops) Delete(ctx context.Context, _ statedb.ReadTxn, _ statedb.Revision, entry *tables.IPSetEntry) error {
@@ -87,8 +78,7 @@ func (ops *ops) Delete(ctx context.Context, _ statedb.ReadTxn, _ statedb.Revisio
 		return nil
 	}
 
-	addrsByName := map[string][]netip.Addr{entry.Name: {entry.Addr}}
-	return ops.ipset.delBatch(ctx, addrsByName)
+	return ops.ipset.restoreEntry(ctx, "del", entry.Name, entry.Addr)
 }
 
 func (ops *ops) Prune(ctx context.Context, _ statedb.ReadTxn, objs iter.Seq2[*tables.IPSetEntry, statedb.Revision]) error {
@@ -130,14 +120,12 @@ func reconcile(
 	}
 
 	toDel := curSet.Difference(desired)
-	delBatch := map[string][]netip.Addr{name: toDel.UnsortedList()}
-	if err := ipset.delBatch(ctx, delBatch); err != nil {
+	if err := ipset.restoreSet(ctx, "del", name, toDel); err != nil {
 		return fmt.Errorf("unable to delete from ipset: %w", err)
 	}
 
 	toAdd := desired.Difference(curSet)
-	addBatch := map[string][]netip.Addr{name: toAdd.UnsortedList()}
-	if err := ipset.addBatch(ctx, addBatch); err != nil {
+	if err := ipset.restoreSet(ctx, "add", name, toAdd); err != nil {
 		return fmt.Errorf("unable to delete from ipset: %w", err)
 	}
 	return nil
