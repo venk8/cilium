@@ -4,6 +4,7 @@
 package allocator
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 
@@ -27,14 +28,12 @@ type localKeys struct {
 	logger *slog.Logger
 	lock.RWMutex
 	keys map[string]*localKey
-	ids  map[idpool.ID]*localKey
 }
 
 func newLocalKeys(logger *slog.Logger) *localKeys {
 	return &localKeys{
 		logger: logger,
 		keys:   map[string]*localKey{},
-		ids:    map[idpool.ID]*localKey{},
 	}
 }
 
@@ -53,23 +52,26 @@ func (lk *localKeys) allocate(keyString string, key AllocatorKey, val idpool.ID)
 		}
 
 		k.refcnt++
-		kvstore.Trace(lk.logger, "Incremented local key refcnt",
-			fieldKey, keyString,
-			fieldID, val,
-			fieldRefCnt, k.refcnt,
-		)
+		if lk.logger.Enabled(context.Background(), slog.LevelDebug) {
+			kvstore.Trace(lk.logger, "Incremented local key refcnt",
+				fieldKey, keyString,
+				fieldID, val,
+				fieldRefCnt, k.refcnt,
+			)
+		}
 		return k.val, firstUse, nil
 	}
 
 	firstUse = true
 	k := &localKey{key: key, val: val, refcnt: 1}
 	lk.keys[keyString] = k
-	lk.ids[val] = k
-	kvstore.Trace(lk.logger, "New local key",
-		fieldKey, keyString,
-		fieldID, val,
-		fieldRefCnt, 1,
-	)
+	if lk.logger.Enabled(context.Background(), slog.LevelDebug) {
+		kvstore.Trace(lk.logger, "New local key",
+			fieldKey, keyString,
+			fieldID, val,
+			fieldRefCnt, 1,
+		)
+	}
 	return val, firstUse, nil
 }
 
@@ -79,9 +81,11 @@ func (lk *localKeys) verify(key string) error {
 
 	if k, ok := lk.keys[key]; ok {
 		k.verified = true
-		kvstore.Trace(lk.logger, "Local key verified",
-			fieldKey, key,
-		)
+		if lk.logger.Enabled(context.Background(), slog.LevelDebug) {
+			kvstore.Trace(lk.logger, "Local key verified",
+				fieldKey, key,
+			)
+		}
 		return nil
 	}
 
@@ -106,8 +110,10 @@ func (lk *localKeys) lookupID(id idpool.ID) AllocatorKey {
 	lk.RLock()
 	defer lk.RUnlock()
 
-	if k, ok := lk.ids[id]; ok {
-		return k.key
+	for _, k := range lk.keys {
+		if k.val == id {
+			return k.key
+		}
 	}
 
 	return nil
@@ -125,11 +131,13 @@ func (lk *localKeys) use(key string) idpool.ID {
 		}
 
 		k.refcnt++
-		kvstore.Trace(lk.logger, "Incremented local key refcnt",
-			fieldKey, key,
-			fieldID, k.val,
-			fieldRefCnt, k.refcnt,
-		)
+		if lk.logger.Enabled(context.Background(), slog.LevelDebug) {
+			kvstore.Trace(lk.logger, "Incremented local key refcnt",
+				fieldKey, key,
+				fieldID, k.val,
+				fieldRefCnt, k.refcnt,
+			)
+		}
 		return k.val
 	}
 
@@ -144,14 +152,15 @@ func (lk *localKeys) release(key string) (lastUse bool, id idpool.ID, err error)
 	defer lk.Unlock()
 	if k, ok := lk.keys[key]; ok {
 		k.refcnt--
-		kvstore.Trace(lk.logger, "Decremented local key refcnt",
-			fieldKey, key,
-			fieldID, k.val,
-			fieldRefCnt, k.refcnt,
-		)
+		if lk.logger.Enabled(context.Background(), slog.LevelDebug) {
+			kvstore.Trace(lk.logger, "Decremented local key refcnt",
+				fieldKey, key,
+				fieldID, k.val,
+				fieldRefCnt, k.refcnt,
+			)
+		}
 		if k.refcnt == 0 {
 			delete(lk.keys, key)
-			delete(lk.ids, k.val)
 			return true, k.val, nil
 		}
 
@@ -161,12 +170,35 @@ func (lk *localKeys) release(key string) (lastUse bool, id idpool.ID, err error)
 	return false, idpool.NoID, fmt.Errorf("unable to find key in local cache")
 }
 
+type verifiedKey struct {
+	id  idpool.ID
+	key AllocatorKey
+}
+
+func (lk *localKeys) appendVerifiedKeys(dst []verifiedKey) []verifiedKey {
+	lk.RLock()
+	defer lk.RUnlock()
+
+	needed := len(dst) + len(lk.keys)
+	if cap(dst) < needed {
+		newDst := make([]verifiedKey, len(dst), needed)
+		copy(newDst, dst)
+		dst = newDst
+	}
+	for _, localKey := range lk.keys {
+		if localKey.verified {
+			dst = append(dst, verifiedKey{id: localKey.val, key: localKey.key})
+		}
+	}
+	return dst
+}
+
 func (lk *localKeys) getVerifiedIDs() map[idpool.ID]AllocatorKey {
 	ids := map[idpool.ID]AllocatorKey{}
 	lk.RLock()
-	for id, localKey := range lk.ids {
+	for _, localKey := range lk.keys {
 		if localKey.verified {
-			ids[id] = localKey.key
+			ids[localKey.val] = localKey.key
 		}
 	}
 	lk.RUnlock()

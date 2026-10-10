@@ -258,15 +258,50 @@ func (s *CidrSet) Occupy(prefix netip.Prefix) (err error) {
 	}
 	s.Lock()
 	defer s.Unlock()
-	for i := begin; i <= end; i++ {
-		// Only change the counters if we change the bit to prevent
-		// double counting.
-		if s.used.Bit(i) == 0 {
-			s.used.SetBit(&s.used, i, 1)
-			if s.reserved.Bit(i) == 0 {
-				s.unavailableCIDRs++
-			}
+
+	requiredWords := (end / bits.UintSize) + 1
+	if len(s.used.Bits()) < requiredWords {
+		s.used.SetBit(&s.used, end, 1)
+		if s.reserved.Bit(end) == 0 {
+			s.unavailableCIDRs++
 		}
+	}
+
+	usedWords := s.used.Bits()
+	reservedWords := s.reserved.Bits()
+	startWord := begin / bits.UintSize
+	endWord := end / bits.UintSize
+
+	for w := startWord; w <= endWord; w++ {
+		startBit := 0
+		if w == startWord {
+			startBit = begin % bits.UintSize
+		}
+		endBit := bits.UintSize - 1
+		if w == endWord {
+			endBit = end % bits.UintSize
+		}
+
+		numBits := endBit - startBit + 1
+		var mask big.Word
+		if numBits == bits.UintSize {
+			mask = ^big.Word(0)
+		} else {
+			mask = ((big.Word(1) << numBits) - 1) << startBit
+		}
+
+		newlySet := mask &^ usedWords[w]
+		if newlySet == 0 {
+			continue
+		}
+
+		usedWords[w] |= mask
+
+		var resWord big.Word
+		if w < len(reservedWords) {
+			resWord = reservedWords[w]
+		}
+		s.unavailableCIDRs += bits.OnesCount(uint(newlySet &^ resWord))
 	}
 
 	return nil
