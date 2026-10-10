@@ -12,7 +12,7 @@ import (
 	"regexp"
 	"slices"
 	"sort"
-	"unsafe"
+	"strconv"
 
 	"k8s.io/apimachinery/pkg/util/sets"
 
@@ -219,9 +219,13 @@ func (c *DNSCache) Update(lookupTime time.Time, name string, ips []netip.Addr, t
 // It returns two booleans that indicate if the dns cache was updated, and if one
 // or more IPs were new and therefore upserted
 func (c *DNSCache) updateWithEntry(entry *cacheEntry) UpdateStatus {
+	if entry == nil || len(entry.IPs) == 0 {
+		return UpdateStatus{}
+	}
+
 	entries, exists := c.forward[entry.Name]
 	if !exists {
-		entries = make(map[netip.Addr]*cacheEntry)
+		entries = make(map[netip.Addr]*cacheEntry, len(entry.IPs))
 		c.forward[entry.Name] = entries
 	}
 
@@ -244,11 +248,7 @@ func (c *DNSCache) addNameToCleanup(entry *cacheEntry) {
 		c.lastCleanup = entry.ExpirationTime
 	}
 	expiration := entry.ExpirationTime.Unix()
-	expiredEntries, exists := c.cleanup[expiration]
-	if !exists {
-		expiredEntries = []string{}
-	}
-	c.cleanup[expiration] = append(expiredEntries, entry.Name)
+	c.cleanup[expiration] = append(c.cleanup[expiration], entry.Name)
 }
 
 // cleanupExpiredEntries cleans all the expired entries since lastCleanup up to
@@ -573,18 +573,19 @@ func (c *DNSCache) updateWithEntryIPs(entries ipEntries, entry *cacheEntry) Upda
 		if old == nil || !exists || old.isExpiredBy(entry.ExpirationTime) {
 			entries[ip] = entry
 			c.upsertReverse(ip, entry)
-			c.addNameToCleanup(entry)
 			updated = true
 		}
 		if !exists {
 			upserted = true
 		}
 	}
+	if updated {
+		c.addNameToCleanup(entry)
+	}
 	return UpdateStatus{
 		Upserted: upserted,
 		Updated:  updated,
 	}
-
 }
 
 // removeExpired removes expired (or nil) cacheEntry pointers from entries, an
@@ -736,31 +737,20 @@ func (c *DNSCache) Dump() (lookups []*cacheEntry) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	// Collect all the still-valid entries
 	lookups = make([]*cacheEntry, 0, len(c.forward))
 	for _, entries := range c.forward {
+		var seenBuf [4]*cacheEntry
+		seen := seenBuf[:0]
 		for _, entry := range entries {
+			if entry == nil || slices.Contains(seen, entry) {
+				continue
+			}
+			seen = append(seen, entry)
 			lookups = append(lookups, entry)
 		}
 	}
 
-	// Dedup the entries. They are created once and are immutable so the address
-	// is a unique identifier.
-	// We iterate through the list, keeping unique pointers. This is correct
-	// because the list is sorted and, if two consecutive entries are the same,
-	// it is safe to overwrite the second duplicate.
-	sort.Slice(lookups, func(i, j int) bool {
-		return uintptr(unsafe.Pointer(lookups[i])) < uintptr(unsafe.Pointer(lookups[j]))
-	})
-
-	deduped := lookups[:0] // len==0 but cap==cap(lookups)
-	for readIdx, lookup := range lookups {
-		if readIdx == 0 || deduped[len(deduped)-1] != lookups[readIdx] {
-			deduped = append(deduped, lookup)
-		}
-	}
-
-	return deduped
+	return lookups
 }
 
 func (c *DNSCache) DumpNames() sets.Set[string] {
@@ -798,16 +788,126 @@ func (c *DNSCache) Count() (uint64, uint64) {
 // expected to return the same values as the original at that point in time.
 func (c *DNSCache) MarshalJSON() ([]byte, error) {
 	lookups := c.Dump()
+	if len(lookups) == 0 {
+		return []byte("[]"), nil
+	}
 
-	// serialise into a JSON object array
-	return json.Marshal(lookups)
+	var estSize int
+	for _, entry := range lookups {
+		if entry == nil {
+			estSize += 5
+			continue
+		}
+		ipBytes := 0
+		for _, ip := range entry.IPs {
+			if ip.Is4() {
+				ipBytes += 18 // "xxx.xxx.xxx.xxx",
+			} else {
+				ipBytes += 42 // "xxxx:xxxx:xxxx:xxxx:xxxx:xxxx:xxxx:xxxx",
+			}
+		}
+		estSize += 150 + len(entry.Name) + ipBytes
+	}
+
+	buf := make([]byte, 0, estSize+2)
+	buf = append(buf, '[')
+	for i, entry := range lookups {
+		if i > 0 {
+			buf = append(buf, ',')
+		}
+		if entry == nil {
+			buf = append(buf, "null"...)
+			continue
+		}
+		buf = append(buf, '{')
+		first := true
+		if entry.Name != "" {
+			buf = append(buf, `"fqdn":`...)
+			buf = appendJSONString(buf, entry.Name)
+			first = false
+		}
+		if !entry.LookupTime.IsZero() {
+			if !first {
+				buf = append(buf, ',')
+			}
+			buf = append(buf, `"lookup-time":"`...)
+			buf = entry.LookupTime.AppendFormat(buf, time.RFC3339Nano)
+			buf = append(buf, '"')
+			first = false
+		}
+		if !entry.ExpirationTime.IsZero() {
+			if !first {
+				buf = append(buf, ',')
+			}
+			buf = append(buf, `"expiration-time":"`...)
+			buf = entry.ExpirationTime.AppendFormat(buf, time.RFC3339Nano)
+			buf = append(buf, '"')
+			first = false
+		}
+		if entry.TTL != 0 {
+			if !first {
+				buf = append(buf, ',')
+			}
+			buf = append(buf, `"ttl":`...)
+			buf = strconv.AppendInt(buf, int64(entry.TTL), 10)
+			first = false
+		}
+		if len(entry.IPs) > 0 {
+			if !first {
+				buf = append(buf, ',')
+			}
+			buf = append(buf, `"ips":[`...)
+			for j, ip := range entry.IPs {
+				if j > 0 {
+					buf = append(buf, ',')
+				}
+				buf = append(buf, '"')
+				buf = ip.AppendTo(buf)
+				buf = append(buf, '"')
+			}
+			buf = append(buf, ']')
+		}
+		buf = append(buf, '}')
+	}
+	buf = append(buf, ']')
+
+	return buf, nil
+}
+
+func appendJSONString(dst []byte, s string) []byte {
+	dst = append(dst, '"')
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; c {
+		case '"', '\\':
+			dst = append(dst, '\\', c)
+		case '\b':
+			dst = append(dst, '\\', 'b')
+		case '\f':
+			dst = append(dst, '\\', 'f')
+		case '\n':
+			dst = append(dst, '\\', 'n')
+		case '\r':
+			dst = append(dst, '\\', 'r')
+		case '\t':
+			dst = append(dst, '\\', 't')
+		default:
+			if c < 0x20 {
+				dst = append(dst, `\u00`...)
+				const hex = "0123456789abcdef"
+				dst = append(dst, hex[c>>4], hex[c&0xf])
+			} else {
+				dst = append(dst, c)
+			}
+		}
+	}
+	return append(dst, '"')
 }
 
 // UnmarshalJSON rebuilds a DNSCache from serialized JSON.
 // Note: This is destructive to any correct data. Use UpdateFromCache for bulk
 // updates.
 func (c *DNSCache) UnmarshalJSON(raw []byte) error {
-	lookups := make([]*cacheEntry, 0)
+	var lookups []*cacheEntry
 	if err := json.Unmarshal(raw, &lookups); err != nil {
 		return err
 	}
@@ -815,7 +915,7 @@ func (c *DNSCache) UnmarshalJSON(raw []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	c.forward = make(map[string]ipEntries)
+	c.forward = make(map[string]ipEntries, len(lookups))
 	c.reverse = make(map[netip.Addr]nameEntries)
 
 	for _, newLookup := range lookups {

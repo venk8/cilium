@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/netip"
 	"strings"
+	"sync"
 
 	"github.com/cilium/dns"
 
@@ -20,6 +21,7 @@ import (
 	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/metrics"
+	"github.com/cilium/cilium/pkg/metrics/metric"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/proxy/accesslog"
 	"github.com/cilium/cilium/pkg/time"
@@ -43,6 +45,63 @@ const (
 	metricErrorDenied  = "denied"
 	metricErrorAllow   = "allow"
 )
+
+const (
+	scopeTotalTime = iota
+	scopeUpstreamTime
+	scopeProcessingTime
+	scopeSemaphoreTime
+	scopePolicyGenTime
+	scopeQnameLockTime
+	scopeUpdateEpCacheTime
+	scopeUpdateNmCacheTime
+	scopePolicyCheckTime
+	scopeDataplaneTime
+	numScopes
+)
+
+const (
+	metricErrorAllowIdx = iota
+	metricErrorTimeoutIdx
+	metricErrorProxyIdx
+	metricErrorDeniedIdx
+	numMetricErrors
+)
+
+var metricScopes = [numScopes]string{
+	scopeTotalTime:         totalTime,
+	scopeUpstreamTime:      upstreamTime,
+	scopeProcessingTime:    processingTime,
+	scopeSemaphoreTime:     semaphoreTime,
+	scopePolicyGenTime:     policyGenTime,
+	scopeQnameLockTime:     qnameLockTime,
+	scopeUpdateEpCacheTime: updateEpCacheTime,
+	scopeUpdateNmCacheTime: updateNmCacheTime,
+	scopePolicyCheckTime:   policyCheckTime,
+	scopeDataplaneTime:     dataplaneTime,
+}
+
+var metricErrorLabels = [numMetricErrors]string{
+	metricErrorAllowIdx:   metricErrorAllow,
+	metricErrorTimeoutIdx: metricErrorTimeout,
+	metricErrorProxyIdx:   metricErrorProxy,
+	metricErrorDeniedIdx:  metricErrorDenied,
+}
+
+func metricErrorIndex(err string) int {
+	switch err {
+	case metricErrorAllow:
+		return metricErrorAllowIdx
+	case metricErrorTimeout:
+		return metricErrorTimeoutIdx
+	case metricErrorProxy:
+		return metricErrorProxyIdx
+	case metricErrorDenied:
+		return metricErrorDeniedIdx
+	default:
+		return metricErrorAllowIdx
+	}
+}
 
 type DNSMessageHandler interface {
 	// NotifyOnDNSMsg handles DNS data when the in-agent DNS proxy sees a
@@ -82,6 +141,10 @@ type dnsMessageHandler struct {
 	DNSRequestHandler DNSMessageHandler
 
 	bindPort uint16
+
+	metricsOnce       sync.Once
+	metricsEnabled    bool
+	upstreamObservers [numMetricErrors][numScopes]metric.Observer
 }
 
 var _ DNSMessageHandler = &dnsMessageHandler{}
@@ -103,6 +166,18 @@ type flowInfo struct {
 // The bind port is ony used for proxy statistics.
 func (h *dnsMessageHandler) SetBindPort(port uint16) {
 	h.bindPort = port
+}
+
+func (h *dnsMessageHandler) initMetrics() {
+	if !metrics.ProxyUpstreamTime.IsEnabled() {
+		return
+	}
+	h.metricsEnabled = true
+	for errIdx, errStr := range metricErrorLabels {
+		for scopeIdx, scopeStr := range metricScopes {
+			h.upstreamObservers[errIdx][scopeIdx] = metrics.ProxyUpstreamTime.WithLabelValues(errStr, metrics.L7DNS, scopeStr)
+		}
+	}
 }
 
 // notifyOnDNSMsg handles DNS data in the daemon by emitting monitor
@@ -140,29 +215,26 @@ func (h *dnsMessageHandler) NotifyOnDNSMsg(
 	endMetric := func() {
 		stat.ProcessingTime.End(true)
 		stat.TotalTime.End(true)
-		if errors.As(stat.Err, &dnsproxy.ErrFailedAcquireSemaphore{}) || errors.As(stat.Err, &dnsproxy.ErrTimedOutAcquireSemaphore{}) {
+		if stat.Err != nil && (errors.As(stat.Err, &dnsproxy.ErrFailedAcquireSemaphore{}) || errors.As(stat.Err, &dnsproxy.ErrTimedOutAcquireSemaphore{})) {
 			metrics.FQDNSemaphoreRejectedTotal.Inc()
 		}
-		metrics.ProxyUpstreamTime.WithLabelValues(metricError, metrics.L7DNS, totalTime).Observe(
-			stat.TotalTime.Total().Seconds())
-		metrics.ProxyUpstreamTime.WithLabelValues(metricError, metrics.L7DNS, upstreamTime).Observe(
-			stat.UpstreamTime.Total().Seconds())
-		metrics.ProxyUpstreamTime.WithLabelValues(metricError, metrics.L7DNS, processingTime).Observe(
-			stat.ProcessingTime.Total().Seconds())
-		metrics.ProxyUpstreamTime.WithLabelValues(metricError, metrics.L7DNS, semaphoreTime).Observe(
-			stat.SemaphoreAcquireTime.Total().Seconds())
-		metrics.ProxyUpstreamTime.WithLabelValues(metricError, metrics.L7DNS, policyGenTime).Observe(
-			stat.PolicyGenerationTime.Total().Seconds())
-		metrics.ProxyUpstreamTime.WithLabelValues(metricError, metrics.L7DNS, qnameLockTime).Observe(
-			stat.QnameLockTime.Total().Seconds())
-		metrics.ProxyUpstreamTime.WithLabelValues(metricError, metrics.L7DNS, updateEpCacheTime).Observe(
-			stat.UpdateEpCacheTime.Total().Seconds())
-		metrics.ProxyUpstreamTime.WithLabelValues(metricError, metrics.L7DNS, updateNmCacheTime).Observe(
-			stat.UpdateNmCacheTime.Total().Seconds())
-		metrics.ProxyUpstreamTime.WithLabelValues(metricError, metrics.L7DNS, policyCheckTime).Observe(
-			stat.PolicyCheckTime.Total().Seconds())
-		metrics.ProxyUpstreamTime.WithLabelValues(metricError, metrics.L7DNS, dataplaneTime).Observe(
-			stat.DataplaneTime.Total().Seconds())
+		if !metrics.ProxyUpstreamTime.IsEnabled() {
+			return
+		}
+		h.metricsOnce.Do(h.initMetrics)
+		if h.metricsEnabled {
+			obs := h.upstreamObservers[metricErrorIndex(metricError)]
+			obs[scopeTotalTime].Observe(stat.TotalTime.Total().Seconds())
+			obs[scopeUpstreamTime].Observe(stat.UpstreamTime.Total().Seconds())
+			obs[scopeProcessingTime].Observe(stat.ProcessingTime.Total().Seconds())
+			obs[scopeSemaphoreTime].Observe(stat.SemaphoreAcquireTime.Total().Seconds())
+			obs[scopePolicyGenTime].Observe(stat.PolicyGenerationTime.Total().Seconds())
+			obs[scopeQnameLockTime].Observe(stat.QnameLockTime.Total().Seconds())
+			obs[scopeUpdateEpCacheTime].Observe(stat.UpdateEpCacheTime.Total().Seconds())
+			obs[scopeUpdateNmCacheTime].Observe(stat.UpdateNmCacheTime.Total().Seconds())
+			obs[scopePolicyCheckTime].Observe(stat.PolicyCheckTime.Total().Seconds())
+			obs[scopeDataplaneTime].Observe(stat.DataplaneTime.Total().Seconds())
+		}
 	}
 
 	switch {
@@ -249,24 +321,24 @@ func (h *dnsMessageHandler) logDNSMessage(
 	logContext, lcncl := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer lcncl()
 	record, err := h.proxyAccessLogger.NewLogRecord(context.Background(), flowInfo.flowType, false,
-		func(lr *accesslog.LogRecord, _ accesslog.EndpointInfoRegistry) {
-			lr.TransportProtocol = accesslog.TransportProtocol(protoID)
-		},
-		accesslog.LogTags.Verdict(flowInfo.verdict, flowInfo.reason),
 		accesslog.LogTags.Addressing(logContext, flowInfo.addrInfo),
-		accesslog.LogTags.DNS(&accesslog.LogRecordDNS{
-			Query:             dnsMsgDetails.QName,
-			IPs:               dnsMsgDetails.ResponseIPs,
-			TTL:               dnsMsgDetails.TTL,
-			CNAMEs:            dnsMsgDetails.CNAMEs,
-			ObservationSource: stat.DataSource,
-			RCode:             dnsMsgDetails.RCode,
-			QTypes:            dnsMsgDetails.QTypes,
-			AnswerTypes:       dnsMsgDetails.AnswerTypes,
-		}),
 	)
 	if err != nil {
 		return fmt.Errorf("failed create log record: %w", err)
+	}
+
+	record.TransportProtocol = accesslog.TransportProtocol(protoID)
+	record.Verdict = flowInfo.verdict
+	record.Info = flowInfo.reason
+	record.DNS = &accesslog.LogRecordDNS{
+		Query:             dnsMsgDetails.QName,
+		IPs:               dnsMsgDetails.ResponseIPs,
+		TTL:               dnsMsgDetails.TTL,
+		CNAMEs:            dnsMsgDetails.CNAMEs,
+		ObservationSource: stat.DataSource,
+		RCode:             dnsMsgDetails.RCode,
+		QTypes:            dnsMsgDetails.QTypes,
+		AnswerTypes:       dnsMsgDetails.AnswerTypes,
 	}
 
 	h.proxyAccessLogger.Log(record)
@@ -275,6 +347,8 @@ func (h *dnsMessageHandler) logDNSMessage(
 }
 
 func (h *dnsMessageHandler) UpdateOnDNSMsg(lookupTime time.Time, ep *endpoint.Endpoint, qname string, responseIPs []netip.Addr, TTL int, stat *dnsproxy.ProxyRequestContext) {
+	debugEnabled := h.logger.Enabled(context.Background(), slog.LevelDebug)
+
 	stat.PolicyGenerationTime.Start()
 
 	// Create a critical section especially for when multiple DNS requests
@@ -325,7 +399,9 @@ func (h *dnsMessageHandler) UpdateOnDNSMsg(lookupTime time.Time, ep *endpoint.En
 		)
 	}
 
-	h.logger.Debug("Recording DNS lookup in endpoint specific cache", logfields.EndpointID, ep.ID)
+	if debugEnabled {
+		h.logger.Debug("Recording DNS lookup in endpoint specific cache", logfields.EndpointID, ep.ID)
+	}
 
 	// This must happen before the NameManager update below, to ensure that
 	// this data is included in the serialized Endpoint object.
@@ -343,10 +419,12 @@ func (h *dnsMessageHandler) UpdateOnDNSMsg(lookupTime time.Time, ep *endpoint.En
 	}
 	stat.UpdateEpCacheTime.End(true)
 
-	h.logger.Debug("Updating DNS name in cache from response to query",
-		logfields.DNSName, qname,
-		logfields.IPAddrs, responseIPs,
-	)
+	if debugEnabled {
+		h.logger.Debug("Updating DNS name in cache from response to query",
+			logfields.DNSName, qname,
+			logfields.IPAddrs, responseIPs,
+		)
+	}
 
 	updateCtx, updateCancel := context.WithTimeout(context.Background(), option.Config.FQDNProxyResponseMaxDelay)
 	defer updateCancel()
@@ -371,9 +449,11 @@ func (h *dnsMessageHandler) UpdateOnDNSMsg(lookupTime time.Time, ep *endpoint.En
 	// Policy updates for this name have been pushed out; we can release the lock.
 	h.nameManager.UnlockName(qname)
 
-	h.logger.Debug("Waited for endpoints to regenerate due to a DNS response",
-		logfields.Duration, time.Since(updateStart),
-		logfields.EndpointID, ep.GetID(),
-		logfields.DNSName, qname,
-	)
+	if debugEnabled {
+		h.logger.Debug("Waited for endpoints to regenerate due to a DNS response",
+			logfields.Duration, time.Since(updateStart),
+			logfields.EndpointID, ep.GetID(),
+			logfields.DNSName, qname,
+		)
+	}
 }

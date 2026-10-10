@@ -24,11 +24,18 @@ type SharedClients struct {
 	lock lock.Mutex
 	// clients are created and destroyed on demand, hence 'Mutex' needs to be taken.
 	clients map[string]*SharedClient
+
+	respPool sync.Pool
 }
 
 func NewSharedClients() *SharedClients {
 	return &SharedClients{
 		clients: make(map[string]*SharedClient),
+		respPool: sync.Pool{
+			New: func() any {
+				return make(chan sharedClientResponse, 1)
+			},
+		},
 	}
 }
 
@@ -69,6 +76,8 @@ func (s *SharedClients) ShutdownTCPClient(key string) {
 	client.close()
 }
 
+func nopCloser() {}
+
 // GetSharedClient gets or creates an instance of SharedClient keyed with 'key'.  if 'key' is an
 // empty sting, a new client is always created and it is not actually shared.  The returned 'closer'
 // must be called once the client is no longer needed. Conversely, the returned 'client' must not be
@@ -77,7 +86,8 @@ func (s *SharedClients) GetSharedClient(key string, conf *dns.Client, serverAddr
 	if key == "" {
 		// Simplified case when the client is actually not shared
 		client = newSharedClient(conf, serverAddrStr)
-		return client, client.close
+		client.respPool = &s.respPool
+		return client, client.closer
 	}
 	for {
 		// lock for s.clients access
@@ -86,6 +96,31 @@ func (s *SharedClients) GetSharedClient(key string, conf *dns.Client, serverAddr
 		client = s.clients[key]
 		if client == nil {
 			client = newSharedClient(conf, serverAddrStr)
+			client.respPool = &s.respPool
+			c := client
+			k := key
+			if conf.Net == "tcp" {
+				client.closer = nopCloser
+			} else {
+				client.closer = func() {
+					c.Lock()
+					defer c.Unlock()
+					c.refcount--
+					if c.refcount == 0 {
+						// connection close must be completed while holding the client's lock to
+						// avoid a race where a new client dials using the same 5-tuple and gets a
+						// bind error.
+						// The client remains findable so that new users with the same key may wait
+						// for this closing to be done with.
+						c.close()
+						// Make client unreachable
+						// Must take s.lock for this.
+						s.lock.Lock()
+						delete(s.clients, k)
+						s.lock.Unlock()
+					}
+				}
+			}
 			s.clients[key] = client
 			s.lock.Unlock()
 			// new client, we are done
@@ -106,29 +141,7 @@ func (s *SharedClients) GetSharedClient(key string, conf *dns.Client, serverAddr
 		client = nil
 	}
 
-	// TCP clients are cleaned up on downstream connection close.
-	if conf.Net == "tcp" {
-		return client, func() {}
-	}
-
-	return client, func() {
-		client.Lock()
-		defer client.Unlock()
-		client.refcount--
-		if client.refcount == 0 {
-			// connection close must be completed while holding the client's lock to
-			// avoid a race where a new client dials using the same 5-tuple and gets a
-			// bind error.
-			// The client remains findable so that new users with the same key may wait
-			// for this closing to be done with.
-			client.close()
-			// Make client unreachable
-			// Must take s.lock for this.
-			s.lock.Lock()
-			delete(s.clients, key)
-			s.lock.Unlock()
-		}
-	}
+	return client, client.closer
 }
 
 type request struct {
@@ -156,17 +169,43 @@ type SharedClient struct {
 	// size of receive buffers to allocate, must only grow
 	udpSize atomic.Uint32
 
+	respPool *sync.Pool
+	closer   func()
+
 	lock.Mutex // protects the fields below
 	refcount   int
 	conn       *dns.Conn
+	done       chan struct{}
 }
 
 func newSharedClient(conf *dns.Client, serverAddr string) *SharedClient {
-	return &SharedClient{
+	c := &SharedClient{
 		refcount:   1,
 		serverAddr: serverAddr,
 		Client:     conf,
 		requests:   make(chan request),
+		respPool: &sync.Pool{
+			New: func() any {
+				return make(chan sharedClientResponse, 1)
+			},
+		},
+	}
+	c.closer = c.close
+	return c
+}
+
+func (c *SharedClient) getRespCh() chan sharedClientResponse {
+	if c.respPool != nil {
+		if v := c.respPool.Get(); v != nil {
+			return v.(chan sharedClientResponse)
+		}
+	}
+	return make(chan sharedClientResponse, 1)
+}
+
+func (c *SharedClient) putRespCh(ch chan sharedClientResponse) {
+	if c.respPool != nil && len(ch) == 0 {
+		c.respPool.Put(ch)
 	}
 }
 
@@ -178,8 +217,11 @@ func (c *SharedClient) ExchangeShared(m *dns.Msg) (r *dns.Msg, rtt time.Duration
 }
 
 // handler is started when the connection is dialed
-func handler(wg *sync.WaitGroup, client *dns.Client, conn *dns.Conn, requests chan request, size *atomic.Uint32) {
+func handler(wg *sync.WaitGroup, client *dns.Client, conn *dns.Conn, requests chan request, size *atomic.Uint32, done ...chan struct{}) {
 	defer wg.Done()
+	if len(done) > 0 && done[0] != nil {
+		defer close(done[0])
+	}
 
 	responses := make(chan sharedClientResponse)
 
@@ -257,7 +299,6 @@ func handler(wg *sync.WaitGroup, client *dns.Client, conn *dns.Conn, requests ch
 
 		for _, waiter := range waitingResponses {
 			waiter.ch <- sharedClientResponse{nil, 0, net.ErrClosed}
-			close(waiter.ch)
 		}
 	}()
 
@@ -275,7 +316,7 @@ func handler(wg *sync.WaitGroup, client *dns.Client, conn *dns.Conn, requests ch
 			// Check if we already have a request with the same id
 			// Due to birthday paradox and the fact that ID is uint16
 			// it's likely to happen with small number (~200) of concurrent requests
-			// which would result in goroutine leak as we would never close req.ch
+			// which would result in goroutine leak as we would never respond to req.ch
 			if _, duplicate := waitingResponses[req.msg.Id]; duplicate {
 				for range 5 {
 					// Try a new ID
@@ -287,7 +328,6 @@ func handler(wg *sync.WaitGroup, client *dns.Client, conn *dns.Conn, requests ch
 				}
 				if duplicate {
 					req.ch <- sharedClientResponse{nil, 0, fmt.Errorf("duplicate request id %d", req.msg.Id)}
-					close(req.ch)
 					continue
 				}
 			}
@@ -295,7 +335,6 @@ func handler(wg *sync.WaitGroup, client *dns.Client, conn *dns.Conn, requests ch
 			err := client.SendContext(req.ctx, req.msg, conn, start)
 			if err != nil {
 				req.ch <- sharedClientResponse{nil, 0, err}
-				close(req.ch)
 			} else {
 				waitingResponses[req.msg.Id] = waiter{req.ch, start}
 
@@ -327,7 +366,6 @@ func handler(wg *sync.WaitGroup, client *dns.Client, conn *dns.Conn, requests ch
 				// so complete all pending requests.
 				for _, waiter := range waitingResponses {
 					waiter.ch <- sharedClientResponse{nil, 0, resp.err}
-					close(waiter.ch)
 				}
 				waitingResponses = make(map[uint16]waiter)
 			} else if resp.msg != nil {
@@ -335,7 +373,6 @@ func handler(wg *sync.WaitGroup, client *dns.Client, conn *dns.Conn, requests ch
 					delete(waitingResponses, resp.msg.Id)
 					resp.rtt = time.Since(waiter.start)
 					waiter.ch <- resp
-					close(waiter.ch)
 				}
 			}
 		}
@@ -350,34 +387,36 @@ func (c *SharedClient) ExchangeSharedContext(ctx context.Context, m *dns.Msg) (r
 			c.Unlock()
 			return nil, 0, fmt.Errorf("failed to dial connection to %v: %w", c.serverAddr, err)
 		}
+		c.done = make(chan struct{})
 		// Start handler for sending and receiving.
 		c.wg.Add(1)
-		go handler(&c.wg, c.Client, c.conn, c.requests, &c.udpSize)
+		go handler(&c.wg, c.Client, c.conn, c.requests, &c.udpSize, c.done)
 	}
+	done := c.done
 	c.Unlock()
 
-	// This request keeps 'c.requests' open; sending a request may hang indefinitely if
-	// the handler happens to quit at the same time. Use ctx.Done to avoid this.
-	timeout := getTimeoutForRequest(c.Client)
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
 	// The handler loop writes our response or an error to this channel. If we fall into the timeout
 	// below, the handling loop would block indefinitely on writing if this channel is not buffered.
-	respCh := make(chan sharedClientResponse, 1)
+	respCh := c.getRespCh()
 	select {
 	case c.requests <- request{ctx: ctx, msg: m, ch: respCh}:
 	case <-ctx.Done():
+		c.putRespCh(respCh)
 		return nil, 0, ctx.Err()
+	case <-done:
+		c.putRespCh(respCh)
+		return nil, 0, net.ErrClosed
 	}
 
-	// Since c.requests is unbuffered, the handler is guaranteed to eventually close 'respCh'
+	// Since c.requests is unbuffered, the handler is guaranteed to eventually respond to 'respCh'
 	select {
 	case resp := <-respCh:
+		c.putRespCh(respCh)
 		return resp.msg, resp.rtt, resp.err
-	// This is a fail-safe mechanism which prevents leaking this goroutine if the handling loop
-	// fails to write a response on our channel.
-	case <-time.After(time.Minute):
-		return nil, 0, fmt.Errorf("timeout waiting for response")
+	case <-ctx.Done():
+		return nil, 0, ctx.Err()
+	case <-done:
+		return nil, 0, net.ErrClosed
 	}
 }
 
@@ -387,28 +426,4 @@ func (c *SharedClient) close() {
 	close(c.requests)
 	c.wg.Wait()
 	c.conn = nil
-}
-
-// Return the appropriate timeout for a specific request
-func getTimeoutForRequest(c *dns.Client) time.Duration {
-	wtimeout := c.WriteTimeout
-	if wtimeout == 0 {
-		// Some default timeout as seen in miekg/dns.
-		wtimeout = time.Second * 2
-	}
-
-	var requestTimeout time.Duration
-	if c.Timeout != 0 {
-		requestTimeout = c.Timeout
-	} else {
-		requestTimeout = wtimeout
-	}
-	// net.Dialer.Timeout has priority if smaller than the timeouts computed so
-	// far
-	if c.Dialer != nil && c.Dialer.Timeout != 0 {
-		if c.Dialer.Timeout < requestTimeout {
-			requestTimeout = c.Dialer.Timeout
-		}
-	}
-	return requestTimeout
 }
