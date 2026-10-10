@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -16,7 +17,6 @@ import (
 	"github.com/cilium/hive/cell"
 	apiext_clientset "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	k8sErrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilnet "k8s.io/apimachinery/pkg/util/net"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/discovery"
@@ -449,7 +449,12 @@ func runHeartbeat(logger *slog.Logger, heartBeat func(context.Context) error, ti
 
 // isConnReady returns the err for the kube-system namespace get
 func isConnReady(c kubernetes.Interface) error {
-	_, err := c.CoreV1().Namespaces().Get(context.TODO(), "kube-system", metav1.GetOptions{})
+	resp, err := c.CoreV1().RESTClient().Get().Resource("namespaces").Name("kube-system").Stream(context.TODO())
+	if err != nil {
+		return err
+	}
+	defer resp.Close()
+	_, err = io.Copy(io.Discard, resp)
 	return err
 }
 
