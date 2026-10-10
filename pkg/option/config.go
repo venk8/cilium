@@ -5,6 +5,7 @@ package option
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -18,6 +19,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode"
 	"unicode/utf8"
 
@@ -2139,16 +2141,21 @@ func (c *DaemonConfig) validateIPv6NAT46x64CIDR() error {
 	return nil
 }
 
+var (
+	containerIPLocalReservedPortsRegex      = regexp.MustCompile(`^(\d+(-\d+)?)(,\d+(-\d+)?)*$`)
+	errInvalidContainerIPLocalReservedPorts = fmt.Errorf("Invalid comma separated list of ranges for %s option", ContainerIPLocalReservedPorts)
+)
+
 func (c *DaemonConfig) validateContainerIPLocalReservedPorts() error {
 	if c.ContainerIPLocalReservedPorts == "" || c.ContainerIPLocalReservedPorts == defaults.ContainerIPLocalReservedPortsAuto {
 		return nil
 	}
 
-	if regexp.MustCompile(`^(\d+(-\d+)?)(,\d+(-\d+)?)*$`).MatchString(c.ContainerIPLocalReservedPorts) {
+	if containerIPLocalReservedPortsRegex.MatchString(c.ContainerIPLocalReservedPorts) {
 		return nil
 	}
 
-	return fmt.Errorf("Invalid comma separated list of ranges for %s option", ContainerIPLocalReservedPorts)
+	return errInvalidContainerIPLocalReservedPorts
 }
 
 // Validate validates the daemon configuration
@@ -3082,14 +3089,22 @@ func (c *DaemonConfig) getDynamicSizeCalculator(logger *slog.Logger, dynamicSize
 	//   16GB  1060485  530242  1060485
 
 	memoryAvailableForMaps := int(float64(totalMemory) * dynamicSizeRatio)
-	logger.Info(fmt.Sprintf("Memory available for map entries (%.3f%% of %dB): %dB", dynamicSizeRatio*100, totalMemory, memoryAvailableForMaps))
 	totalMapMemoryDefault := CTMapEntriesGlobalTCPDefault*c.SizeofCTElement +
 		CTMapEntriesGlobalAnyDefault*c.SizeofCTElement +
 		NATMapEntriesGlobalDefault*c.SizeofNATElement +
 		// Neigh table has the same number of entries as NAT Map has.
 		NATMapEntriesGlobalDefault*c.SizeofNeighElement +
 		SockRevNATMapEntriesDefault*c.SizeofSockRevElement
-	logger.Debug(fmt.Sprintf("Total memory for default map entdries: %d", totalMapMemoryDefault))
+	if logger.Enabled(context.Background(), slog.LevelDebug) {
+		logger.Debug("Memory available for map entries",
+			logfields.Ratio, dynamicSizeRatio,
+			"totalMemory", totalMemory,
+			"memoryAvailableForMaps", memoryAvailableForMaps,
+		)
+		logger.Debug("Total memory for default map entries",
+			logfields.Value, totalMapMemoryDefault,
+		)
+	}
 
 	// In case of distributed LRU, we need to round up to the number of possible CPUs
 	// since this is also what the kernel does internally, see htab_map_alloc()'s:
@@ -3123,42 +3138,55 @@ func (c *DaemonConfig) calculateDynamicBPFMapSizes(logger *slog.Logger, vp *vipe
 	if !vp.IsSet(CTMapEntriesGlobalTCPName) {
 		c.CTMapEntriesGlobalTCP =
 			getEntries(CTMapEntriesGlobalTCPDefault, LimitTableAutoGlobalTCPMin, LimitTableMax)
-		logger.Info(fmt.Sprintf("option %s set by dynamic sizing to %v",
-			CTMapEntriesGlobalTCPName, c.CTMapEntriesGlobalTCP))
-	} else {
-		logger.Debug(fmt.Sprintf("option %s set by user to %v", CTMapEntriesGlobalTCPName, c.CTMapEntriesGlobalTCP))
+	} else if logger.Enabled(context.Background(), slog.LevelDebug) {
+		logger.Debug("Option set by user",
+			logfields.Option, CTMapEntriesGlobalTCPName,
+			logfields.Value, c.CTMapEntriesGlobalTCP,
+		)
 	}
 	if !vp.IsSet(CTMapEntriesGlobalAnyName) {
 		c.CTMapEntriesGlobalAny = getEntries(CTMapEntriesGlobalAnyDefault, LimitTableAutoGlobalAnyMin, LimitTableMax)
-		logger.Info(fmt.Sprintf("option %s set by dynamic sizing to %v",
-			CTMapEntriesGlobalAnyName, c.CTMapEntriesGlobalAny))
-	} else {
-		logger.Debug(fmt.Sprintf("option %s set by user to %v", CTMapEntriesGlobalAnyName, c.CTMapEntriesGlobalAny))
+	} else if logger.Enabled(context.Background(), slog.LevelDebug) {
+		logger.Debug("Option set by user",
+			logfields.Option, CTMapEntriesGlobalAnyName,
+			logfields.Value, c.CTMapEntriesGlobalAny,
+		)
 	}
 	if !vp.IsSet(NATMapEntriesGlobalName) {
 		c.NATMapEntriesGlobal = getEntries(NATMapEntriesGlobalDefault, LimitTableAutoNatGlobalMin, LimitTableMax)
-		logger.Info(fmt.Sprintf("option %s set by dynamic sizing to %v",
-			NATMapEntriesGlobalName, c.NATMapEntriesGlobal))
 		if c.NATMapEntriesGlobal > c.CTMapEntriesGlobalTCP+c.CTMapEntriesGlobalAny {
 			// CT table size was specified manually, make sure that the NAT table size
 			// does not exceed maximum CT table size. See
 			// (*DaemonConfig).checkMapSizeLimits.
 			c.NATMapEntriesGlobal = (c.CTMapEntriesGlobalTCP + c.CTMapEntriesGlobalAny) * 2 / 3
-			logger.Warn(fmt.Sprintf("option %s would exceed maximum determined by CT table sizes, capping to %v",
-				NATMapEntriesGlobalName, c.NATMapEntriesGlobal))
+			logger.Warn("Option would exceed maximum determined by CT table sizes, capping",
+				logfields.Option, NATMapEntriesGlobalName,
+				logfields.Value, c.NATMapEntriesGlobal,
+			)
 		}
-	} else {
-		logger.Debug(fmt.Sprintf("option %s set by user to %v", NATMapEntriesGlobalName, c.NATMapEntriesGlobal))
+	} else if logger.Enabled(context.Background(), slog.LevelDebug) {
+		logger.Debug("Option set by user",
+			logfields.Option, NATMapEntriesGlobalName,
+			logfields.Value, c.NATMapEntriesGlobal,
+		)
 	}
 	if !vp.IsSet(NeighMapEntriesGlobalName) {
 		// By default we auto-size it to the same value as the NAT map since we
 		// need to keep at least as many neigh entries.
 		c.NeighMapEntriesGlobal = c.NATMapEntriesGlobal
-		logger.Info(fmt.Sprintf("option %s set by dynamic sizing to %v",
-			NeighMapEntriesGlobalName, c.NeighMapEntriesGlobal))
-	} else {
-		logger.Debug(fmt.Sprintf("option %s set by user to %v", NeighMapEntriesGlobalName, c.NeighMapEntriesGlobal))
+	} else if logger.Enabled(context.Background(), slog.LevelDebug) {
+		logger.Debug("Option set by user",
+			logfields.Option, NeighMapEntriesGlobalName,
+			logfields.Value, c.NeighMapEntriesGlobal,
+		)
 	}
+
+	logger.Info("Dynamic BPF map sizes calculated",
+		CTMapEntriesGlobalTCPName, c.CTMapEntriesGlobalTCP,
+		CTMapEntriesGlobalAnyName, c.CTMapEntriesGlobalAny,
+		NATMapEntriesGlobalName, c.NATMapEntriesGlobal,
+		NeighMapEntriesGlobalName, c.NeighMapEntriesGlobal,
+	)
 }
 
 func (c *DaemonConfig) normalizeLRUBackedMapSizes(logger *slog.Logger) {
@@ -3255,16 +3283,31 @@ func (c *DaemonConfig) StoreInFile(logger *slog.Logger, dir string) error {
 	return err
 }
 
+var daemonConfigPool = sync.Pool{
+	New: func() any {
+		return new(DaemonConfig)
+	},
+}
+
 func (c *DaemonConfig) checksum() [32]byte {
-	// take a shallow copy for summing
-	sumConfig := *c
+	sumConfig := daemonConfigPool.Get().(*DaemonConfig)
+	*sumConfig = *c
 	// Ignore variable parts
 	sumConfig.Opts = nil
-	cBytes, err := json.Marshal(&sumConfig)
+
+	h := sha256.New()
+	err := json.NewEncoder(h).Encode(sumConfig)
+
+	*sumConfig = DaemonConfig{}
+	daemonConfigPool.Put(sumConfig)
+
 	if err != nil {
 		return [32]byte{}
 	}
-	return sha256.Sum256(cBytes)
+
+	var sum [32]byte
+	h.Sum(sum[:0])
+	return sum
 }
 
 // ValidateUnchanged checks that invariable parts of the config have not changed since init.
@@ -3278,26 +3321,19 @@ func (c *DaemonConfig) ValidateUnchanged() error {
 }
 
 func (c *DaemonConfig) diffFromFile() error {
-	f, err := os.Open(backupFileNames[0])
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	fi, err := f.Stat()
+	fileBytes, err := os.ReadFile(backupFileNames[0])
 	if err != nil {
 		return err
 	}
 
-	fileBytes := make([]byte, fi.Size())
-	count, err := f.Read(fileBytes)
-	if err != nil {
-		return err
-	}
-	fileBytes = fileBytes[:count]
+	config := daemonConfigPool.Get().(*DaemonConfig)
+	*config = DaemonConfig{}
+	defer func() {
+		*config = DaemonConfig{}
+		daemonConfigPool.Put(config)
+	}()
 
-	var config DaemonConfig
-	err = json.Unmarshal(fileBytes, &config)
+	err = json.Unmarshal(fileBytes, config)
 
 	var diff string
 	if err != nil {
@@ -3314,7 +3350,7 @@ func (c *DaemonConfig) diffFromFile() error {
 			return !unicode.IsUpper(r)
 		}, cmp.Ignore())
 
-		diff = cmp.Diff(&config, c, opts,
+		diff = cmp.Diff(config, c, opts,
 			cmpopts.IgnoreTypes(&IntOptions{}),
 			cmpopts.IgnoreTypes(&OptionLibrary{}))
 	}
