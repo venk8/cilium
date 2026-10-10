@@ -770,37 +770,60 @@ func (w *Writer) SetBackendsOfCluster(txn WriteTxn, name loadbalancer.ServiceNam
 	return w.RefreshFrontends(txn, name)
 }
 
-func (w *Writer) updateBackends(txn WriteTxn, serviceName loadbalancer.ServiceName, source source.Source, clusterID uint32, bes iter.Seq[loadbalancer.Backend]) (bool, error) {
-	changed := false
-	srcPrio := w.sourcePriority(source)
-	for be := range bes {
-		be.Source = source
-		be.ClusterID = clusterID
-		be.SetSourcePriority(srcPrio)
-		be.ServiceName = serviceName
+type backendUpdateContext struct {
+	w           *Writer
+	txn         WriteTxn
+	serviceName loadbalancer.ServiceName
+	source      source.Source
+	clusterID   uint32
+	srcPrio     uint8
+	err         error
+}
 
-		key := loadbalancer.BackendKey{
-			ServiceName:    serviceName,
-			Address:        be.Address,
-			SourcePriority: srcPrio,
-		}
+func (ctx *backendUpdateContext) yield(be loadbalancer.Backend) bool {
+	be.Source = ctx.source
+	be.ClusterID = ctx.clusterID
+	be.SetSourcePriority(ctx.srcPrio)
+	be.ServiceName = ctx.serviceName
 
-		if old, _, ok := w.bes.Get(txn, loadbalancer.BackendByKey(key)); ok {
-			// Preserve health information.
-			be.Unhealthy = old.Unhealthy
-			be.UnhealthyUpdatedAt = old.UnhealthyUpdatedAt
-			if old.DeepEqual(&be) {
-				// None of the parameters have changed. Skip the update.
-				continue
-			}
-		}
+	key := loadbalancer.BackendKey{
+		ServiceName:    ctx.serviceName,
+		Address:        be.Address,
+		SourcePriority: ctx.srcPrio,
+	}
 
-		changed = true
-		if _, _, err := w.bes.Insert(txn, &be); err != nil {
-			return false, err
+	if old, _, ok := ctx.w.bes.Get(ctx.txn.WriteTxn, loadbalancer.BackendByKey(key)); ok {
+		// Preserve health information.
+		be.Unhealthy = old.Unhealthy
+		be.UnhealthyUpdatedAt = old.UnhealthyUpdatedAt
+		if old.DeepEqual(&be) {
+			// None of the parameters have changed. Skip the update.
+			return true
 		}
 	}
-	return changed, nil
+
+	beToInsert := be
+	if _, _, ctx.err = ctx.w.bes.Insert(ctx.txn.WriteTxn, &beToInsert); ctx.err != nil {
+		return false
+	}
+	return true
+}
+
+func (w *Writer) updateBackends(txn WriteTxn, serviceName loadbalancer.ServiceName, source source.Source, clusterID uint32, bes iter.Seq[loadbalancer.Backend]) (bool, error) {
+	revBefore := w.bes.Revision(txn.WriteTxn)
+	ctx := &backendUpdateContext{
+		w:           w,
+		txn:         txn,
+		serviceName: serviceName,
+		source:      source,
+		clusterID:   clusterID,
+		srcPrio:     w.sourcePriority(source),
+	}
+	bes(ctx.yield)
+	if ctx.err != nil {
+		return false, ctx.err
+	}
+	return w.bes.Revision(txn.WriteTxn) != revBefore, nil
 }
 
 func (w *Writer) DeleteBackendsOfService(txn WriteTxn, name loadbalancer.ServiceName, src source.Source) error {
