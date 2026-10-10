@@ -79,13 +79,14 @@ func (m *manager) NewInitializer() Initializer {
 // It creates the ipset if it doesn't already exist and doesn't error out
 // if either the ipset or the IP already exist.
 func (m *manager) AddToIPSet(name string, family Family, addrs ...netip.Addr) {
-	if !m.enabled {
+	if !m.enabled || len(addrs) == 0 {
 		return
 	}
 
 	txn := m.db.WriteTxn(m.table)
 	defer txn.Abort()
 
+	inserted := false
 	for _, addr := range addrs {
 		key := tables.IPSetEntryKey{
 			Name: name,
@@ -100,20 +101,24 @@ func (m *manager) AddToIPSet(name string, family Family, addrs ...netip.Addr) {
 			Addr:   addr,
 			Status: reconciler.StatusPending(),
 		})
+		inserted = true
 	}
 
-	txn.Commit()
+	if inserted {
+		txn.Commit()
+	}
 }
 
 // RemoveFromIPSet removes the addresses from the specified ipset.
 func (m *manager) RemoveFromIPSet(name string, addrs ...netip.Addr) {
-	if !m.enabled {
+	if !m.enabled || len(addrs) == 0 {
 		return
 	}
 
 	txn := m.db.WriteTxn(m.table)
 	defer txn.Abort()
 
+	deleted := false
 	for _, addr := range addrs {
 		key := tables.IPSetEntryKey{
 			Name: name,
@@ -124,9 +129,12 @@ func (m *manager) RemoveFromIPSet(name string, addrs ...netip.Addr) {
 			continue
 		}
 		m.table.Delete(txn, obj)
+		deleted = true
 	}
 
-	txn.Commit()
+	if deleted {
+		txn.Commit()
+	}
 }
 
 func newIPSetManager(
@@ -253,23 +261,45 @@ func (i *ipset) list(ctx context.Context, name string) (AddrSet, error) {
 	return addrs, nil
 }
 
-func (i *ipset) addBatch(ctx context.Context, batch map[string][]netip.Addr) error {
+func writeRestoreLine(b *strings.Builder, op string, name string, addr netip.Addr) {
+	var ipBuf [64]byte
+	b.WriteString(op)
+	b.WriteByte(' ')
+	b.WriteString(name)
+	b.WriteByte(' ')
+	b.Write(addr.AppendTo(ipBuf[:0]))
+	b.WriteString(" -exist\n")
+}
+
+func (i *ipset) restoreBatch(ctx context.Context, op string, batch []reconciler.BatchEntry[*tables.IPSetEntry]) error {
+	if len(batch) == 0 {
+		return nil
+	}
 	b := strings.Builder{}
-	for name, addrs := range batch {
-		for _, addr := range addrs {
-			fmt.Fprintf(&b, "add %s %s -exist\n", name, addr)
-		}
+	b.Grow(len(batch) * (len(op) + len(batch[0].Object.Name) + 26))
+	for _, entry := range batch {
+		writeRestoreLine(&b, op, entry.Object.Name, entry.Object.Addr)
 	}
 	_, err := i.exec(ctx, "ipset", b.String(), "restore")
 	return err
 }
 
-func (i *ipset) delBatch(ctx context.Context, batch map[string][]netip.Addr) error {
+func (i *ipset) restoreEntry(ctx context.Context, op string, name string, addr netip.Addr) error {
 	b := strings.Builder{}
-	for name, addrs := range batch {
-		for _, addr := range addrs {
-			fmt.Fprintf(&b, "del %s %s -exist\n", name, addr)
-		}
+	b.Grow(len(op) + len(name) + 26)
+	writeRestoreLine(&b, op, name, addr)
+	_, err := i.exec(ctx, "ipset", b.String(), "restore")
+	return err
+}
+
+func (i *ipset) restoreSet(ctx context.Context, op string, name string, addrs sets.Set[netip.Addr]) error {
+	if addrs.Len() == 0 {
+		return nil
+	}
+	b := strings.Builder{}
+	b.Grow(addrs.Len() * (len(op) + len(name) + 26))
+	for addr := range addrs {
+		writeRestoreLine(&b, op, name, addr)
 	}
 	_, err := i.exec(ctx, "ipset", b.String(), "restore")
 	return err
