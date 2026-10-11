@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 
 	"github.com/cilium/ebpf"
 
@@ -44,9 +45,11 @@ type MapRegistry struct {
 	patches map[string]*MapSpecPatch
 }
 
+var defaultMapSpecs = sync.OnceValues(maps.LoadMapSpecs)
+
 // new returns a new MapRegistry and populates it with compile-time MapSpecs.
 func new(log *slog.Logger) (*MapRegistry, error) {
-	specs, err := maps.LoadMapSpecs()
+	specs, err := defaultMapSpecs()
 	if err != nil {
 		return nil, err
 	}
@@ -111,8 +114,6 @@ func (r *MapRegistry) Modify(name string, modify func(*MapSpecPatch)) error {
 		r.l.Info("MapSpec modified",
 			logfields.BPFMapName, name,
 			logfields.Changes, diff)
-
-		mod.Apply(spec)
 	}
 
 	// Store the patch regardless of whether any changes were made so the loader
@@ -136,12 +137,16 @@ func (r *MapRegistry) Get(name string) (*ebpf.MapSpec, error) {
 		return nil, ErrNotStarted
 	}
 
-	spec, ok := r.specs[name]
+	base, ok := r.specs[name]
 	if !ok {
 		return nil, fmt.Errorf("%w: %s", ErrMapNotFound, name)
 	}
 
-	return spec.Copy(), nil
+	spec := base.Copy()
+	if patch, ok := r.patches[name]; ok {
+		patch.Apply(spec)
+	}
+	return spec, nil
 }
 
 // GetPatch returns a [MapSpecPatch] for the given map name if
