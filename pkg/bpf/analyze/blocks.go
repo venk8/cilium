@@ -674,16 +674,22 @@ func computeBlocks(insns asm.Instructions) (Blocks, error) {
 	}
 
 	// Step 5: Wire predecessors directly.
+	addPred := func(target, pred *Block) {
+		if len(target.predecessors) == 0 {
+			target.predecessors = blocks[pred.id : pred.id+1 : pred.id+1]
+			return
+		}
+		if !slices.Contains(target.predecessors, pred) {
+			target.predecessors = append(target.predecessors, pred)
+		}
+	}
+
 	for _, blk := range blocks {
 		if blk.branch != nil {
-			if !slices.Contains(blk.branch.predecessors, blk) {
-				blk.branch.predecessors = append(blk.branch.predecessors, blk)
-			}
+			addPred(blk.branch, blk)
 		}
 		if blk.fthrough != nil && blk.fthrough != blk.branch {
-			if !slices.Contains(blk.fthrough.predecessors, blk) {
-				blk.fthrough.predecessors = append(blk.fthrough.predecessors, blk)
-			}
+			addPred(blk.fthrough, blk)
 		}
 	}
 
