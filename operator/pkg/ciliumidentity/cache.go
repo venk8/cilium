@@ -4,6 +4,7 @@
 package ciliumidentity
 
 import (
+	"context"
 	"log/slog"
 	"strconv"
 
@@ -12,6 +13,8 @@ import (
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 )
+
+const maxFreeSecIDs = 64
 
 // SecIDs is used to handle duplicate CIDs. Operator itself will not generate
 // duplicate CIDs. This is required when migrating to Operator managing CIDs.
@@ -26,6 +29,8 @@ type CIDState struct {
 	idToLabels map[string]*key.GlobalIdentity
 	// Maps label string generated from GlobalIdentity.GetKey() to CID name.
 	labelsToID map[string]*SecIDs
+	idToKey    map[string]string
+	freeSecIDs []*SecIDs
 	mu         lock.RWMutex
 	logger     *slog.Logger
 }
@@ -34,6 +39,7 @@ func NewCIDState(logger *slog.Logger) *CIDState {
 	cidState := &CIDState{
 		idToLabels: make(map[string]*key.GlobalIdentity),
 		labelsToID: make(map[string]*SecIDs),
+		idToKey:    make(map[string]string),
 		logger:     logger,
 	}
 
@@ -52,16 +58,32 @@ func (c *CIDState) Upsert(id string, k *key.GlobalIdentity) {
 		return
 	}
 
-	c.logger.Debug("Upsert internal mapping", logfields.CIDName, id)
+	if c.logger != nil && c.logger.Enabled(context.Background(), slog.LevelDebug) {
+		c.logger.Debug("Upsert internal mapping", logfields.CIDName, id)
+	}
 	c.idToLabels[id] = k
 
 	keyStr := k.GetKey()
+	if c.idToKey == nil {
+		c.idToKey = make(map[string]string)
+	}
+	c.idToKey[id] = keyStr
+
 	secIDs, exists := c.labelsToID[keyStr]
 	if !exists {
-		c.labelsToID[keyStr] = &SecIDs{
-			selectedID: id,
-			ids:        map[string]struct{}{id: {}},
+		if n := len(c.freeSecIDs); n > 0 {
+			secIDs = c.freeSecIDs[n-1]
+			c.freeSecIDs[n-1] = nil // Avoid pinning reference in backing array
+			c.freeSecIDs = c.freeSecIDs[:n-1]
+			secIDs.selectedID = id
+			secIDs.ids[id] = struct{}{}
+		} else {
+			secIDs = &SecIDs{
+				selectedID: id,
+				ids:        map[string]struct{}{id: {}},
+			}
 		}
+		c.labelsToID[keyStr] = secIDs
 		return
 	}
 
@@ -81,16 +103,32 @@ func (c *CIDState) Remove(id string) {
 		return
 	}
 
-	c.logger.Debug("Remove internal mapping", logfields.CIDName, id)
+	if c.logger != nil && c.logger.Enabled(context.Background(), slog.LevelDebug) {
+		c.logger.Debug("Remove internal mapping", logfields.CIDName, id)
+	}
 
 	delete(c.idToLabels, id)
 
-	keyStr := k.GetKey()
+	var keyStr string
+	if c.idToKey != nil {
+		var found bool
+		keyStr, found = c.idToKey[id]
+		if found {
+			delete(c.idToKey, id)
+		}
+	}
+	if keyStr == "" {
+		keyStr = k.GetKey()
+	}
 	secIDs := c.labelsToID[keyStr]
 
 	delete(secIDs.ids, id)
 	if len(secIDs.ids) == 0 {
 		delete(c.labelsToID, keyStr)
+		if len(c.freeSecIDs) < maxFreeSecIDs {
+			secIDs.selectedID = ""
+			c.freeSecIDs = append(c.freeSecIDs, secIDs)
+		}
 		return
 	}
 
