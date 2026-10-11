@@ -76,9 +76,18 @@ func (eps *ClusterEndpointSlice) ToShallowSlimEndpointSlice() *slim_discovery_v1
 // selected 16MB limit provides ample margin for every legitimate EndpointSlice.
 const maxDecodeSize = 16 << 20
 
+const maxPooledBufferSize = 64 * 1024
+
 var (
 	zstdEncoderPool sync.Pool
 	zstdDecoderPool sync.Pool
+
+	protoBufPool = sync.Pool{
+		New: func() any {
+			b := make([]byte, 0, 512)
+			return &b
+		},
+	}
 )
 
 func getZstdEncoder() (*zstd.Encoder, error) {
@@ -86,7 +95,7 @@ func getZstdEncoder() (*zstd.Encoder, error) {
 		return encoder.(*zstd.Encoder), nil
 	}
 
-	return zstd.NewWriter(nil)
+	return zstd.NewWriter(nil, zstd.WithEncoderConcurrency(1))
 }
 
 func getZstdDecoder() (*zstd.Decoder, error) {
@@ -94,13 +103,27 @@ func getZstdDecoder() (*zstd.Decoder, error) {
 		return decoder.(*zstd.Decoder), nil
 	}
 
-	return zstd.NewReader(nil, zstd.WithDecoderMaxMemory(maxDecodeSize))
+	return zstd.NewReader(nil, zstd.WithDecoderMaxMemory(maxDecodeSize), zstd.WithDecoderConcurrency(1))
 }
 
 // Marshal returns the cluster EndpointSlice object as zstd-compressed protobuf
 func (eps *ClusterEndpointSlice) Marshal() ([]byte, error) {
-	data, err := (*internal.ClusterEndpointSlice)(eps).Marshal()
-	if err != nil {
+	size := (*internal.ClusterEndpointSlice)(eps).Size()
+	bufPtr := protoBufPool.Get().(*[]byte)
+	buf := *bufPtr
+	if cap(buf) < size {
+		buf = make([]byte, size)
+	} else {
+		buf = buf[:size]
+	}
+	defer func() {
+		if cap(buf) <= maxPooledBufferSize {
+			*bufPtr = buf
+			protoBufPool.Put(bufPtr)
+		}
+	}()
+
+	if _, err := (*internal.ClusterEndpointSlice)(eps).MarshalToSizedBuffer(buf); err != nil {
 		return nil, err
 	}
 
@@ -110,7 +133,8 @@ func (eps *ClusterEndpointSlice) Marshal() ([]byte, error) {
 	}
 	defer zstdEncoderPool.Put(encoder)
 
-	return encoder.EncodeAll(data, nil), nil
+	dst := make([]byte, 0, max(size+32, 64))
+	return encoder.EncodeAll(buf, dst), nil
 }
 
 // Unmarshal parses the zstd-compressed protobuf byte slice and updates
@@ -122,12 +146,20 @@ func (eps *ClusterEndpointSlice) Unmarshal(_ string, data []byte) error {
 	}
 	defer zstdDecoderPool.Put(decoder)
 
-	data, err = decoder.DecodeAll(data, nil)
+	bufPtr := protoBufPool.Get().(*[]byte)
+	defer func() {
+		if cap(*bufPtr) <= maxPooledBufferSize {
+			protoBufPool.Put(bufPtr)
+		}
+	}()
+
+	decompressed, err := decoder.DecodeAll(data, (*bufPtr)[:0])
 	if err != nil {
 		return err
 	}
+	*bufPtr = decompressed
 
-	if err := (*internal.ClusterEndpointSlice)(eps).Unmarshal(data); err != nil {
+	if err := (*internal.ClusterEndpointSlice)(eps).Unmarshal(decompressed); err != nil {
 		return err
 	}
 
