@@ -20,7 +20,6 @@ import (
 
 	"github.com/vishvananda/netlink"
 	resourceapi "k8s.io/api/resource/v1"
-	"k8s.io/utils/ptr"
 
 	"github.com/cilium/cilium/pkg/datapath/linux/safenetlink"
 	"github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
@@ -85,16 +84,18 @@ type PciDevice struct {
 	nl netlinkOps
 }
 
-func (p PciDevice) GetAttrs() map[resourceapi.QualifiedName]resourceapi.DeviceAttribute {
-	result := make(map[resourceapi.QualifiedName]resourceapi.DeviceAttribute)
-	result[types.DriverLabel] = resourceapi.DeviceAttribute{StringValue: ptr.To(p.Driver)}
-	result[types.DeviceIDLabel] = resourceapi.DeviceAttribute{StringValue: ptr.To(p.DeviceID)}
-	result[types.VendorLabel] = resourceapi.DeviceAttribute{StringValue: ptr.To(p.Vendor)}
-	result[types.PFNameLabel] = resourceapi.DeviceAttribute{StringValue: ptr.To(p.PFName)}
-	result[types.PCIBusIDLabel] = resourceapi.DeviceAttribute{StringValue: ptr.To(p.Addr)}
-	result[types.KernelIfNameLabel] = resourceapi.DeviceAttribute{StringValue: ptr.To(p.KernelIfName())}
-
-	return result
+func (p *PciDevice) GetAttrs() map[resourceapi.QualifiedName]resourceapi.DeviceAttribute {
+	if p == nil {
+		return nil
+	}
+	return map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
+		types.DriverLabel:       {StringValue: &p.Driver},
+		types.DeviceIDLabel:     {StringValue: &p.DeviceID},
+		types.VendorLabel:       {StringValue: &p.Vendor},
+		types.PFNameLabel:       {StringValue: &p.PFName},
+		types.PCIBusIDLabel:     {StringValue: &p.Addr},
+		types.KernelIfNameLabel: {StringValue: &p.KernelIfaceName},
+	}
 }
 
 // IfName returns a name for this sr-iov VF. Does not match kernel interface name since it is not
