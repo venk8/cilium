@@ -379,59 +379,65 @@ func (resMap *L4PolicyMap) mergeL4Filter(policyCtx PolicyContext, rule *rule) (i
 		return found, nil
 	}
 
-	var (
-		cnt int
-		err error
-	)
-
 	// L3-only rule.
 	if rule.L4.Len() == 0 && len(rule.L3) > 0 {
-		cnt, err = resMap.addFilter(policyCtx, &rule.PolicyEntry, nil, api.PortProtocol{Port: "0", Protocol: api.ProtoAny})
+		cnt, err := resMap.addFilter(policyCtx, &rule.PolicyEntry, nil, api.PortProtocol{Port: "0", Protocol: api.ProtoAny})
 		if err != nil {
 			return found, err
 		}
+		found += cnt
 	}
 
-	found += cnt
+	traceEnabled := false
+	if tc, ok := policyCtx.(interface{ TraceEnabled() bool }); ok {
+		traceEnabled = tc.TraceEnabled()
+	}
 
-	err = rule.L4.Iterate(func(ports api.Ports) error {
-		if !rule.IsDeny() {
-			policyCtx.PolicyTrace("      Allows port %v\n", ports.GetPortProtocols())
-		} else {
-			policyCtx.PolicyTrace("      Denies port %v\n", ports.GetPortProtocols())
-		}
+	for i := range rule.L4 {
+		ports := &rule.L4[i]
+		portProtocols := ports.GetPortProtocols()
+		if traceEnabled {
+			if !rule.IsDeny() {
+				policyCtx.PolicyTrace("      Allows port %v\n", portProtocols)
+			} else {
+				policyCtx.PolicyTrace("      Denies port %v\n", portProtocols)
+			}
 
-		pr := ports.GetPortRule()
-		if pr != nil {
-			if !pr.Rules.IsEmpty() {
-				for _, l7 := range pr.Rules.HTTP {
-					policyCtx.PolicyTrace("          %+v\n", l7)
+			pr := ports.GetPortRule()
+			if pr != nil {
+				if !pr.Rules.IsEmpty() {
+					for _, l7 := range pr.Rules.HTTP {
+						policyCtx.PolicyTrace("          %+v\n", l7)
+					}
 				}
 			}
 		}
 
-		for _, p := range ports.GetPortProtocols() {
-			protocols := []api.L4Proto{p.Protocol}
+		for _, p := range portProtocols {
 			if p.Protocol.IsAny() {
-				protocols = []api.L4Proto{
+				for _, protocol := range [...]api.L4Proto{
 					api.ProtoTCP,
 					api.ProtoUDP,
 					api.ProtoSCTP,
+				} {
+					p.Protocol = protocol
+					cnt, err := resMap.addFilter(policyCtx, &rule.PolicyEntry, ports, p)
+					if err != nil {
+						return found, err
+					}
+					found += cnt
 				}
-			}
-			for _, protocol := range protocols {
-				p.Protocol = protocol
+			} else {
 				cnt, err := resMap.addFilter(policyCtx, &rule.PolicyEntry, ports, p)
 				if err != nil {
-					return err
+					return found, err
 				}
 				found += cnt
 			}
 		}
-		return nil
-	})
+	}
 
-	return found, err
+	return found, nil
 }
 
 func (pms *L4PolicyMaps) ensureTier(tier types.Tier) {

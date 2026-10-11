@@ -418,9 +418,6 @@ func (p *Repository) computePolicyEnforcementAndRules(securityIdentity *identity
 		return false, false, false, false, nil, nil
 	}
 
-	rulesIngress = []*rule{}
-	rulesEgress = []*rule{}
-
 	var hasIngressPassVerdict, hasEgressPassVerdict bool
 
 	processKey := func(rKey ruleKey) {

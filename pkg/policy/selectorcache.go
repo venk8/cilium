@@ -543,7 +543,7 @@ func selectsAll(selectors ...Selector) bool {
 // Commit() must be called aftewards to make the selections of new selectors observable by readers.
 func (sc *SelectorCache) AddSelectorsTxn(user CachedSelectionUser, selectors ...Selector) (CachedSelectorSlice, bool) {
 	if selectsAll(selectors...) {
-		selectors = []Selector{types.WildcardSelector}
+		selectors = types.WildcardSelectors
 	}
 
 	sc.mutex.Lock()
@@ -557,7 +557,7 @@ func (sc *SelectorCache) AddSelectorsTxn(user CachedSelectionUser, selectors ...
 // Selections of new selectors are visible to readers right after this call.
 func (sc *SelectorCache) AddSelectors(user CachedSelectionUser, selectors ...Selector) (CachedSelectorSlice, bool) {
 	if selectsAll(selectors...) {
-		selectors = []Selector{types.WildcardSelector}
+		selectors = types.WildcardSelectors
 	}
 
 	sc.mutex.Lock()
@@ -567,29 +567,67 @@ func (sc *SelectorCache) AddSelectors(user CachedSelectionUser, selectors ...Sel
 	return sc.addSelectorsTxn(user, selectors...)
 }
 
+func (sc *SelectorCache) addSelectorUserLocked(user CachedSelectionUser, selector Selector) (*identitySelector, bool) {
+	key := selector.Key()
+	sel, exists := sc.selectors.Get(key)
+	if !exists {
+		operationStart := time.Now()
+		sel = sc.addSelectorLocked(key, selector)
+		selectorCacheOperationDuration.WithLabelValues(types.LabelValueSCOperationAddSelector, types.LabelValueSCOperation, types.LabelValueSCTypePeer).Observe(time.Since(operationStart).Seconds())
+	}
+	added := sel.addUser(user, sc.localIdentityNotifier)
+	return sel, added
+}
+
+func (sc *SelectorCache) addSelectorsForFilter(l4 *L4Filter, selectors types.Selectors, newPolicy *PerSelectorPolicy, origin ruleOrigin) {
+	if selectsAll(selectors...) {
+		selectors = types.WildcardSelectors
+	}
+	sc.mutex.Lock()
+	defer sc.mutex.Unlock()
+	for i, selector := range selectors {
+		cs, _ := sc.addSelectorUserLocked(l4, selector)
+		if cs.IsWildcard() {
+			l4.wildcard = cs
+		}
+		policy := newPolicy
+		if i > 0 && newPolicy != nil {
+			policy = newPolicy.Clone()
+		}
+		l4.PerSelectorPolicies[cs] = policy
+		l4.RuleOrigin[cs] = origin
+	}
+}
+
+func (sc *SelectorCache) mergeSelectorsForFilter(policyCtx PolicyContext, existingFilter *L4Filter, selectors types.Selectors, newPolicy *PerSelectorPolicy, origin ruleOrigin) error {
+	if selectsAll(selectors...) {
+		selectors = types.WildcardSelectors
+	}
+	sc.mutex.Lock()
+	defer sc.mutex.Unlock()
+	for i, selector := range selectors {
+		cs, _ := sc.addSelectorUserLocked(existingFilter, selector)
+		policy := newPolicy
+		if i > 0 && newPolicy != nil {
+			policy = newPolicy.Clone()
+		}
+		if err := existingFilter.mergeSelector(policyCtx, cs, policy, origin); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (sc *SelectorCache) addSelectorsTxn(user CachedSelectionUser, selectors ...Selector) (CachedSelectorSlice, bool) {
 	css := make(CachedSelectorSlice, len(selectors))
 
 	added := false
 	for i, selector := range selectors {
-		// Check if the selector has already been cached
-		operationStart := time.Now()
-		key := selector.Key()
-		sel, exists := sc.selectors.Get(key)
-		if !exists {
-			// add the selector to the selector cache
-			sel = sc.addSelectorLocked(key, selector)
-		}
-
-		if sel.addUser(user, sc.localIdentityNotifier) {
+		sel, userAdded := sc.addSelectorUserLocked(user, selector)
+		if userAdded {
 			added = true
 		}
 		css[i] = sel
-
-		if !exists {
-			selectorCacheOperationDuration.WithLabelValues(types.LabelValueSCOperationAddSelector, types.LabelValueSCOperation, types.LabelValueSCTypePeer).Observe(time.Since(operationStart).Seconds())
-		}
-
 	}
 	return css, added
 }
@@ -665,6 +703,15 @@ func (sc *SelectorCache) RemoveSelectors(selectors CachedSelectorSlice, user Cac
 	sc.mutex.Lock()
 	for _, selector := range selectors {
 		sc.removeSelectorLocked(selector, user)
+	}
+	sc.commit()
+	sc.mutex.Unlock()
+}
+
+func (sc *SelectorCache) removeSelectorsForPolicies(policies L7DataMap, user CachedSelectionUser) {
+	sc.mutex.Lock()
+	for cs := range policies {
+		sc.removeSelectorLocked(cs, user)
 	}
 	sc.commit()
 	sc.mutex.Unlock()

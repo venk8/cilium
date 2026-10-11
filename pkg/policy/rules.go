@@ -114,12 +114,17 @@ func (rules ruleSlice) computeTierPriorities() ([]types.Priority, []int, error) 
 }
 
 func (rules ruleSlice) resolveL4Policy(policyCtx PolicyContext) (L4DirectionPolicy, error) {
-	state := traceState{}
-	result := L4DirectionPolicy{
-		PortRules: L4PolicyMaps{makeL4PolicyMap()},
+	traceEnabled := false
+	if tc, ok := policyCtx.(interface{ TraceEnabled() bool }); ok {
+		traceEnabled = tc.TraceEnabled()
 	}
+	state := traceState{
+		traceEnabled: traceEnabled,
+	}
+	result := L4DirectionPolicy{}
 
 	if len(rules) == 0 {
+		result.PortRules = L4PolicyMaps{makeL4PolicyMap()}
 		result.tierBasePriority = make([]types.Priority, 1)
 		state.trace(len(rules), policyCtx)
 		return result, nil
@@ -222,6 +227,8 @@ func (rules ruleSlice) AllIdentitySelections() set.Set[identity.NumericIdentity]
 // traceState is an internal structure used to collect information
 // while determining policy decision
 type traceState struct {
+	traceEnabled bool
+
 	// selectedRules is the number of rules with matching EndpointSelector
 	selectedRules int
 
@@ -236,6 +243,9 @@ type traceState struct {
 }
 
 func (state *traceState) trace(rules int, policyCtx PolicyContext) {
+	if !state.traceEnabled {
+		return
+	}
 	policyCtx.PolicyTrace("%d/%d rules selected\n", state.selectedRules, rules)
 	if state.matchedRules > 0 {
 		policyCtx.PolicyTrace("Found allow rule\n")
@@ -250,6 +260,8 @@ func (state *traceState) trace(rules int, policyCtx PolicyContext) {
 }
 
 func (state *traceState) selectRule(policyCtx PolicyContext, r *rule) {
-	policyCtx.PolicyTrace("* Rule %s: selected\n", r)
+	if state.traceEnabled {
+		policyCtx.PolicyTrace("* Rule %s: selected\n", r)
+	}
 	state.selectedRules++
 }

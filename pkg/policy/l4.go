@@ -1170,18 +1170,7 @@ func createL4Filter(policyCtx PolicyContext, entry *types.PolicyEntry, portRule 
 		peerEndpoints = types.WildcardSelectors
 	}
 
-	css, _ := selectorCache.AddSelectorsTxn(l4, peerEndpoints...)
-	for i, cs := range css {
-		if cs.IsWildcard() {
-			l4.wildcard = cs
-		}
-		policy := newPolicy
-		if i > 0 && newPolicy != nil {
-			policy = newPolicy.Clone()
-		}
-		l4.PerSelectorPolicies[cs] = policy
-		l4.RuleOrigin[cs] = origin
-	}
+	selectorCache.addSelectorsForFilter(l4, peerEndpoints, newPolicy, origin)
 
 	return l4, nil
 }
@@ -1204,25 +1193,11 @@ func (existingFilter *L4Filter) mergePolicyEntry(policyCtx PolicyContext, entry 
 		peerEndpoints = types.WildcardSelectors
 	}
 
-	css, _ := policyCtx.GetSelectorCache().AddSelectorsTxn(existingFilter, peerEndpoints...)
-	for i, cs := range css {
-		policy := newPolicy
-		if i > 0 && newPolicy != nil {
-			policy = newPolicy.Clone()
-		}
-		if err := existingFilter.mergeSelector(policyCtx, cs, policy, origin); err != nil {
-			return err
-		}
-	}
-	return nil
+	return policyCtx.GetSelectorCache().mergeSelectorsForFilter(policyCtx, existingFilter, peerEndpoints, newPolicy, origin)
 }
 
 func (l4 *L4Filter) removeSelectors(selectorCache *SelectorCache) {
-	selectors := make(types.CachedSelectorSlice, 0, len(l4.PerSelectorPolicies))
-	for cs := range l4.PerSelectorPolicies {
-		selectors = append(selectors, cs)
-	}
-	selectorCache.RemoveSelectors(selectors, l4)
+	selectorCache.removeSelectorsForPolicies(l4.PerSelectorPolicies, l4)
 }
 
 // detach releases the references held in the L4Filter and must be called before
