@@ -8,8 +8,13 @@ import (
 	"fmt"
 	"log/slog"
 	"reflect"
+	"sync"
 
 	"cel.dev/cel-go/cel"
+	"cel.dev/cel-go/checker"
+	celast "cel.dev/cel-go/common/ast"
+	"cel.dev/cel-go/common/types"
+	"cel.dev/cel-go/common/types/ref"
 
 	flowpb "github.com/cilium/cilium/api/v1/flow"
 	v1 "github.com/cilium/cilium/pkg/hubble/api/v1"
@@ -89,6 +94,42 @@ func compile(env *cel.Env, expr string, celType *cel.Type) (*cel.Ast, error) {
 	return ast, nil
 }
 
+type celCostEstimator struct{}
+
+func (celCostEstimator) EstimateSize(element checker.AstNode) *checker.SizeEstimate {
+	return nil
+}
+
+func (celCostEstimator) EstimateCallCost(function, overloadID string, target *checker.AstNode, args []checker.AstNode) *checker.CallEstimate {
+	return nil
+}
+
+func astHasComprehension(a *cel.Ast) bool {
+	if a == nil || a.NativeRep() == nil {
+		return false
+	}
+	root := celast.NavigateAST(a.NativeRep())
+	return len(celast.MatchDescendants(root, celast.KindMatcher(celast.ComprehensionKind))) > 0
+}
+
+type celProgramWrapper struct {
+	cel.Program
+	hasComprehension bool
+}
+
+func (w *celProgramWrapper) ContextEval(ctx context.Context, input any) (ref.Val, *cel.EvalDetails, error) {
+	if ctx == nil {
+		return nil, nil, fmt.Errorf("context can not be nil")
+	}
+	if !w.hasComprehension {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+		return w.Program.Eval(input)
+	}
+	return w.Program.ContextEval(ctx, input)
+}
+
 func compileCELFilters(exprs []string) ([]cel.Program, error) {
 	var programs []cel.Program
 	for _, expr := range exprs {
@@ -99,19 +140,48 @@ func compileCELFilters(exprs []string) ([]cel.Program, error) {
 			return nil, fmt.Errorf("error compiling CEL expression: %w", err)
 		}
 
-		prg, err := celEnv.Program(
-			ast,
+		prgOpts := []cel.ProgramOption{
 			cel.EvalOptions(cel.OptOptimize),
-			cel.CostLimit(celProgramMaxRuntimeCost),
 			cel.InterruptCheckFrequency(celProgramInterruptCheckFrequency),
-		)
+		}
+
+		costEst, err := celEnv.EstimateCost(ast, celCostEstimator{})
+		if err != nil || costEst.Max > celProgramMaxRuntimeCost {
+			prgOpts = append(prgOpts, cel.CostLimit(celProgramMaxRuntimeCost))
+		}
+
+		prg, err := celEnv.Program(ast, prgOpts...)
 		if err != nil {
 			return nil, fmt.Errorf("error building CEL program: %w", err)
 		}
-		programs = append(programs, prg)
+		programs = append(programs, &celProgramWrapper{
+			Program:          prg,
+			hasComprehension: astHasComprehension(ast),
+		})
 	}
 
 	return programs, nil
+}
+
+var flowActivationPool = sync.Pool{
+	New: func() any {
+		return &flowActivation{}
+	},
+}
+
+type flowActivation struct {
+	flow *flowpb.Flow
+}
+
+func (a *flowActivation) ResolveName(name string) (any, bool) {
+	if name == flowVariableName {
+		return a.flow, true
+	}
+	return nil, false
+}
+
+func (a *flowActivation) Parent() cel.Activation {
+	return nil
 }
 
 func filterByCELExpression(ctx context.Context, log *slog.Logger, exprs []string) (FilterFunc, error) {
@@ -121,31 +191,29 @@ func filterByCELExpression(ctx context.Context, log *slog.Logger, exprs []string
 	}
 
 	return func(ev *v1.Event) bool {
+		act := flowActivationPool.Get().(*flowActivation)
+		act.flow = ev.GetFlow()
+		match := false
 		for _, prg := range programs {
-			out, _, err := prg.ContextEval(ctx, map[string]any{
-				flowVariableName: ev.GetFlow(),
-			})
+			out, _, err := prg.ContextEval(ctx, act)
 			if err != nil {
 				if celFilterLoggingLimiter.Allow() {
 					log.Error("Error running CEL program", logfields.Error, err)
 				} else {
 					log.Debug("Error running CEL program", logfields.Error, err)
 				}
-				return false
+				match = false
+				break
 			}
 
-			v, err := out.ConvertToNative(goBoolType)
-			if err != nil {
-				// This branch is unreachable as we already verified boolean result during compilation.
-				log.Error("Invalid conversion in CEL program", logfields.Error, err)
-				return false
-			}
-			b, ok := v.(bool)
-			if ok && b {
-				return true
+			if out == types.True {
+				match = true
+				break
 			}
 		}
-		return false
+		act.flow = nil
+		flowActivationPool.Put(act)
+		return match
 	}, nil
 }
 

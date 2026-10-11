@@ -448,7 +448,7 @@ func getMetricValue(name string, typ dto.MetricType, m *dto.Metric) (float64, st
 		return 0.0, x.String()
 
 	case dto.MetricType_HISTOGRAM:
-		b := convertHistogram(m.Histogram)
+		b := convertHistogram(nil, m.Histogram)
 		p50 := getHistogramQuantile(b, 0.50)
 		p90 := getHistogramQuantile(b, 0.90)
 		p99 := getHistogramQuantile(b, 0.99)
