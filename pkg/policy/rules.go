@@ -132,6 +132,7 @@ func (rules ruleSlice) resolveL4Policy(policyCtx PolicyContext) (L4DirectionPoli
 	}
 
 	result.tierBasePriority = tierBasePriorities
+	result.PortRules = make(L4PolicyMaps, len(tierBasePriorities))
 	lastTier := types.Tier(len(tierBasePriorities) - 1)
 
 	// add rules, computing the absolute priority for each rule,
