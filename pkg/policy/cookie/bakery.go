@@ -35,18 +35,14 @@ type Bakery[C constraints.Unsigned, V comparable] interface {
 type bakery[C constraints.Unsigned, V comparable] struct {
 	logger *slog.Logger
 
-	mu                 lock.RWMutex
-	cookieSet          *bitset
-	cookieToValue      []entry[V]
-	lastSeenGeneration uint64
+	mu            lock.RWMutex
+	cookieSet     *bitset
+	cookieToValue []V
+	inUseBits     [4]uint64
+	inUseExtra    []uint64
 }
 
 var _ Bakery[uint32, string] = (*bakery[uint32, string])(nil)
-
-type entry[T comparable] struct {
-	value T
-	since uint64
-}
 
 // maxOf returns the maximum value for unsigned type T.
 func maxOf[T constraints.Unsigned]() T {
@@ -57,11 +53,48 @@ func maxOf[T constraints.Unsigned]() T {
 // NewBakery creates a new Bakery. It manages cookies of type C for values of type V.
 func NewBakery[C constraints.Unsigned, V comparable](logger *slog.Logger) *bakery[C, V] {
 	return &bakery[C, V]{
-		logger:             logger,
-		cookieSet:          newBitset(int(maxOf[C]())),
-		cookieToValue:      nil,
-		lastSeenGeneration: 0,
+		logger:        logger,
+		cookieSet:     newBitset(int(maxOf[C]())),
+		cookieToValue: nil,
 	}
+}
+
+func (b *bakery[C, V]) markInUse(idx int) {
+	if idx < 0 {
+		return
+	}
+	word := idx / 64
+	mask := uint64(1) << (idx % 64)
+	if word < len(b.inUseBits) {
+		b.inUseBits[word] |= mask
+		return
+	}
+	extraIdx := word - len(b.inUseBits)
+	for len(b.inUseExtra) <= extraIdx {
+		b.inUseExtra = append(b.inUseExtra, 0)
+	}
+	b.inUseExtra[extraIdx] |= mask
+}
+
+func (b *bakery[C, V]) isInUse(idx int) bool {
+	if idx < 0 {
+		return false
+	}
+	word := idx / 64
+	mask := uint64(1) << (idx % 64)
+	if word < len(b.inUseBits) {
+		return (b.inUseBits[word] & mask) != 0
+	}
+	extraIdx := word - len(b.inUseBits)
+	if extraIdx < len(b.inUseExtra) {
+		return (b.inUseExtra[extraIdx] & mask) != 0
+	}
+	return false
+}
+
+func (b *bakery[C, V]) resetInUse() {
+	b.inUseBits = [4]uint64{}
+	clear(b.inUseExtra)
 }
 
 // Allocate returns a unique, cookie for the given value and whether a cookie could be allocated or
@@ -73,7 +106,7 @@ func (b *bakery[C, V]) Allocate(value V) (cookie C, ok bool) {
 	defer b.mu.Unlock()
 
 	for idx := range b.cookieToValue {
-		if b.cookieSet.IsSet(idx) && b.cookieToValue[idx].value == value {
+		if b.cookieSet.IsSet(idx) && b.cookieToValue[idx] == value {
 			return C(idx + 1), true
 		}
 	}
@@ -84,13 +117,15 @@ func (b *bakery[C, V]) Allocate(value V) (cookie C, ok bool) {
 	// Offset of 1 because a non-zero cookie is needed. Cookie value 0 means no cookie.
 	cookie = C(next + 1)
 	if next < len(b.cookieToValue) {
-		b.cookieToValue[next] = entry[V]{value: value, since: b.lastSeenGeneration}
+		b.cookieToValue[next] = value
 	} else {
+		var zero V
 		for len(b.cookieToValue) < next {
-			b.cookieToValue = append(b.cookieToValue, entry[V]{})
+			b.cookieToValue = append(b.cookieToValue, zero)
 		}
-		b.cookieToValue = append(b.cookieToValue, entry[V]{value: value, since: b.lastSeenGeneration})
+		b.cookieToValue = append(b.cookieToValue, value)
 	}
+	b.markInUse(next)
 	if b.logger != nil && b.logger.Enabled(context.Background(), slog.LevelDebug) {
 		b.logger.Debug("Allocated policy log cookie",
 			logfields.PolicyLogCookie, cookie,
@@ -113,7 +148,7 @@ func (b *bakery[C, V]) Get(cookie C) (value V, exists bool) {
 	if idx < 0 || idx >= len(b.cookieToValue) || !b.cookieSet.IsSet(idx) {
 		return value, false
 	}
-	return b.cookieToValue[idx].value, true
+	return b.cookieToValue[idx], true
 }
 
 // MarkInUse marks a cookie as in-use for the next sweep.
@@ -126,7 +161,7 @@ func (b *bakery[C, V]) MarkInUse(cookie C) {
 	}
 	idx := int(cookie - 1)
 	if idx >= 0 && idx < len(b.cookieToValue) && b.cookieSet.IsSet(idx) {
-		b.cookieToValue[idx].since = b.lastSeenGeneration
+		b.markInUse(idx)
 	}
 }
 
@@ -135,20 +170,20 @@ func (b *bakery[C, V]) Sweep() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
+	var zero V
 	for idx := range b.cookieToValue {
 		if b.cookieSet.IsSet(idx) {
-			e := &b.cookieToValue[idx]
-			if e.since < b.lastSeenGeneration {
+			if !b.isInUse(idx) {
 				cookie := C(idx + 1)
 				// Correct for offset added during allocation. See comment in Allocate.
 				b.cookieSet.Release(idx)
 				if b.logger != nil && b.logger.Enabled(context.Background(), slog.LevelDebug) {
 					b.logger.Debug("Released policy log cookie",
 						logfields.PolicyLogCookie, cookie,
-						logfields.PolicyLogCookie, e.value,
+						logfields.PolicyLogCookie, b.cookieToValue[idx],
 					)
 				}
-				*e = entry[V]{}
+				b.cookieToValue[idx] = zero
 			}
 		}
 	}
@@ -157,7 +192,7 @@ func (b *bakery[C, V]) Sweep() {
 		n--
 	}
 	b.cookieToValue = b.cookieToValue[:n]
-	b.lastSeenGeneration++
+	b.resetInUse()
 }
 
 // Count returns the number of allocated cookies.
