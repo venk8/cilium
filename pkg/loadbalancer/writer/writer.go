@@ -10,6 +10,7 @@ import (
 	"iter"
 	"log/slog"
 	"net/netip"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -48,13 +49,15 @@ type Writer struct {
 	sourcePriorities map[source.Source]uint8 // The smaller the int, the more preferred the source. Use via sourcePriority().
 
 	selectBackendsFunc         SelectBackendsFunc
+	hasCustomSelectBackends    bool
 	isServiceHealthCheckedFunc IsServiceHealthCheckedFunc
 	frontendSourceRangesFunc   FrontendSourceRangesFunc
 
 	backendKeyIndex statedb.Index[*loadbalancer.Backend, loadbalancer.BackendKey]
 
-	backendUpdateCtxPool sync.Pool
-	backendPrefixPool    sync.Pool
+	backendUpdateCtxPool   sync.Pool
+	backendPrefixPool      sync.Pool
+	frontendRefreshCtxPool sync.Pool
 }
 
 type SelectBackendsFunc = func(statedb.ReadTxn, iter.Seq2[*loadbalancer.Backend, statedb.Revision], *loadbalancer.Service, *loadbalancer.Frontend) iter.Seq2[*loadbalancer.Backend, statedb.Revision]
@@ -102,11 +105,13 @@ func NewWriter(p writerParams) (*Writer, error) {
 		return &buf
 	}
 	w.selectBackendsFunc = w.DefaultSelectBackends
+	w.hasCustomSelectBackends = false
 	return w, nil
 }
 
 func (w *Writer) SetSelectBackendsFunc(fn SelectBackendsFunc) {
 	w.selectBackendsFunc = fn
+	w.hasCustomSelectBackends = fn != nil && reflect.ValueOf(fn).Pointer() != reflect.ValueOf(w.DefaultSelectBackends).Pointer()
 }
 
 func (w *Writer) SetIsServiceHealthCheckedFunc(fn IsServiceHealthCheckedFunc) {
@@ -343,11 +348,15 @@ func (w *Writer) UpdateBackendHealth(txn WriteTxn, serviceName loadbalancer.Serv
 }
 
 func (w *Writer) upsertFrontendParams(txn WriteTxn, params loadbalancer.FrontendParams, svc *loadbalancer.Service) (old *loadbalancer.Frontend, err error) {
+	old, _, _ = w.fes.Get(txn, loadbalancer.FrontendByAddress(params.Address))
+	return w.upsertFrontend(txn, params, svc, old, nil)
+}
+
+func (w *Writer) upsertFrontend(txn WriteTxn, params loadbalancer.FrontendParams, svc *loadbalancer.Service, old *loadbalancer.Frontend, sharedRawBes iter.Seq2[*loadbalancer.Backend, statedb.Revision]) (oldOut *loadbalancer.Frontend, err error) {
 	if params.ServicePort == 0 {
 		params.ServicePort = params.Address.Port()
 	}
-	old, _, found := w.fes.Get(txn, loadbalancer.FrontendByAddress(params.Address))
-	if found && !loadbalancer.IsFrontendUpdated(old, params, svc) {
+	if old != nil && !loadbalancer.IsFrontendUpdated(old, params, svc) {
 		return old, nil
 	}
 
@@ -355,13 +364,13 @@ func (w *Writer) upsertFrontendParams(txn WriteTxn, params loadbalancer.Frontend
 		FrontendParams: params,
 		Service:        svc,
 	}
-	if found {
+	if old != nil {
 		fe.ID = old.ID
 		fe.RedirectTo = old.RedirectTo
 	}
 
 	w.refreshFrontendSourceRanges(fe)
-	w.refreshFrontend(txn, fe)
+	w.refreshFrontendWithBackends(txn, fe, sharedRawBes)
 	_, _, err = w.fes.Insert(txn, fe)
 	return old, err
 }
@@ -415,8 +424,25 @@ func (w *Writer) UpsertServiceAndFrontends(txn WriteTxn, svc *loadbalancer.Servi
 	}
 	fes = filtered
 
-	if err := w.validateFrontends(txn, fes...); err != nil {
-		return err
+	var oldFEsBuf [4]*loadbalancer.Frontend
+	oldFEs := oldFEsBuf[:0]
+	if len(fes) > len(oldFEsBuf) {
+		oldFEs = make([]*loadbalancer.Frontend, 0, len(fes))
+	}
+	for i := range fes {
+		fes[i].ServiceName = svc.Name
+		if fes[i].ServicePort == 0 {
+			fes[i].ServicePort = fes[i].Address.Port()
+		}
+		fe, _, found := w.fes.Get(txn, loadbalancer.FrontendByAddress(fes[i].Address))
+		if found && !fe.ServiceName.Equal(svc.Name) {
+			return fmt.Errorf("%w: %s is owned by %s", loadbalancer.ErrFrontendConflict, fes[i].Address.StringWithProtocol(), fe.ServiceName)
+		}
+		var old *loadbalancer.Frontend
+		if found {
+			old = fe
+		}
+		oldFEs = append(oldFEs, old)
 	}
 
 	old, _, found := w.svcs.Get(txn, loadbalancer.ServiceByName(svc.Name))
@@ -430,17 +456,28 @@ func (w *Writer) UpsertServiceAndFrontends(txn WriteTxn, svc *loadbalancer.Servi
 		}
 	}
 
+	var sharedRawBes iter.Seq2[*loadbalancer.Backend, statedb.Revision]
+	for i := range fes {
+		if oldFEs[i] == nil || loadbalancer.IsFrontendUpdated(oldFEs[i], fes[i], svc) {
+			sharedRawBes = w.listBackendsByServiceName(txn, svc.Name)
+			break
+		}
+	}
+
 	// Upsert the new frontends
-	for _, params := range fes {
-		params.ServiceName = svc.Name
-		if _, err := w.upsertFrontendParams(txn, params, svc); err != nil {
+	for i := range fes {
+		if _, err := w.upsertFrontend(txn, fes[i], svc, oldFEs[i], sharedRawBes); err != nil {
 			return err
 		}
 	}
 
 	// Delete orphan frontends if the service already existed
 	if found {
+		var existing []*loadbalancer.Frontend
 		for fe := range w.fes.List(txn, loadbalancer.FrontendByServiceName(svc.Name)) {
+			existing = append(existing, fe)
+		}
+		for _, fe := range existing {
 			if !hasFrontendAddress(fes, fe.Address) {
 				if _, _, err := w.fes.Delete(txn, fe); err != nil {
 					return err
@@ -475,7 +512,7 @@ func (w *Writer) updateServiceReferences(txn WriteTxn, svc *loadbalancer.Service
 	return nil
 }
 
-func (w *Writer) refreshFrontendWithBackends(txn statedb.ReadTxn, fe *loadbalancer.Frontend, sharedBes *iter.Seq2[*loadbalancer.Backend, statedb.Revision]) {
+func (w *Writer) refreshFrontendWithBackends(txn statedb.ReadTxn, fe *loadbalancer.Frontend, sharedRawBes iter.Seq2[*loadbalancer.Backend, statedb.Revision]) {
 	fe.Status = reconciler.StatusPending()
 	svc := fe.Service
 	if fe.RedirectTo != nil {
@@ -485,20 +522,28 @@ func (w *Writer) refreshFrontendWithBackends(txn statedb.ReadTxn, fe *loadbalanc
 			return
 		}
 	}
-	var bes iter.Seq2[*loadbalancer.Backend, statedb.Revision]
-	if fe.RedirectTo == nil && sharedBes != nil {
-		if *sharedBes == nil {
-			*sharedBes = w.backendsForService(txn, svc.Name)
-		}
-		bes = *sharedBes
+	var rawBes iter.Seq2[*loadbalancer.Backend, statedb.Revision]
+	if fe.RedirectTo == nil && sharedRawBes != nil {
+		rawBes = sharedRawBes
 	} else {
-		bes = w.backendsForService(txn, svc.Name)
+		rawBes = w.listBackendsByServiceName(txn, svc.Name)
 	}
-	fe.Backends = loadbalancer.BackendsSeq2(w.SelectBackends(txn, bes, svc, fe))
+
+	if (w.selectBackendsFunc == nil || !w.hasCustomSelectBackends) &&
+		!w.config.EnableServiceTopology &&
+		!shouldUseLocalBackends(fe) &&
+		(w.isServiceHealthCheckedFunc == nil || !w.isServiceHealthCheckedFunc(svc)) {
+		fe.Backends = loadbalancer.BackendsSeq2(selectPreferredBackends(rawBes, fe))
+		fe.HealthCheckBackends = fe.Backends
+		return
+	}
+
+	preferred := loadbalancer.PreferredBackendsByAddress(rawBes)
+	fe.Backends = loadbalancer.BackendsSeq2(w.SelectBackends(txn, preferred, svc, fe))
 	if w.isServiceHealthCheckedFunc == nil || !w.isServiceHealthCheckedFunc(svc) {
 		fe.HealthCheckBackends = fe.Backends
 	} else {
-		fe.HealthCheckBackends = loadbalancer.BackendsSeq2(w.SelectBackendsForHealthChecking(txn, bes, svc, fe))
+		fe.HealthCheckBackends = loadbalancer.BackendsSeq2(w.SelectBackendsForHealthChecking(txn, preferred, svc, fe))
 	}
 }
 
@@ -512,25 +557,70 @@ func (w *Writer) refreshFrontendSourceRanges(fe *loadbalancer.Frontend) {
 		policy, sourceRanges, ok := w.frontendSourceRangesFunc(fe.Service, fe)
 		if ok {
 			fe.SourceRangesPolicy = policy
-			fe.SourceRanges = slices.Clone(sourceRanges)
+			if len(sourceRanges) > 0 {
+				fe.SourceRanges = slices.Clone(sourceRanges)
+			} else {
+				fe.SourceRanges = nil
+			}
 			return
 		}
 	}
 
 	fe.SourceRangesPolicy = fe.Service.GetSourceRangesPolicy()
-	fe.SourceRanges = slices.Clone(fe.Service.SourceRanges)
+	if len(fe.Service.SourceRanges) > 0 {
+		fe.SourceRanges = slices.Clone(fe.Service.SourceRanges)
+	} else {
+		fe.SourceRanges = nil
+	}
+}
+
+type frontendRefreshContext struct {
+	w         *Writer
+	txn       statedb.WriteTxn
+	sharedBes iter.Seq2[*loadbalancer.Backend, statedb.Revision]
+	err       error
+	yield     func(*loadbalancer.Frontend, statedb.Revision) bool
+}
+
+func (ctx *frontendRefreshContext) doYield(fe *loadbalancer.Frontend, _ statedb.Revision) bool {
+	fe = fe.Clone()
+	if fe.RedirectTo == nil && ctx.sharedBes == nil {
+		ctx.sharedBes = ctx.w.listBackendsByServiceName(ctx.txn, fe.ServiceName)
+	}
+	ctx.w.refreshFrontendWithBackends(ctx.txn, fe, ctx.sharedBes)
+	_, _, ctx.err = ctx.w.fes.Insert(ctx.txn, fe)
+	return ctx.err == nil
+}
+
+func (w *Writer) getFrontendRefreshContext() *frontendRefreshContext {
+	if v := w.frontendRefreshCtxPool.Get(); v != nil {
+		return v.(*frontendRefreshContext)
+	}
+	ctx := &frontendRefreshContext{}
+	ctx.yield = ctx.doYield
+	return ctx
+}
+
+func (w *Writer) putFrontendRefreshContext(ctx *frontendRefreshContext) {
+	ctx.w = nil
+	ctx.txn = nil
+	ctx.sharedBes = nil
+	ctx.err = nil
+	w.frontendRefreshCtxPool.Put(ctx)
 }
 
 func (w *Writer) RefreshFrontends(txn WriteTxn, name loadbalancer.ServiceName) error {
-	var sharedBes iter.Seq2[*loadbalancer.Backend, statedb.Revision]
-	for fe := range w.fes.List(txn, loadbalancer.FrontendByServiceName(name)) {
-		fe = fe.Clone()
-		w.refreshFrontendWithBackends(txn, fe, &sharedBes)
-		if _, _, err := w.fes.Insert(txn, fe); err != nil {
-			return err
-		}
-	}
-	return nil
+	ctx := w.getFrontendRefreshContext()
+	ctx.w = w
+	ctx.txn = txn.WriteTxn
+	ctx.sharedBes = nil
+	ctx.err = nil
+
+	w.fes.List(txn.WriteTxn, loadbalancer.FrontendByServiceName(name))(ctx.yield)
+
+	err := ctx.err
+	w.putFrontendRefreshContext(ctx)
+	return err
 }
 
 func matchesFrontend(be *loadbalancer.Backend, fe *loadbalancer.Frontend) bool {
@@ -546,6 +636,26 @@ func matchesFrontend(be *loadbalancer.Backend, fe *loadbalancer.Frontend) bool {
 		}
 	}
 	return true
+}
+
+func selectPreferredBackends(seq iter.Seq2[*loadbalancer.Backend, statedb.Revision], fe *loadbalancer.Frontend) iter.Seq2[*loadbalancer.Backend, statedb.Revision] {
+	return func(yield func(*loadbalancer.Backend, statedb.Revision) bool) {
+		var (
+			lastAddr loadbalancer.L3n4Addr
+			hasAddr  bool
+		)
+		for be, rev := range seq {
+			if !hasAddr || be.Address != lastAddr {
+				lastAddr = be.Address
+				hasAddr = true
+				if matchesFrontend(be, fe) {
+					if !yield(be, rev) {
+						return
+					}
+				}
+			}
+		}
+	}
 }
 
 // topologyPreferenceCandidate reports whether a backend should participate in
