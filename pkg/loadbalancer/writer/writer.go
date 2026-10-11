@@ -53,8 +53,9 @@ type Writer struct {
 
 	backendKeyIndex statedb.Index[*loadbalancer.Backend, loadbalancer.BackendKey]
 
-	backendUpdateCtxPool sync.Pool
-	backendPrefixPool    sync.Pool
+	backendUpdateCtxPool   sync.Pool
+	backendPrefixPool      sync.Pool
+	frontendRefreshCtxPool sync.Pool
 }
 
 type SelectBackendsFunc = func(statedb.ReadTxn, iter.Seq2[*loadbalancer.Backend, statedb.Revision], *loadbalancer.Service, *loadbalancer.Frontend) iter.Seq2[*loadbalancer.Backend, statedb.Revision]
@@ -475,7 +476,7 @@ func (w *Writer) updateServiceReferences(txn WriteTxn, svc *loadbalancer.Service
 	return nil
 }
 
-func (w *Writer) refreshFrontendWithBackends(txn statedb.ReadTxn, fe *loadbalancer.Frontend, sharedBes *iter.Seq2[*loadbalancer.Backend, statedb.Revision]) {
+func (w *Writer) refreshFrontendWithBackends(txn statedb.ReadTxn, fe *loadbalancer.Frontend, sharedBes iter.Seq2[*loadbalancer.Backend, statedb.Revision]) {
 	fe.Status = reconciler.StatusPending()
 	svc := fe.Service
 	if fe.RedirectTo != nil {
@@ -487,10 +488,7 @@ func (w *Writer) refreshFrontendWithBackends(txn statedb.ReadTxn, fe *loadbalanc
 	}
 	var bes iter.Seq2[*loadbalancer.Backend, statedb.Revision]
 	if fe.RedirectTo == nil && sharedBes != nil {
-		if *sharedBes == nil {
-			*sharedBes = w.backendsForService(txn, svc.Name)
-		}
-		bes = *sharedBes
+		bes = sharedBes
 	} else {
 		bes = w.backendsForService(txn, svc.Name)
 	}
@@ -521,16 +519,53 @@ func (w *Writer) refreshFrontendSourceRanges(fe *loadbalancer.Frontend) {
 	fe.SourceRanges = slices.Clone(fe.Service.SourceRanges)
 }
 
-func (w *Writer) RefreshFrontends(txn WriteTxn, name loadbalancer.ServiceName) error {
-	var sharedBes iter.Seq2[*loadbalancer.Backend, statedb.Revision]
-	for fe := range w.fes.List(txn, loadbalancer.FrontendByServiceName(name)) {
-		fe = fe.Clone()
-		w.refreshFrontendWithBackends(txn, fe, &sharedBes)
-		if _, _, err := w.fes.Insert(txn, fe); err != nil {
-			return err
-		}
+type frontendRefreshContext struct {
+	w         *Writer
+	txn       statedb.WriteTxn
+	sharedBes iter.Seq2[*loadbalancer.Backend, statedb.Revision]
+	err       error
+	yield     func(*loadbalancer.Frontend, statedb.Revision) bool
+}
+
+func (ctx *frontendRefreshContext) doYield(fe *loadbalancer.Frontend, _ statedb.Revision) bool {
+	fe = fe.Clone()
+	if fe.RedirectTo == nil && ctx.sharedBes == nil {
+		ctx.sharedBes = ctx.w.backendsForService(ctx.txn, fe.ServiceName)
 	}
-	return nil
+	ctx.w.refreshFrontendWithBackends(ctx.txn, fe, ctx.sharedBes)
+	_, _, ctx.err = ctx.w.fes.Insert(ctx.txn, fe)
+	return ctx.err == nil
+}
+
+func (w *Writer) getFrontendRefreshContext() *frontendRefreshContext {
+	if v := w.frontendRefreshCtxPool.Get(); v != nil {
+		return v.(*frontendRefreshContext)
+	}
+	ctx := &frontendRefreshContext{}
+	ctx.yield = ctx.doYield
+	return ctx
+}
+
+func (w *Writer) putFrontendRefreshContext(ctx *frontendRefreshContext) {
+	ctx.w = nil
+	ctx.txn = nil
+	ctx.sharedBes = nil
+	ctx.err = nil
+	w.frontendRefreshCtxPool.Put(ctx)
+}
+
+func (w *Writer) RefreshFrontends(txn WriteTxn, name loadbalancer.ServiceName) error {
+	ctx := w.getFrontendRefreshContext()
+	ctx.w = w
+	ctx.txn = txn.WriteTxn
+	ctx.sharedBes = nil
+	ctx.err = nil
+
+	w.fes.List(txn.WriteTxn, loadbalancer.FrontendByServiceName(name))(ctx.yield)
+
+	err := ctx.err
+	w.putFrontendRefreshContext(ctx)
+	return err
 }
 
 func matchesFrontend(be *loadbalancer.Backend, fe *loadbalancer.Frontend) bool {
