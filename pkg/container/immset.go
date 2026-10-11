@@ -25,6 +25,9 @@ func NewImmSetFunc[T any](compare func(T, T) int, items ...T) ImmSet[T] {
 	if len(items) == 0 {
 		return ImmSet[T]{cmp: compare}
 	}
+	if len(items) == 1 {
+		return ImmSet[T]{xs: []T{items[0]}, cmp: compare}
+	}
 	xs := slices.Clone(items)
 	slices.SortFunc(xs, compare)
 	xs = slices.CompactFunc(xs, func(a, b T) bool { return compare(a, b) == 0 })
@@ -112,18 +115,57 @@ func (s ImmSet[T]) Delete(xs ...T) ImmSet[T] {
 	if len(xs) == 0 || len(s.xs) == 0 {
 		return s
 	}
-	if len(xs) > 1 {
-		xsAsImmSet := NewImmSetFunc(s.cmp, xs...)
-		return s.Difference(xsAsImmSet)
+	if len(xs) == 1 {
+		idx, found := slices.BinarySearchFunc(s.xs, xs[0], s.cmp)
+		if !found {
+			return s
+		}
+		xs2 := make([]T, len(s.xs)-1)
+		copy(xs2[:idx], s.xs[:idx])
+		copy(xs2[idx:], s.xs[idx+1:])
+		return ImmSet[T]{xs: xs2, cmp: s.cmp}
 	}
-	idx, found := slices.BinarySearchFunc(s.xs, xs[0], s.cmp)
-	if !found {
+
+	const maxStackWords = 256 // 256 * 64 = 16,384 elements (2 KB on stack)
+	nWords := (len(s.xs) + 63) / 64
+	var bitBuf [maxStackWords]uint64
+	var bitsSlice []uint64
+	if nWords <= maxStackWords {
+		bitsSlice = bitBuf[:nWords]
+	} else {
+		bitsSlice = make([]uint64, nWords)
+	}
+
+	deletedCount := 0
+	for _, x := range xs {
+		idx, found := slices.BinarySearchFunc(s.xs, x, s.cmp)
+		if !found {
+			continue
+		}
+		wordIdx := idx / 64
+		bitMask := uint64(1) << (idx % 64)
+		if bitsSlice[wordIdx]&bitMask == 0 {
+			bitsSlice[wordIdx] |= bitMask
+			deletedCount++
+			if deletedCount == len(s.xs) {
+				return ImmSet[T]{cmp: s.cmp}
+			}
+		}
+	}
+
+	if deletedCount == 0 {
 		return s
 	}
-	xs2 := make([]T, len(s.xs)-1)
-	copy(xs2[:idx], s.xs[:idx])
-	copy(xs2[idx:], s.xs[idx+1:])
-	return ImmSet[T]{xs: xs2, cmp: s.cmp}
+
+	result := make([]T, len(s.xs)-deletedCount)
+	dst := 0
+	for i, x := range s.xs {
+		if bitsSlice[i/64]&(uint64(1)<<(i%64)) == 0 {
+			result[dst] = x
+			dst++
+		}
+	}
+	return ImmSet[T]{xs: result, cmp: s.cmp}
 }
 
 func (s ImmSet[T]) Union(s2 ImmSet[T]) ImmSet[T] {
