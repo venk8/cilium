@@ -76,6 +76,14 @@ func (b *bitset) Release(offset int) {
 	b.count--
 }
 
+// IsSet returns whether the bit at offset is set.
+func (b *bitset) IsSet(offset int) bool {
+	if offset < 0 || offset >= b.length {
+		return false
+	}
+	return b.set.Bit(offset) == 1
+}
+
 // Count returns the number of set bits.
 func (b *bitset) Count() int {
 	return b.count

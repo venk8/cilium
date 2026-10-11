@@ -91,13 +91,19 @@ type mapState struct {
 	// entries is the map containing the MapStateEntries
 	entries mapStateMap
 	// trie is a Trie that indexes policy Keys without their identity
-	// and stores the identities in an associated builtin map.
-	trie bitlpm.Trie[types.LPMKey, IDSet]
+	// and stores the identities in an associated slice.
+	trie bitlpm.Trie[types.LPMKey, *idSlice]
 	// idIndex indexes entries by ID
 	byId map[identity.NumericIdentity]LPMKeys
+	// originMerges memoizes merged rule origins during mapState construction
+	// to avoid redundant string building and interning when multiple keys share the
+	// same rule origin pair.
+	originMerges map[[2]ruleOrigin]ruleOrigin
 }
 
 type IDSet map[identity.NumericIdentity]struct{}
+
+type idSlice = []identity.NumericIdentity
 
 // Valid returns true if the entries map has been initialized
 func (ms *mapState) Valid() bool {
@@ -117,12 +123,13 @@ func (ms *mapState) upsert(k Key, e mapStateEntry) {
 	// Update indices if 'k' is a new key
 	if !exists {
 		// Update trie
-		idSet, ok := ms.trie.ExactLookup(k.PrefixLength(), k.LPMKey)
+		ids, ok := ms.trie.ExactLookup(k.PrefixLength(), k.LPMKey)
 		if !ok {
-			idSet = make(IDSet)
-			ms.trie.Upsert(k.PrefixLength(), k.LPMKey, idSet)
+			s := idSlice{k.Identity}
+			ms.trie.Upsert(k.PrefixLength(), k.LPMKey, &s)
+		} else {
+			*ids = append(*ids, k.Identity)
 		}
-		idSet[k.Identity] = struct{}{}
 
 		// update byId if in use
 		if ms.byId != nil {
@@ -141,11 +148,15 @@ func (ms *mapState) delete(k Key) {
 	if exists {
 		delete(ms.entries, k)
 
-		idSet, ok := ms.trie.ExactLookup(k.PrefixLength(), k.LPMKey)
-		if ok {
-			delete(idSet, k.Identity)
-			if len(idSet) == 0 {
-				ms.trie.Delete(k.PrefixLength(), k.LPMKey)
+		ids, ok := ms.trie.ExactLookup(k.PrefixLength(), k.LPMKey)
+		if ok && ids != nil {
+			if i := slices.Index(*ids, k.Identity); i >= 0 {
+				n := len(*ids) - 1
+				(*ids)[i] = (*ids)[n]
+				*ids = (*ids)[:n]
+				if n == 0 {
+					ms.trie.Delete(k.PrefixLength(), k.LPMKey)
+				}
 			}
 		}
 
@@ -192,9 +203,12 @@ func (ms *mapState) forKey(k Key, f func(Key, mapStateEntry) bool) bool {
 	return true
 }
 
-// forCoveredIDs calls 'f' for each covered non-aggregate ID in 'idSet' with port/proto from 'k'.
-func (ms *mapState) forCoveredIDs(agg identity.NumericIdentity, k Key, idSet IDSet, f func(Key, mapStateEntry) bool) bool {
-	for id := range idSet {
+// forCoveredIDs calls 'f' for each covered non-aggregate ID in 'ids' with port/proto from 'k'.
+func (ms *mapState) forCoveredIDs(agg identity.NumericIdentity, k Key, ids *idSlice, f func(Key, mapStateEntry) bool) bool {
+	if ids == nil {
+		return true
+	}
+	for _, id := range *ids {
 		if aggregates(agg, id, ms.clusterInfo) {
 			k.Identity = id
 			if !ms.forKey(k, f) {
@@ -205,12 +219,10 @@ func (ms *mapState) forCoveredIDs(agg identity.NumericIdentity, k Key, idSet IDS
 	return true
 }
 
-// forID calls 'f' for 'k' if 'k.Identity' exists in 'idSet'.
-func (ms *mapState) forID(k Key, idSet IDSet, f func(Key, mapStateEntry) bool) bool {
-	if _, exists := idSet[k.Identity]; exists {
-		if !ms.forKey(k, f) {
-			return false
-		}
+// forID calls 'f' for 'k' if 'k' exists in 'ms.entries'.
+func (ms *mapState) forID(k Key, _ *idSlice, f func(Key, mapStateEntry) bool) bool {
+	if e, ok := ms.entries[k]; ok {
+		return f(k, e)
 	}
 	return true
 }
@@ -723,7 +735,7 @@ func newMapState(logger *slog.Logger, sizes MapStateSizes, features policyFeatur
 		logger:      logger,
 		clusterInfo: clusterInfo,
 		entries:     make(mapStateMap, sizes.entries),
-		trie:        bitlpm.NewTrie[types.LPMKey, IDSet](types.MapStatePrefixLen),
+		trie:        bitlpm.NewTrie[types.LPMKey, *idSlice](types.MapStatePrefixLen),
 	}
 
 	if features&(passRules|namedPortRules) != 0 {
@@ -859,9 +871,9 @@ func (ms mapState) String() (res string) {
 	return res
 }
 
-// Equal returns true of two entries are equal.
+// Equal returns true if two entries are equal.
 func (e mapStateEntry) Equal(o mapStateEntry) bool {
-	return e.equivalent(o) && e.derivedFromRules == o.derivedFromRules
+	return e.derivedFromRules == o.derivedFromRules && e.equivalent(o)
 }
 
 // equivalent returns true if two entries have the same policy effect,
@@ -870,7 +882,7 @@ func (e mapStateEntry) equivalent(o mapStateEntry) bool {
 	return e.MapStateEntry == o.MapStateEntry &&
 		(e.passes == o.passes || (e.passes != nil && o.passes != nil &&
 			slices.Equal(*e.passes, *o.passes))) &&
-		(e.derivedFromRules == o.derivedFromRules || e.derivedFromRules.LogString() == o.derivedFromRules.LogString())
+		(e.derivedFromRules == o.derivedFromRules || e.derivedFromRules.Value().log == o.derivedFromRules.Value().log)
 }
 
 // String returns a string representation of the MapStateEntry
@@ -894,6 +906,31 @@ func (e mapStateEntry) String() string {
 			",log=" + e.derivedFromRules.LogString()
 	}
 	return e.MapStateEntry.String() + labelText + pass
+}
+
+func (ms *mapState) mergeRuleOrigins(a, b ruleOrigin) ruleOrigin {
+	if a == b {
+		return a
+	}
+	if a == NilRuleOrigin {
+		return b
+	}
+	if b == NilRuleOrigin {
+		return a
+	}
+	if ms.originMerges != nil {
+		if merged, ok := ms.originMerges[[2]ruleOrigin{a, b}]; ok {
+			return merged
+		}
+		if merged, ok := ms.originMerges[[2]ruleOrigin{b, a}]; ok {
+			return merged
+		}
+	} else {
+		ms.originMerges = make(map[[2]ruleOrigin]ruleOrigin)
+	}
+	merged := a.Merge(b)
+	ms.originMerges[[2]ruleOrigin{a, b}] = merged
+	return merged
 }
 
 // addKeyWithChanges adds a 'key' with value 'entry' to 'keys' keeping track of incremental changes in 'adds' and 'deletes', and any changed or removed old values in 'old', if not nil.
@@ -930,7 +967,7 @@ func (ms *mapState) addKeyWithChanges(key Key, entry mapStateEntry, changes Chan
 			if oldEntry.Precedence.ProxyPortPrecedenceMayDiffer(entry.Precedence) {
 				// entries on same priority level are merged
 				oldEntry.MapStateEntry.Merge(entry.MapStateEntry)
-				oldEntry.derivedFromRules = oldEntry.derivedFromRules.Merge(entry.derivedFromRules)
+				oldEntry.derivedFromRules = ms.mergeRuleOrigins(oldEntry.derivedFromRules, entry.derivedFromRules)
 			} else if oldEntry.Precedence < entry.Precedence {
 				// higher precedence entry takes over
 				oldEntry.MapStateEntry = entry.MapStateEntry
@@ -1430,41 +1467,17 @@ func (ms *mapState) insertWithChanges(tierMaxPrecedence types.Precedence, newKey
 	}
 
 	if newEntry.IsDeny() {
-		for k, v := range ms.CoveringBroaderOrEqualKeys(newKey) {
-			// Bail if covered by an allow/deny key of higher precedence
-			if v.IsValid() && (v.Precedence > newEntry.Precedence ||
-				// New deny entry is also bailed due to different covering deny key
-				// of the same precedence, equal keys need to be merged
-				v.Precedence == newEntry.Precedence && k != newKey) {
-				return
-			}
+		if ms.isCoveredByHigherOrSamePrecedence(newKey, newEntry) {
+			return
 		}
-
-		// Delete covered entries of lower precedence, and
-		// same precedence deny entries if the keys are different
-		for k, v := range ms.CoveredNarrowerOrEqualKeys(newKey) {
-			if v.Precedence < newEntry.Precedence ||
-				v.Precedence == newEntry.Precedence && k != newKey {
-				ms.deleteExistingWithChanges(k, v, changes)
-			}
-		}
+		ms.pruneCoveredNarrowerOrEqual(newKey, newEntry, changes)
 	} else {
 		// No pruning of allow rules if all rules have the same precedence level.
 		if features.contains(precedenceFeatures) {
-			for _, v := range ms.CoveringBroaderOrEqualKeys(newKey) {
-				// Bail if covered by an allow/deny key of higher precedence
-				if v.IsValid() && v.Precedence > newEntry.Precedence {
-					return
-				}
+			if ms.isCoveredByHigherOrSamePrecedence(newKey, newEntry) {
+				return
 			}
-
-			// Delete covered entries of lower precedence, and
-			// same precedence deny entries if the keys are different
-			for k, v := range ms.CoveredNarrowerOrEqualKeys(newKey) {
-				if v.Precedence < newEntry.Precedence {
-					ms.deleteExistingWithChanges(k, v, changes)
-				}
-			}
+			ms.pruneCoveredNarrowerOrEqual(newKey, newEntry, changes)
 		}
 	}
 
@@ -1504,24 +1517,105 @@ func (ms *mapState) pruneAggregated(newKey Key, newEntry mapStateEntry, changes 
 	}
 
 	// Lookup all entries on this level.
-	idSet, ok := ms.trie.ExactLookup(newKey.PrefixLength(), newKey.LPMKey)
-	if !ok {
+	ids, ok := ms.trie.ExactLookup(newKey.PrefixLength(), newKey.LPMKey)
+	if !ok || ids == nil {
 		return
 	}
 
-	for id := range idSet {
+	for _, id := range *ids {
 		if !aggregates(newKey.Identity, id, ms.clusterInfo) {
 			// skip if this ID is not aggregated by newKey
 			continue
 		}
 
-		k := newKey
-		k.Identity = id
-		v := ms.entries[k]
-		if v.equivalent(newEntry) {
+		k := newKey.WithIdentity(id)
+		v, ok := ms.entries[k]
+		if ok && v.equivalent(newEntry) {
 			ms.logger.Debug("Removing entry duplicated by aggregate",
 				logfields.PolicyKey, k)
 			ms.deleteExistingWithChanges(k, v, changes)
+		}
+	}
+}
+
+// isCoveredByHigherOrSamePrecedence returns true if newKey is covered by an existing
+// entry with higher precedence, or (for deny entries) same precedence with a different key.
+func (ms *mapState) isCoveredByHigherOrSamePrecedence(newKey Key, newEntry mapStateEntry) bool {
+	agg := aggregateFor(newKey.Identity, ms.clusterInfo)
+	isDeny := newEntry.IsDeny()
+
+	iter := ms.trie.AncestorIterator(newKey.PrefixLength(), newKey.LPMKey)
+	for ok, lpmKey, _ := iter.Next(); ok; ok, lpmKey, _ = iter.Next() {
+		k := Key{LPMKey: lpmKey}
+
+		// aggregate identity is broader or equal to all identities, visit it first if it exists
+		kAgg := k.WithIdentity(agg)
+		if v, ok := ms.entries[kAgg]; ok {
+			if v.IsValid() && (v.Precedence > newEntry.Precedence ||
+				(isDeny && v.Precedence == newEntry.Precedence && kAgg != newKey)) {
+				return true
+			}
+		}
+
+		// Visit key with the same identity, if it exists.
+		// aggregate identity was already visited above.
+		if newKey.Identity != agg {
+			kID := k.WithIdentity(newKey.Identity)
+			if v, ok := ms.entries[kID]; ok {
+				if v.IsValid() && (v.Precedence > newEntry.Precedence ||
+					(isDeny && v.Precedence == newEntry.Precedence && kID != newKey)) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// pruneCoveredNarrowerOrEqual deletes covered entries of lower precedence, and
+// (for deny entries) same precedence entries if the keys are different.
+func (ms *mapState) pruneCoveredNarrowerOrEqual(newKey Key, newEntry mapStateEntry, changes ChangeState) {
+	agg := aggregateFor(newKey.Identity, ms.clusterInfo)
+	isDeny := newEntry.IsDeny()
+	prune := func(k Key) {
+		if v, ok := ms.entries[k]; ok {
+			if v.Precedence < newEntry.Precedence ||
+				(isDeny && v.Precedence == newEntry.Precedence && k != newKey) {
+				ms.deleteExistingWithChanges(k, v, changes)
+			}
+		}
+	}
+
+	// A fully-specific key (non-aggregate identity, specific protocol, non-wildcard port)
+	// cannot cover any other key. Only newKey itself can be pruned if an existing entry has
+	// lower precedence.
+	if newKey.Identity != agg && newKey.Nexthdr != 0 && !newKey.HasPortWildcard() {
+		prune(newKey)
+		return
+	}
+
+	iter := ms.trie.DescendantIterator(newKey.PrefixLength(), newKey.LPMKey)
+	for ok, lpmKey, ids := iter.Next(); ok; ok, lpmKey, ids = iter.Next() {
+		k := Key{LPMKey: lpmKey}
+
+		// All identities are narrower or equal to aggregate identity.
+		if newKey.Identity == agg {
+			if ids != nil {
+				for _, id := range *ids {
+					if aggregates(agg, id, ms.clusterInfo) {
+						prune(k.WithIdentity(id))
+					}
+				}
+			}
+			kAgg := k.WithIdentity(agg)
+			if _, exists := ms.entries[kAgg]; exists {
+				prune(kAgg)
+			}
+		} else { // key has a specific identity
+			kID := k.WithIdentity(newKey.Identity)
+			if _, exists := ms.entries[kID]; exists {
+				prune(kID)
+			}
 		}
 	}
 }

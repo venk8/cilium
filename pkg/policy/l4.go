@@ -190,6 +190,24 @@ func (a *PerSelectorPolicy) EnvoyHTTPRules() *cilium.HttpNetworkPolicyRules {
 	return a.envoyHTTPRules
 }
 
+// Clone returns a deep copy of PerSelectorPolicy.
+func (a *PerSelectorPolicy) Clone() *PerSelectorPolicy {
+	if a == nil {
+		return nil
+	}
+	c := *a
+	if a.ServerNames != nil {
+		c.ServerNames = make(StringSet, len(a.ServerNames))
+		for k := range a.ServerNames {
+			c.ServerNames[k] = struct{}{}
+		}
+	}
+	if a.L7Rules.HTTP != nil || a.L7Rules.DNS != nil {
+		c.L7Rules = *a.L7Rules.DeepCopy()
+	}
+	return &c
+}
+
 // Equal returns true if 'a' and 'b' represent the same per-selector policy for
 // merge purposes.
 func (a *PerSelectorPolicy) Equal(b *PerSelectorPolicy) bool {
@@ -898,7 +916,7 @@ const (
 // getCerts reads certificates out of the PolicyContext, reading from k8s or local files depending on config
 // and puts the values into the relevant keys in the TLSContext. Note that if the returned TLSContext.FromFile is
 // `false`, then this will be read from Kubernetes.
-func (l4 *L4Filter) getCerts(policyCtx PolicyContext, tls *api.TLSContext, direction TLSDirection) (*TLSContext, error) {
+func getCerts(policyCtx PolicyContext, tls *api.TLSContext, direction TLSDirection) (*TLSContext, error) {
 	if tls == nil {
 		return nil, nil
 	}
@@ -942,58 +960,11 @@ func (l4 *L4Filter) getCerts(policyCtx PolicyContext, tls *api.TLSContext, direc
 	}, nil
 }
 
-// createL4Filter creates a filter for L4 policy that applies to the specified
-// endpoints and port/protocol, with reference to the original rules that the
-// filter is derived from. This filter may be associated with a series of L7
-// rules via the `rule` parameter.
-// Not called with an empty peerEndpoints.
-func createL4Filter(policyCtx PolicyContext, entry *types.PolicyEntry, portRule api.Ports, port api.PortProtocol) (*L4Filter, error) {
-	selectorCache := policyCtx.GetSelectorCache()
-	logger := policyCtx.GetLogger()
-	origin := policyCtx.Origin()
-	tier, priority := policyCtx.Priority()
+func (l4 *L4Filter) getCerts(policyCtx PolicyContext, tls *api.TLSContext, direction TLSDirection) (*TLSContext, error) {
+	return getCerts(policyCtx, tls, direction)
+}
 
-	portName := ""
-	p := uint64(0)
-	if iana.IsSvcName(port.Port) {
-		portName = port.Port
-	} else {
-		// already validated via PortRule.Validate()
-		p, _ = strconv.ParseUint(port.Port, 0, 16)
-	}
-
-	// already validated via L4Proto.Validate(), never "ANY"
-	// NOTE: "ANY" for wildcarded port/proto!
-	u8p, _ := u8proto.ParseProtocol(string(port.Protocol))
-
-	l4 := &L4Filter{
-		Tier:                tier,
-		Port:                uint16(p),            // 0 for L3-only rules and named ports
-		EndPort:             uint16(port.EndPort), // 0 for a single port, >= 'Port' for a range
-		PortName:            portName,             // non-"" for named ports
-		Protocol:            port.Protocol,
-		U8Proto:             u8p,
-		PerSelectorPolicies: make(L7DataMap),
-		RuleOrigin:          make(map[CachedSelector]ruleOrigin), // Filled in below.
-		Ingress:             entry.Ingress,
-	}
-
-	peerEndpoints := entry.L3
-	// For L4 Policy, an empty slice of EndpointSelector indicates that the
-	// rule allows all at L3 - explicitly specify this by creating a slice
-	// with the WildcardEndpointSelector.
-	if len(entry.L3) == 0 {
-		peerEndpoints = types.WildcardSelectors
-	}
-
-	css, _ := selectorCache.AddSelectorsTxn(l4, peerEndpoints...)
-	for _, cs := range css {
-		if cs.IsWildcard() {
-			l4.wildcard = cs
-		}
-		l4.PerSelectorPolicies[cs] = nil // no per-selector policy (yet)
-	}
-
+func createPerSelectorPolicy(policyCtx PolicyContext, entry *types.PolicyEntry, portRule api.Ports, port api.PortProtocol) (*PerSelectorPolicy, error) {
 	var l7Parser L7ParserType
 	var terminatingTLS *TLSContext
 	var originatingTLS *TLSContext
@@ -1002,76 +973,80 @@ func createL4Filter(policyCtx PolicyContext, entry *types.PolicyEntry, portRule 
 	listener := ""
 	var listenerPriority ListenerPriority
 
-	pr := portRule.GetPortRule()
-	if pr != nil {
-		rules = pr.Rules
-		sni = pr.GetServerNames()
+	if portRule != nil {
+		pr := portRule.GetPortRule()
+		if pr != nil {
+			rules = pr.Rules
+			sni = pr.GetServerNames()
 
-		// Get TLS contexts, if any
-		var err error
-		terminatingTLS, err = l4.getCerts(policyCtx, pr.TerminatingTLS, TerminatingTLS)
-		if err != nil {
-			return nil, err
-		}
-		originatingTLS, err = l4.getCerts(policyCtx, pr.OriginatingTLS, OriginatingTLS)
-		if err != nil {
-			return nil, err
-		}
+			// Get TLS contexts, if any
+			var err error
+			terminatingTLS, err = getCerts(policyCtx, pr.TerminatingTLS, TerminatingTLS)
+			if err != nil {
+				return nil, err
+			}
+			originatingTLS, err = getCerts(policyCtx, pr.OriginatingTLS, OriginatingTLS)
+			if err != nil {
+				return nil, err
+			}
 
-		// Set parser type to TLS, if TLS. This will be overridden by L7 below, if rules
-		// exists.
-		if terminatingTLS != nil || originatingTLS != nil || len(pr.ServerNames) > 0 {
-			l7Parser = ParserTypeTLS
-		}
+			// Set parser type to TLS, if TLS. This will be overridden by L7 below, if rules
+			// exists.
+			if terminatingTLS != nil || originatingTLS != nil || len(pr.ServerNames) > 0 {
+				l7Parser = ParserTypeTLS
+			}
 
-		// Determine L7ParserType from rules present. Earlier validation ensures rules
-		// for multiple protocols are not present here.
-		if rules != nil {
-			// we need this to redirect DNS UDP (or ANY, which is more useful)
-			if len(rules.DNS) > 0 {
-				l7Parser = ParserTypeDNS
-			} else if port.Protocol == api.ProtoTCP { // Other than DNS only support TCP
-				switch {
-				case len(rules.HTTP) > 0:
-					l7Parser = ParserTypeHTTP
+			// Determine L7ParserType from rules present. Earlier validation ensures rules
+			// for multiple protocols are not present here.
+			if rules != nil {
+				// we need this to redirect DNS UDP (or ANY, which is more useful)
+				if len(rules.DNS) > 0 {
+					l7Parser = ParserTypeDNS
+				} else if port.Protocol == api.ProtoTCP { // Other than DNS only support TCP
+					switch {
+					case len(rules.HTTP) > 0:
+						l7Parser = ParserTypeHTTP
+					}
 				}
 			}
-		}
 
-		// Override the parser type and possibly priority for CRD is applicable.
-		if pr.Listener != nil {
-			l7Parser = ParserTypeCRD
-		}
-
-		// Map parser type to default priority for the given parser type
-		listenerPriority = l7Parser.defaultPriority()
-
-		// Override the parser type and possibly priority for CRD is applicable.
-		if pr.Listener != nil {
-			ns := policyCtx.GetNamespace()
-			resource := pr.Listener.EnvoyConfig
-			switch resource.Kind {
-			case "CiliumEnvoyConfig":
-				if ns == "" {
-					// Cluster-scoped CCNP tries to use namespaced
-					// CiliumEnvoyConfig
-					//
-					// TODO: Catch this in rule validation once we have a
-					// validation context in there so that we can differentiate
-					// between CNP and CCNP at validation time.
-					return nil, fmt.Errorf("Listener %q in CCNP can not use Kind CiliumEnvoyConfig", pr.Listener.Name)
-				}
-			case "CiliumClusterwideEnvoyConfig":
-				// CNP refers to a cluster-scoped listener
-				ns = ""
-			default:
+			// Override the parser type and possibly priority for CRD is applicable.
+			if pr.Listener != nil {
+				l7Parser = ParserTypeCRD
 			}
-			listener, _ = api.ResourceQualifiedName(ns, resource.Name, pr.Listener.Name, api.ForceNamespace)
-			if pr.Listener.Priority != 0 {
-				listenerPriority = ListenerPriority(pr.Listener.Priority)
+
+			// Map parser type to default priority for the given parser type
+			listenerPriority = l7Parser.defaultPriority()
+
+			// Override the parser type and possibly priority for CRD is applicable.
+			if pr.Listener != nil {
+				ns := policyCtx.GetNamespace()
+				resource := pr.Listener.EnvoyConfig
+				switch resource.Kind {
+				case "CiliumEnvoyConfig":
+					if ns == "" {
+						// Cluster-scoped CCNP tries to use namespaced
+						// CiliumEnvoyConfig
+						//
+						// TODO: Catch this in rule validation once we have a
+						// validation context in there so that we can differentiate
+						// between CNP and CCNP at validation time.
+						return nil, fmt.Errorf("Listener %q in CCNP can not use Kind CiliumEnvoyConfig", pr.Listener.Name)
+					}
+				case "CiliumClusterwideEnvoyConfig":
+					// CNP refers to a cluster-scoped listener
+					ns = ""
+				default:
+				}
+				listener, _ = api.ResourceQualifiedName(ns, resource.Name, pr.Listener.Name, api.ForceNamespace)
+				if pr.Listener.Priority != 0 {
+					listenerPriority = ListenerPriority(pr.Listener.Priority)
+				}
 			}
 		}
 	}
+
+	_, priority := policyCtx.Priority()
 
 	if l7Parser != ParserTypeNone || !entry.IsAllow() || priority != 0 {
 		modifiedRules := rules
@@ -1087,6 +1062,7 @@ func createL4Filter(policyCtx PolicyContext, entry *types.PolicyEntry, portRule 
 		isAllowPolicy := entry.IsAllow() // note: L7 rules cannot be deny
 
 		if hasL7Rules && isDefaultDenyDisabled && isAllowPolicy {
+			logger := policyCtx.GetLogger()
 			logger.Debug("Adding wildcard L7 rules for default-allow policy",
 				logfields.L7Parser, l7Parser,
 				logfields.Ingress, entry.Ingress)
@@ -1094,22 +1070,134 @@ func createL4Filter(policyCtx PolicyContext, entry *types.PolicyEntry, portRule 
 			modifiedRules = ensureWildcard(rules, l7Parser)
 		}
 
-		l4.PerSelectorPolicies.addPolicyForSelector(l7Parser, modifiedRules, terminatingTLS, originatingTLS, entry.Verdict, sni, listener, listenerPriority, priority)
+		l7policy := &PerSelectorPolicy{
+			Priority:         priority,
+			L7Parser:         l7Parser,
+			TerminatingTLS:   terminatingTLS,
+			OriginatingTLS:   originatingTLS,
+			Verdict:          entry.Verdict,
+			ServerNames:      NewStringSet(sni),
+			Listener:         listener,
+			ListenerPriority: listenerPriority,
+		}
+		if modifiedRules != nil {
+			l7policy.L7Rules = *modifiedRules
+		}
+		return l7policy, nil
 	}
 
-	for cs := range l4.PerSelectorPolicies {
-		l4.RuleOrigin[cs] = origin
+	return nil, nil
+}
+
+func parseProtocol(p api.L4Proto) (u8proto.U8proto, error) {
+	switch p {
+	case api.ProtoAny, "":
+		return u8proto.ANY, nil
+	case api.ProtoTCP:
+		return u8proto.TCP, nil
+	case api.ProtoUDP:
+		return u8proto.UDP, nil
+	case api.ProtoSCTP:
+		return u8proto.SCTP, nil
+	case api.ProtoICMP:
+		return u8proto.ICMP, nil
+	case api.ProtoICMPv6:
+		return u8proto.ICMPv6, nil
+	case api.ProtoVRRP:
+		return u8proto.VRRP, nil
+	case api.ProtoIGMP:
+		return u8proto.IGMP, nil
+	case api.ProtoGRE:
+		return u8proto.GRE, nil
+	case api.ProtoIPIP:
+		return u8proto.IPIP, nil
+	case api.ProtoIPv6:
+		return u8proto.IPv6, nil
+	case api.ProtoESP:
+		return u8proto.ESP, nil
+	case api.ProtoAH:
+		return u8proto.AH, nil
+	default:
+		return u8proto.ParseProtocol(string(p))
 	}
+}
+
+// createL4Filter creates a filter for L4 policy that applies to the specified
+// endpoints and port/protocol, with reference to the original rules that the
+// filter is derived from. This filter may be associated with a series of L7
+// rules via the `rule` parameter.
+// Not called with an empty peerEndpoints.
+func createL4Filter(policyCtx PolicyContext, entry *types.PolicyEntry, portRule api.Ports, port api.PortProtocol) (*L4Filter, error) {
+	selectorCache := policyCtx.GetSelectorCache()
+	origin := policyCtx.Origin()
+	tier, _ := policyCtx.Priority()
+
+	newPolicy, err := createPerSelectorPolicy(policyCtx, entry, portRule, port)
+	if err != nil {
+		return nil, err
+	}
+
+	portName := ""
+	p := uint64(0)
+	if iana.IsSvcName(port.Port) {
+		portName = port.Port
+	} else {
+		// already validated via PortRule.Validate()
+		p, _ = strconv.ParseUint(port.Port, 0, 16)
+	}
+
+	// already validated via L4Proto.Validate(), never "ANY"
+	// NOTE: "ANY" for wildcarded port/proto!
+	u8p, _ := parseProtocol(port.Protocol)
+
+	l4 := &L4Filter{
+		Tier:                tier,
+		Port:                uint16(p),            // 0 for L3-only rules and named ports
+		EndPort:             uint16(port.EndPort), // 0 for a single port, >= 'Port' for a range
+		PortName:            portName,             // non-"" for named ports
+		Protocol:            port.Protocol,
+		U8Proto:             u8p,
+		PerSelectorPolicies: make(L7DataMap),
+		RuleOrigin:          make(map[CachedSelector]ruleOrigin),
+		Ingress:             entry.Ingress,
+	}
+
+	peerEndpoints := entry.L3
+	// For L4 Policy, an empty slice of EndpointSelector indicates that the
+	// rule allows all at L3 - explicitly specify this by creating a slice
+	// with the WildcardEndpointSelector.
+	if len(entry.L3) == 0 {
+		peerEndpoints = types.WildcardSelectors
+	}
+
+	selectorCache.addSelectorsForFilter(l4, peerEndpoints, newPolicy, origin)
 
 	return l4, nil
 }
 
-func (l4 *L4Filter) removeSelectors(selectorCache *SelectorCache) {
-	selectors := make(types.CachedSelectorSlice, 0, len(l4.PerSelectorPolicies))
-	for cs := range l4.PerSelectorPolicies {
-		selectors = append(selectors, cs)
+func (existingFilter *L4Filter) mergePolicyEntry(policyCtx PolicyContext, entry *types.PolicyEntry, portRule api.Ports, port api.PortProtocol) error {
+	tier, _ := policyCtx.Priority()
+	if existingFilter.Tier != tier {
+		return fmt.Errorf("cannot merge filters with different tiers (%d != %d)",
+			existingFilter.Tier, tier)
 	}
-	selectorCache.RemoveSelectors(selectors, l4)
+
+	newPolicy, err := createPerSelectorPolicy(policyCtx, entry, portRule, port)
+	if err != nil {
+		return err
+	}
+	origin := policyCtx.Origin()
+
+	peerEndpoints := entry.L3
+	if len(entry.L3) == 0 {
+		peerEndpoints = types.WildcardSelectors
+	}
+
+	return policyCtx.GetSelectorCache().mergeSelectorsForFilter(policyCtx, existingFilter, peerEndpoints, newPolicy, origin)
+}
+
+func (l4 *L4Filter) removeSelectors(selectorCache *SelectorCache) {
+	selectorCache.removeSelectorsForPolicies(l4.PerSelectorPolicies, l4)
 }
 
 // detach releases the references held in the L4Filter and must be called before
@@ -1224,10 +1312,7 @@ func (resMap *L4PolicyMap) addL4Filter(policyCtx PolicyContext, filterToMerge *L
 
 // makeL4PolicyMap creates an new L4PolicMap.
 func makeL4PolicyMap() L4PolicyMap {
-	return L4PolicyMap{
-		NamedPortMap: make(map[string]*L4Filter),
-		RangePortMap: make(rangePortMap),
-	}
+	return L4PolicyMap{}
 }
 
 // L4PolicyMaps is a slice of L4PolicyMap, one for each tier in the policy
@@ -1334,6 +1419,9 @@ func (r rangePortMap) MarshalJSON() ([]byte, error) {
 // upsert L4Filter adds an L4Filter indexed by protocol/port-endPort.
 func (l4M *L4PolicyMap) upsert(l4 *L4Filter) {
 	if l4.PortName != "" {
+		if l4M.NamedPortMap == nil {
+			l4M.NamedPortMap = make(map[string]*L4Filter)
+		}
 		l4M.NamedPortMap[l4.PortName+"/"+string(l4.Protocol)] = l4
 		return
 	}
@@ -1343,7 +1431,23 @@ func (l4M *L4PolicyMap) upsert(l4 *L4Filter) {
 		EndPort: l4.EndPort,
 		Proto:   l4.U8Proto,
 	}
+	if l4M.RangePortMap == nil {
+		l4M.RangePortMap = make(rangePortMap)
+	}
 	l4M.RangePortMap[ppK] = l4
+}
+
+// exactLookup looks up an L4Filter matching the port and protocol.
+func (l4M *L4PolicyMap) exactLookup(p api.PortProtocol) *L4Filter {
+	if l4M == nil || l4M.Len() == 0 {
+		return nil
+	}
+	u8p, _ := parseProtocol(p.Protocol)
+	if iana.IsSvcName(p.Port) {
+		return l4M.ExactLookupPortName(p.Port, u8p)
+	}
+	portNum, _ := strconv.ParseUint(p.Port, 0, 16)
+	return l4M.ExactLookupPortNum(uint16(portNum), uint16(p.EndPort), u8p)
 }
 
 // exactLookupFilter looks to see if there is an exact match for the

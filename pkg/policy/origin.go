@@ -126,6 +126,12 @@ func (ro ruleOrigin) Merge(other ruleOrigin) ruleOrigin {
 	if unique.Handle[RuleMeta](other) == (unique.Handle[RuleMeta]{}) {
 		return ro
 	}
+	if ro == NilRuleOrigin {
+		return other
+	}
+	if other == NilRuleOrigin {
+		return ro
+	}
 
 	new := RuleMeta{
 		labels: labels.MergeSortedLabelArrayListStrings(ro.LabelsString(), other.LabelsString()),

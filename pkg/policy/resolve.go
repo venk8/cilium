@@ -143,8 +143,12 @@ func (p *policyContext) GetLogger() *slog.Logger {
 	return p.logger
 }
 
+func (p *policyContext) TraceEnabled() bool {
+	return p != nil && p.logger != nil && p.traceEnabled
+}
+
 func (p *policyContext) PolicyTrace(format string, a ...any) {
-	if p.logger == nil || !p.traceEnabled {
+	if !p.TraceEnabled() {
 		return
 	}
 	format = strings.TrimRight(format, " \t\n")

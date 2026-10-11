@@ -251,6 +251,7 @@ func (p *Repository) newRule(policyEntry types.PolicyEntry, key ruleKey) *rule {
 	r := &rule{
 		PolicyEntry: policyEntry,
 		key:         key,
+		ruleOrigin:  makeSingleRuleOrigin(policyEntry.Labels.Sort(), policyEntry.Log.Value),
 	}
 	css, _ := p.subjectSelectorCache.AddSelectors(r, r.Subject)
 	r.subjectSelector = css[0]
@@ -417,9 +418,6 @@ func (p *Repository) computePolicyEnforcementAndRules(securityIdentity *identity
 		return false, false, false, false, nil, nil
 	}
 
-	rulesIngress = []*rule{}
-	rulesEgress = []*rule{}
-
 	var hasIngressPassVerdict, hasEgressPassVerdict bool
 
 	processKey := func(rKey ruleKey) {
@@ -555,6 +553,7 @@ func (rules ruleSlice) addDefaultRule(subject *identity.Identity, peers types.Se
 			L3:       peers,
 			Labels:   lbls,
 		},
+		ruleOrigin: makeSingleRuleOrigin(lbls.Sort(), ""),
 	})
 }
 
