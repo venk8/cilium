@@ -11,7 +11,9 @@ import (
 	"log/slog"
 	"maps"
 	"slices"
+	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/davecgh/go-spew/spew"
 	envoy_config_cluster "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
@@ -463,28 +465,80 @@ func sdsReferenceVersionContext(resources *xds.Resources) string {
 	return resourceReferencesVersionContext(refs)
 }
 
+const (
+	maxResourceKeysCap = 2048
+	maxResourceBufCap  = 64 * 1024 // 64 KiB
+)
+
+type resourceVersionScratch struct {
+	keys []string
+	buf  []byte
+}
+
+var resourceVersionScratchPool = sync.Pool{
+	New: func() any {
+		return &resourceVersionScratch{}
+	},
+}
+
+func putResourceVersionScratch(scratch *resourceVersionScratch) {
+	if cap(scratch.keys) <= maxResourceKeysCap && cap(scratch.buf) <= maxResourceBufCap {
+		clear(scratch.keys[:cap(scratch.keys)])
+		scratch.keys = scratch.keys[:0]
+		scratch.buf = scratch.buf[:0]
+		resourceVersionScratchPool.Put(scratch)
+	}
+}
+
 func (c *cacheImpl) resourceVersion(typeURL string, resources map[string]cache_types.Resource, versionContext ...string) (string, error) {
-	keys := slices.Collect(maps.Keys(resources))
+	scratch, _ := resourceVersionScratchPool.Get().(*resourceVersionScratch)
+	if scratch == nil {
+		scratch = &resourceVersionScratch{}
+	}
+
+	keys := scratch.keys[:0]
+	if cap(keys) < len(resources) {
+		keys = make([]string, 0, len(resources))
+	}
+	for k := range resources {
+		keys = append(keys, k)
+	}
 	slices.Sort(keys)
-	var sb strings.Builder
+	scratch.keys = keys
+
+	hasher := fnv.New32a()
+	buf := append(scratch.buf[:0], typeURL...)
+	buf = append(buf, 0)
+	hasher.Write(buf)
+
+	mo := proto.MarshalOptions{Deterministic: true}
 	for _, name := range keys {
-		encodedResource, err := marshal(resources[name])
+		buf = append(buf[:0], name...)
+		buf = append(buf, 0)
+
+		var err error
+		buf, err = mo.MarshalAppend(buf, resources[name])
 		if err != nil {
+			scratch.buf = buf
+			putResourceVersionScratch(scratch)
 			return "", err
 		}
-		sb.WriteString(name)
-		sb.WriteString(encodedResource)
+		buf = append(buf, 0)
+		hasher.Write(buf)
 	}
+
 	for _, context := range versionContext {
 		if context == "" {
 			continue
 		}
-		sb.WriteByte(0)
-		sb.WriteString("version-context")
-		sb.WriteByte(0)
-		sb.WriteString(context)
+		buf = append(append(buf[:0], "\x00version-context\x00"...), context...)
+		hasher.Write(buf)
 	}
-	return c.hash(map[string]string{typeURL: sb.String()}), nil
+	scratch.buf = buf
+
+	putResourceVersionScratch(scratch)
+
+	return rand.SafeEncodeString(strconv.FormatUint(uint64(hasher.Sum32()), 10)), nil
 }
 
 // normalizeSnapshotResources returns the resource view used to build an ADS
