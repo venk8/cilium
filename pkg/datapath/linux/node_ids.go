@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/bits"
 	"net"
 	"net/netip"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/cilium/cilium/api/v1/models"
 	"github.com/cilium/cilium/pkg/bpf"
 	"github.com/cilium/cilium/pkg/idpool"
+	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/maps/nodemap"
@@ -411,4 +413,158 @@ func setIPsByIDsMapping(nodeIPsByIDs map[uint16]sets.Set[string], id uint16, ip 
 		nodeIPsByIDs[id] = ips
 	}
 	ips.Insert(ip)
+}
+
+type bitmapNodeIDPool struct {
+	mutex   lock.Mutex
+	minID   idpool.ID
+	maxID   idpool.ID
+	next    idpool.ID
+	words   []uint64
+	initial [8]uint64
+}
+
+var (
+	_ nodeIDPool = (*bitmapNodeIDPool)(nil)
+	_ nodeIDPool = (*idpool.IDPool)(nil)
+)
+
+func newNodeIDPool(minID, maxID idpool.ID) *bitmapNodeIDPool {
+	p := &bitmapNodeIDPool{
+		minID: minID,
+		maxID: maxID,
+		next:  minID,
+	}
+	p.words = p.initial[:0]
+	return p
+}
+
+func (p *bitmapNodeIDPool) ensureWords(n int) {
+	if n <= len(p.words) {
+		return
+	}
+	if n <= cap(p.words) {
+		p.words = p.words[:n]
+		return
+	}
+	newCap := 2 * cap(p.words)
+	if newCap < n {
+		newCap = n
+	}
+	words := make([]uint64, n, newCap)
+	copy(words, p.words)
+	p.words = words
+}
+
+func (p *bitmapNodeIDPool) claim(w, bit int) idpool.ID {
+	p.ensureWords(w + 1)
+	p.words[w] |= uint64(1) << bit
+	id := p.minID + idpool.ID(w)*64 + idpool.ID(bit)
+	if id < p.maxID {
+		p.next = id + 1
+	} else {
+		p.next = p.minID
+	}
+	return id
+}
+
+func (p *bitmapNodeIDPool) AllocateID() idpool.ID {
+	p.mutex.Lock()
+	defer p.mutex.Unlock()
+
+	if p.minID > p.maxID {
+		return idpool.NoID
+	}
+	totalIDs := p.maxID - p.minID + 1
+	totalWords := int((totalIDs + 63) / 64)
+	rem := int(totalIDs % 64)
+
+	if p.next < p.minID || p.next > p.maxID {
+		p.next = p.minID
+	}
+	startOffset := p.next - p.minID
+	startWord := int(startOffset / 64)
+	startBit := int(startOffset % 64)
+
+	for w := startWord; w < totalWords; w++ {
+		var mask uint64 = ^uint64(0)
+		if w == startWord && startBit > 0 {
+			mask = ^uint64(0) << startBit
+		}
+		if w == totalWords-1 && rem != 0 {
+			mask &= (uint64(1) << rem) - 1
+		}
+		if w >= len(p.words) {
+			bit := 0
+			if w == startWord {
+				bit = startBit
+			}
+			return p.claim(w, bit)
+		}
+		inv := ^(p.words[w] | ^mask)
+		if inv != 0 {
+			return p.claim(w, bits.TrailingZeros64(inv))
+		}
+	}
+
+	for w := 0; w < startWord; w++ {
+		if w >= len(p.words) {
+			return p.claim(w, 0)
+		}
+		inv := ^p.words[w]
+		if inv != 0 {
+			return p.claim(w, bits.TrailingZeros64(inv))
+		}
+	}
+
+	if startBit > 0 {
+		mask := (uint64(1) << startBit) - 1
+		inv := ^(p.words[startWord] | ^mask)
+		if inv != 0 {
+			return p.claim(startWord, bits.TrailingZeros64(inv))
+		}
+	}
+
+	return idpool.NoID
+}
+
+func (p *bitmapNodeIDPool) Insert(id idpool.ID) bool {
+	p.mutex.Lock()
+	defer p.mutex.Unlock()
+
+	if id < p.minID || id > p.maxID {
+		return false
+	}
+	offset := id - p.minID
+	w := int(offset / 64)
+	if w >= len(p.words) {
+		return false
+	}
+	mask := uint64(1) << (offset % 64)
+	if p.words[w]&mask == 0 {
+		return false
+	}
+	p.words[w] &^= mask
+	if id < p.next {
+		p.next = id
+	}
+	return true
+}
+
+func (p *bitmapNodeIDPool) Remove(id idpool.ID) bool {
+	p.mutex.Lock()
+	defer p.mutex.Unlock()
+
+	if id < p.minID || id > p.maxID {
+		return false
+	}
+	offset := id - p.minID
+	w := int(offset / 64)
+	mask := uint64(1) << (offset % 64)
+	if w < len(p.words) && p.words[w]&mask != 0 {
+		return false
+	}
+	p.ensureWords(w + 1)
+	p.words[w] |= mask
+	return true
 }

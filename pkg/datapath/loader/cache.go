@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"github.com/cilium/ebpf"
 
@@ -206,7 +207,7 @@ func (o *objectCache) fetchOrCompile(ctx context.Context, cfg endpoint.Config, d
 
 	if obj.spec != nil {
 		o.logger.Debug("Using cached BPF template", logfields.Object, obj.path)
-		return obj.spec.Copy(), hash, nil
+		return copyCollectionSpec(obj.spec), hash, nil
 	}
 
 	if stats == nil {
@@ -243,5 +244,80 @@ func (o *objectCache) fetchOrCompile(ctx context.Context, cfg endpoint.Config, d
 		o.logger.Debug("Precomputed Blocks", logfields.Object, name)
 	}
 
-	return obj.spec.Copy(), hash, nil
+	// Discard the ELF's BTF type database from the cached CollectionSpec.
+	// Loading collections into the kernel only uses the BTF types referenced
+	// by individual MapSpec and ProgramSpec fields, while spec.Types is only
+	// used for offline code generation (e.g. bpf2go). Dropping it avoids
+	// deep-copying the entire BTF type graph on every cache hit.
+	obj.spec.Types = nil
+
+	// Discard BTF type information from cached VariableSpecs. Kernel loading
+	// only relies on the datasec bytes (v.Value) and map BTF attributes; v.Type
+	// is purely userspace metadata. Clearing it avoids deep-copying BTF type
+	// subtrees on every cache hit.
+	for _, v := range obj.spec.Variables {
+		v.Type = nil
+	}
+
+	return copyCollectionSpec(obj.spec), hash, nil
+}
+
+func copyCollectionSpec(cs *ebpf.CollectionSpec) *ebpf.CollectionSpec {
+	if cs == nil {
+		return nil
+	}
+
+	var maps map[string]*ebpf.MapSpec
+	if cs.Maps != nil {
+		maps = make(map[string]*ebpf.MapSpec, len(cs.Maps))
+		for k, v := range cs.Maps {
+			maps[k] = copyMapSpec(v)
+		}
+	}
+
+	var progs map[string]*ebpf.ProgramSpec
+	if cs.Programs != nil {
+		progs = make(map[string]*ebpf.ProgramSpec, len(cs.Programs))
+		for k, v := range cs.Programs {
+			progs[k] = v.Copy()
+		}
+	}
+
+	var vars map[string]*ebpf.VariableSpec
+	if cs.Variables != nil {
+		vars = make(map[string]*ebpf.VariableSpec, len(cs.Variables))
+		for k, v := range cs.Variables {
+			vars[k] = v.Copy()
+		}
+	}
+
+	return &ebpf.CollectionSpec{
+		Maps:      maps,
+		Programs:  progs,
+		Variables: vars,
+		ByteOrder: cs.ByteOrder,
+	}
+}
+
+func copyMapSpec(ms *ebpf.MapSpec) *ebpf.MapSpec {
+	if ms == nil {
+		return nil
+	}
+
+	cpy := *ms
+	cpy.Contents = slices.Clone(cpy.Contents)
+	cpy.Tags = slices.Clone(cpy.Tags)
+
+	if cpy.InnerMap == ms {
+		cpy.InnerMap = &cpy
+	} else if cpy.InnerMap != nil {
+		cpy.InnerMap = copyMapSpec(cpy.InnerMap)
+	}
+
+	if cpy.Extra != nil {
+		extra := *cpy.Extra
+		cpy.Extra = &extra
+	}
+
+	return &cpy
 }

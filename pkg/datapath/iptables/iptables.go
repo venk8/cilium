@@ -698,31 +698,56 @@ func (m *manager) inboundProxyRedirectRule(cmd string) []string {
 		"--set-mark", toProxyMark}
 }
 
-func (m *manager) iptProxyRule(rules string, prog runnable, l4proto, ip string, proxyPort uint16, name string) error {
-	// Match
-	port := uint32(byteorder.HostToNetwork16(proxyPort)) << 16
-	markMatch := fmt.Sprintf("%#x", linux_defaults.MagicMarkIsToProxy|port)
-	// TPROXY params
-	tProxyMark := fmt.Sprintf("%#x", linux_defaults.MagicMarkIsToProxy)
-	tProxyPort := fmt.Sprintf("%d", proxyPort)
+var mangleListRules = []string{"-t", "mangle", "-S"}
 
-	existingRuleRegex := regexp.MustCompile(fmt.Sprintf("-A CILIUM_PRE_mangle -p %s -m mark --mark %s.*--on-ip %s", l4proto, markMatch, ip))
-	if existingRuleRegex.MatchString(rules) {
-		return nil
+const toProxyMark = "0x200"
+
+func hasProxyRule(rules, l4proto, markMatch, ip string) bool {
+	rem := rules
+	for len(rem) > 0 {
+		var line string
+		line, rem, _ = strings.Cut(rem, "\n")
+		const chainPrefix = "-A CILIUM_PRE_mangle -p "
+		if strings.HasPrefix(line, chainPrefix) {
+			rest := line[len(chainPrefix):]
+			if strings.HasPrefix(rest, l4proto) && len(rest) > len(l4proto) && rest[len(l4proto)] == ' ' &&
+				strings.Contains(line, markMatch) {
+				idx := strings.Index(line, "--on-ip ")
+				if idx >= 0 && strings.HasPrefix(line[idx+len("--on-ip "):], ip) {
+					return true
+				}
+			}
+		}
 	}
+	return false
+}
 
-	// NOTE: Proxy port restoration depends on the comment string below, see doGetProxyPorts()
-	rule := []string{
+func formatProxyRule(dst []string, l4proto, ip, markMatch, tProxyPort, comment string) []string {
+	if cap(dst) >= 24 {
+		dst = dst[:0]
+	} else {
+		dst = make([]string, 0, 24)
+	}
+	return append(dst,
 		"-t", "mangle",
 		"-A", ciliumPreMangleChain,
 		"-p", l4proto,
 		"-m", "mark", "--mark", markMatch,
-		"-m", "comment", "--comment", "cilium: TPROXY to host " + name + " proxy",
+		"-m", "comment", "--comment", comment,
 		"-j", "TPROXY",
-		"--tproxy-mark", tProxyMark,
+		"--tproxy-mark", toProxyMark,
 		"--on-ip", ip,
 		"--on-port", tProxyPort,
+	)
+}
+
+func (m *manager) iptProxyRule(rules string, prog runnable, l4proto, ip, markMatch, tProxyPort, comment string) error {
+	if hasProxyRule(rules, l4proto, markMatch, ip) {
+		return nil
 	}
+
+	// NOTE: Proxy port restoration depends on the comment string below, see doGetProxyPorts()
+	rule := formatProxyRule(nil, l4proto, ip, markMatch, tProxyPort, comment)
 	return prog.runProg(rule)
 }
 
@@ -1092,43 +1117,112 @@ func (m *manager) copyProxyRules(oldChain string, match string) error {
 	return nil
 }
 
+func parseIptablesDeleteRule(dst []string, rule string) []string {
+	var args []string
+	if cap(dst) >= 24 {
+		args = dst[:0]
+	} else {
+		args = make([]string, 0, 24)
+	}
+	args = append(args, "-t", "mangle")
+
+	first := true
+	for len(rule) > 0 {
+		rule = strings.TrimLeft(rule, " ")
+		if len(rule) == 0 {
+			break
+		}
+		var token string
+		if rule[0] == '"' {
+			end := strings.IndexByte(rule[1:], '"')
+			if end < 0 {
+				token = rule[1:]
+				rule = ""
+			} else {
+				token = rule[1 : end+1]
+				rule = rule[end+2:]
+			}
+		} else {
+			end := strings.IndexByte(rule, ' ')
+			if end < 0 {
+				token = rule
+				rule = ""
+			} else {
+				token = rule[:end]
+				rule = rule[end+1:]
+			}
+		}
+		if first {
+			first = false
+			if token == "-A" || token == "-I" {
+				args = append(args, "-D")
+				continue
+			}
+		}
+		args = append(args, token)
+	}
+	return args
+}
+
+func isProxyRuleFor(rule, tProxyPort, ip string) bool {
+	const prefix = "TPROXY --on-port "
+	idx := strings.Index(rule, prefix)
+	if idx < 0 {
+		return false
+	}
+	rest := rule[idx+len(prefix):]
+	if !strings.HasPrefix(rest, tProxyPort) {
+		return false
+	}
+	rest = rest[len(tProxyPort):]
+	const ipPrefix = " --on-ip "
+	if !strings.HasPrefix(rest, ipPrefix) {
+		return false
+	}
+	rest = rest[len(ipPrefix):]
+	if !strings.HasPrefix(rest, ip) {
+		return false
+	}
+	rest = rest[len(ip):]
+	return len(rest) > 0 && rest[0] == ' '
+}
+
 // Redirect packets to the host proxy via TPROXY, as directed by the Cilium
 // datapath bpf programs via skb marks.
 func (m *manager) addProxyRules(prog runnable, ip string, proxyPort uint16, name string) error {
-	rules, err := prog.runProgOutput([]string{"-t", "mangle", "-S"})
+	rules, err := prog.runProgOutput(mangleListRules)
 	if err != nil {
 		return err
 	}
 
-	for _, proto := range []string{"tcp", "udp"} {
-		if err := m.iptProxyRule(rules, prog, proto, ip, proxyPort, name); err != nil {
+	port := uint32(byteorder.HostToNetwork16(proxyPort)) << 16
+	markMatch := "0x" + strconv.FormatUint(uint64(linux_defaults.MagicMarkIsToProxy|port), 16)
+	tProxyPort := strconv.FormatUint(uint64(proxyPort), 10)
+	comment := "cilium: TPROXY to host " + name + " proxy"
+
+	var ruleBuf []string
+	for _, proto := range [...]string{"tcp", "udp"} {
+		if hasProxyRule(rules, proto, markMatch, ip) {
+			continue
+		}
+		ruleBuf = formatProxyRule(ruleBuf, proto, ip, markMatch, tProxyPort, comment)
+		if err := prog.runProg(ruleBuf); err != nil {
 			return err
 		}
 	}
 
 	// Delete all other rules for this same proxy name
 	// These may accumulate if there is a bind failure on a previously used port
-	portAndIPMatch := fmt.Sprintf("TPROXY --on-port %d --on-ip %s ", proxyPort, ip)
-	scanner := bufio.NewScanner(strings.NewReader(rules))
-	for scanner.Scan() {
-		rule := scanner.Text()
-		if !strings.Contains(rule, "-A CILIUM_PRE_mangle ") || !strings.Contains(rule, "cilium: TPROXY to host "+name+" proxy") || strings.Contains(rule, portAndIPMatch) {
+	rem := rules
+	for len(rem) > 0 {
+		var rule string
+		rule, rem, _ = strings.Cut(rem, "\n")
+		if !strings.Contains(rule, "-A CILIUM_PRE_mangle ") || !strings.Contains(rule, comment) || isProxyRuleFor(rule, tProxyPort, ip) {
 			continue
 		}
 
-		args, err := shellwords.Parse(strings.Replace(rule, "-A", "-D", 1))
-		if err != nil {
-			m.logger.Warn(
-				"Unable to parse TPROXY rule",
-				logfields.Error, err,
-				logfields.Prog, prog,
-				logfields.Object, rule,
-			)
-			continue
-		}
-
-		deleteRule := append([]string{"-t", "mangle"}, args...)
-		if err := prog.runProg(deleteRule); err != nil {
+		ruleBuf = parseIptablesDeleteRule(ruleBuf, rule)
+		if err := prog.runProg(ruleBuf); err != nil {
 			return err
 		}
 	}

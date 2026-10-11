@@ -17,6 +17,7 @@ import (
 
 	"github.com/cilium/hive/cell"
 	"github.com/cilium/statedb"
+	"github.com/cilium/statedb/index"
 	"github.com/cilium/statedb/reconciler"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -49,6 +50,11 @@ type Writer struct {
 	selectBackendsFunc         SelectBackendsFunc
 	isServiceHealthCheckedFunc IsServiceHealthCheckedFunc
 	frontendSourceRangesFunc   FrontendSourceRangesFunc
+
+	backendKeyIndex statedb.Index[*loadbalancer.Backend, loadbalancer.BackendKey]
+
+	backendUpdateCtxPool sync.Pool
+	backendPrefixPool    sync.Pool
 }
 
 type SelectBackendsFunc = func(statedb.ReadTxn, iter.Seq2[*loadbalancer.Backend, statedb.Revision], *loadbalancer.Service, *loadbalancer.Frontend) iter.Seq2[*loadbalancer.Backend, statedb.Revision]
@@ -87,6 +93,13 @@ func NewWriter(p writerParams) (*Writer, error) {
 		nodes:            p.Nodes,
 		nodeAddrs:        p.NodeAddresses,
 		sourcePriorities: priorityMapFromSlice(p.SourcePriorities),
+	}
+	if p.Backends != nil {
+		w.backendKeyIndex, _ = p.Backends.PrimaryIndexer().(statedb.Index[*loadbalancer.Backend, loadbalancer.BackendKey])
+	}
+	w.backendPrefixPool.New = func() any {
+		buf := make([]byte, 0, 128)
+		return &buf
 	}
 	w.selectBackendsFunc = w.DefaultSelectBackends
 	return w, nil
@@ -139,6 +152,23 @@ func (w *Writer) SelectBackendsForHealthChecking(txn statedb.ReadTxn, bes iter.S
 func (w *Writer) BackendsForService(txn statedb.ReadTxn, svc loadbalancer.ServiceName) (iter.Seq2[*loadbalancer.Backend, statedb.Revision], <-chan struct{}) {
 	bes, watch := loadbalancer.ListBackendsByServiceName(txn, w.bes, svc)
 	return loadbalancer.PreferredBackendsByAddress(bes), watch
+}
+
+func (w *Writer) backendsForService(txn statedb.ReadTxn, svc loadbalancer.ServiceName) iter.Seq2[*loadbalancer.Backend, statedb.Revision] {
+	return loadbalancer.PreferredBackendsByAddress(w.listBackendsByServiceName(txn, svc))
+}
+
+func (w *Writer) listBackendsByServiceName(txn statedb.ReadTxn, svc loadbalancer.ServiceName) iter.Seq2[*loadbalancer.Backend, statedb.Revision] {
+	if w.backendKeyIndex.Name != "" {
+		buf := w.getBackendPrefixBuf()
+		*buf = append(*buf, svc.Key()...)
+		*buf = append(*buf, 0x00)
+		seq := w.bes.Prefix(txn, w.backendKeyIndex.QueryFromKey(index.Key(*buf)))
+		w.putBackendPrefixBuf(buf)
+		return seq
+	}
+	seq, _ := loadbalancer.ListBackendsByServiceName(txn, w.bes, svc)
+	return seq
 }
 
 func priorityMapFromSlice(s source.Sources) map[source.Source]uint8 {
@@ -275,7 +305,20 @@ func (w *Writer) UpdateBackendHealth(txn WriteTxn, serviceName loadbalancer.Serv
 	found := false
 	changed := false
 	now := time.Now()
-	bes, _ := loadbalancer.ListBackendsByServiceNameAndAddress(txn, w.bes, serviceName, backend)
+	var bes iter.Seq2[*loadbalancer.Backend, statedb.Revision]
+	if w.backendKeyIndex.Name != "" {
+		nameKey := serviceName.Key()
+		addrKey := backend.Bytes()
+		buf := w.getBackendPrefixBuf()
+		*buf = append(*buf, nameKey...)
+		*buf = append(*buf, 0x00)
+		*buf = append(*buf, addrKey...)
+		*buf = append(*buf, 0x00)
+		bes = w.bes.Prefix(txn, w.backendKeyIndex.QueryFromKey(index.Key(*buf)))
+		w.putBackendPrefixBuf(buf)
+	} else {
+		bes, _ = loadbalancer.ListBackendsByServiceNameAndAddress(txn, w.bes, serviceName, backend)
+	}
 	for be := range bes {
 		found = true
 		// Keep existing timestamp when no state change is needed.
@@ -387,27 +430,36 @@ func (w *Writer) UpsertServiceAndFrontends(txn WriteTxn, svc *loadbalancer.Servi
 		}
 	}
 
-	addrs := sets.New[loadbalancer.L3n4Addr]()
-
 	// Upsert the new frontends
 	for _, params := range fes {
 		params.ServiceName = svc.Name
 		if _, err := w.upsertFrontendParams(txn, params, svc); err != nil {
 			return err
 		}
-		addrs.Insert(params.Address)
 	}
 
-	// Delete orphan frontends
-	for fe := range w.fes.List(txn, loadbalancer.FrontendByServiceName(svc.Name)) {
-		if !addrs.Has(fe.Address) {
-			if _, _, err := w.fes.Delete(txn, fe); err != nil {
-				return err
+	// Delete orphan frontends if the service already existed
+	if found {
+		for fe := range w.fes.List(txn, loadbalancer.FrontendByServiceName(svc.Name)) {
+			if !hasFrontendAddress(fes, fe.Address) {
+				if _, _, err := w.fes.Delete(txn, fe); err != nil {
+					return err
+				}
 			}
 		}
 	}
 
 	return nil
+}
+
+// hasFrontendAddress reports whether addr matches any frontend in fes.
+func hasFrontendAddress(fes []loadbalancer.FrontendParams, addr loadbalancer.L3n4Addr) bool {
+	for i := range fes {
+		if fes[i].Address == addr {
+			return true
+		}
+	}
+	return false
 }
 
 func (w *Writer) updateServiceReferences(txn WriteTxn, svc *loadbalancer.Service) error {
@@ -423,7 +475,7 @@ func (w *Writer) updateServiceReferences(txn WriteTxn, svc *loadbalancer.Service
 	return nil
 }
 
-func (w *Writer) refreshFrontend(txn statedb.ReadTxn, fe *loadbalancer.Frontend) {
+func (w *Writer) refreshFrontendWithBackends(txn statedb.ReadTxn, fe *loadbalancer.Frontend, sharedBes *iter.Seq2[*loadbalancer.Backend, statedb.Revision]) {
 	fe.Status = reconciler.StatusPending()
 	svc := fe.Service
 	if fe.RedirectTo != nil {
@@ -433,9 +485,25 @@ func (w *Writer) refreshFrontend(txn statedb.ReadTxn, fe *loadbalancer.Frontend)
 			return
 		}
 	}
-	bes, _ := w.BackendsForService(txn, svc.Name)
+	var bes iter.Seq2[*loadbalancer.Backend, statedb.Revision]
+	if fe.RedirectTo == nil && sharedBes != nil {
+		if *sharedBes == nil {
+			*sharedBes = w.backendsForService(txn, svc.Name)
+		}
+		bes = *sharedBes
+	} else {
+		bes = w.backendsForService(txn, svc.Name)
+	}
 	fe.Backends = loadbalancer.BackendsSeq2(w.SelectBackends(txn, bes, svc, fe))
-	fe.HealthCheckBackends = loadbalancer.BackendsSeq2(w.SelectBackendsForHealthChecking(txn, bes, svc, fe))
+	if w.isServiceHealthCheckedFunc == nil || !w.isServiceHealthCheckedFunc(svc) {
+		fe.HealthCheckBackends = fe.Backends
+	} else {
+		fe.HealthCheckBackends = loadbalancer.BackendsSeq2(w.SelectBackendsForHealthChecking(txn, bes, svc, fe))
+	}
+}
+
+func (w *Writer) refreshFrontend(txn statedb.ReadTxn, fe *loadbalancer.Frontend) {
+	w.refreshFrontendWithBackends(txn, fe, nil)
 }
 
 func (w *Writer) refreshFrontendSourceRanges(fe *loadbalancer.Frontend) {
@@ -454,9 +522,10 @@ func (w *Writer) refreshFrontendSourceRanges(fe *loadbalancer.Frontend) {
 }
 
 func (w *Writer) RefreshFrontends(txn WriteTxn, name loadbalancer.ServiceName) error {
+	var sharedBes iter.Seq2[*loadbalancer.Backend, statedb.Revision]
 	for fe := range w.fes.List(txn, loadbalancer.FrontendByServiceName(name)) {
 		fe = fe.Clone()
-		w.refreshFrontend(txn, fe)
+		w.refreshFrontendWithBackends(txn, fe, &sharedBes)
 		if _, _, err := w.fes.Insert(txn, fe); err != nil {
 			return err
 		}
@@ -503,9 +572,11 @@ func (w *Writer) topologyPreferenceCandidate(svc *loadbalancer.Service, be *load
 	return !be.Unhealthy && be.UnhealthyUpdatedAt != nil
 }
 
+func alwaysTrueProxyDelegation(loadbalancer.L3n4Addr) bool { return true }
+
 func (w *Writer) DefaultSelectBackends(txn statedb.ReadTxn, bes iter.Seq2[*loadbalancer.Backend, statedb.Revision], svc *loadbalancer.Service, fe *loadbalancer.Frontend) iter.Seq2[*loadbalancer.Backend, statedb.Revision] {
 	onlyLocal := false
-	isLocalProxyDelegation := func(loadbalancer.L3n4Addr) bool { return true }
+	isLocalProxyDelegation := alwaysTrueProxyDelegation
 	if fe != nil {
 		onlyLocal = shouldUseLocalBackends(fe)
 	} else {
@@ -562,47 +633,82 @@ func (w *Writer) DefaultSelectBackends(txn statedb.ReadTxn, bes iter.Seq2[*loadb
 	// Check whether the [Backend.ForZones] hints should be consulted when
 	// selecting a backend.
 	checkZoneHints := false
-	var thisZone *string
-	if node, _, found := w.nodes.Get(txn, node.LocalNodeQuery); found {
-		if zone := node.Labels[corev1.LabelTopologyZone]; zone != "" {
-			thisZone = &zone
-		}
-	}
+	var thisZone string
 	if w.config.EnableServiceTopology &&
-		thisZone != nil &&
 		fe != nil && fe.RedirectTo == nil &&
 		(fe.Service.TrafficDistribution == loadbalancer.TrafficDistributionPreferClose ||
 			fe.Service.TrafficDistribution == loadbalancer.TrafficDistributionPreferSameZone) {
-		// Topology-aware routing enabled. See if we can find any backends fitting
-		// for our zone. If we don't find any we fall back to default behaviour.
-		// https://kubernetes.io/docs/concepts/services-networking/topology-aware-routing/#safeguards
-		candidatesFound, missingHints := false, false
-		for be := range bes {
-			if !matchesFrontend(be, fe) {
-				continue
+		if node, _, found := w.nodes.Get(txn, node.LocalNodeQuery); found {
+			thisZone = node.Labels[corev1.LabelTopologyZone]
+		}
+		if thisZone != "" {
+			// Topology-aware routing enabled. See if we can find any backends fitting
+			// for our zone. If we don't find any we fall back to default behaviour.
+			// https://kubernetes.io/docs/concepts/services-networking/topology-aware-routing/#safeguards
+			candidatesFound, missingHints := false, false
+			for be := range bes {
+				if !matchesFrontend(be, fe) {
+					continue
+				}
+				if onlyLocal {
+					if len(be.NodeName) != 0 && be.NodeName != w.nodeName {
+						continue
+					}
+					if !isLocalProxyDelegation(be.Address) {
+						continue
+					}
+				}
+				if !w.topologyPreferenceCandidate(svc, be) {
+					continue
+				}
+
+				if be.Zone != nil && len(be.Zone.ForZones) > 0 {
+					if !candidatesFound && slices.Contains(be.Zone.ForZones, thisZone) {
+						candidatesFound = true
+					}
+				} else {
+					missingHints = true
+					break
+				}
 			}
-			if onlyLocal {
-				if len(be.NodeName) != 0 && be.NodeName != w.nodeName {
+			checkZoneHints = candidatesFound && !missingHints
+		}
+	}
+
+	if !onlyLocal && !checkZoneHints {
+		if fe == nil {
+			return bes
+		}
+		return func(yield func(*loadbalancer.Backend, statedb.Revision) bool) {
+			for be, rev := range bes {
+				if !matchesFrontend(be, fe) {
+					continue
+				}
+				if !yield(be, rev) {
+					return
+				}
+			}
+		}
+	}
+
+	if !checkZoneHints {
+		nodeName := w.nodeName
+		return func(yield func(*loadbalancer.Backend, statedb.Revision) bool) {
+			for be, rev := range bes {
+				if !matchesFrontend(be, fe) {
+					continue
+				}
+				if len(be.NodeName) != 0 && be.NodeName != nodeName {
 					continue
 				}
 				if !isLocalProxyDelegation(be.Address) {
 					continue
 				}
-			}
-			if !w.topologyPreferenceCandidate(svc, be) {
-				continue
-			}
-
-			if be.Zone != nil && len(be.Zone.ForZones) > 0 {
-				if !candidatesFound && slices.Contains(be.Zone.ForZones, *thisZone) {
-					candidatesFound = true
+				if !yield(be, rev) {
+					return
 				}
-			} else {
-				missingHints = true
-				break
 			}
 		}
-		checkZoneHints = candidatesFound && !missingHints
 	}
 
 	return func(yield func(*loadbalancer.Backend, statedb.Revision) bool) {
@@ -622,7 +728,7 @@ func (w *Writer) DefaultSelectBackends(txn statedb.ReadTxn, bes iter.Seq2[*loadb
 			}
 			if checkZoneHints {
 				if be.Zone == nil ||
-					!slices.Contains(be.Zone.ForZones, *thisZone) {
+					!slices.Contains(be.Zone.ForZones, thisZone) {
 					continue
 				}
 			}
@@ -753,7 +859,7 @@ func (w *Writer) SetBackendsOfCluster(txn WriteTxn, name loadbalancer.ServiceNam
 
 	// Release orphaned backends, e.g. all backends from this source referencing this
 	// service that were not updated, i.e. have old revision.
-	serviceBackends, _ := loadbalancer.ListBackendsByServiceName(txn, w.bes, name)
+	serviceBackends := w.listBackendsByServiceName(txn, name)
 	for be := range serviceBackends {
 		if addrs.Has(be.Address) {
 			continue
@@ -770,37 +876,127 @@ func (w *Writer) SetBackendsOfCluster(txn WriteTxn, name loadbalancer.ServiceNam
 	return w.RefreshFrontends(txn, name)
 }
 
-func (w *Writer) updateBackends(txn WriteTxn, serviceName loadbalancer.ServiceName, source source.Source, clusterID uint32, bes iter.Seq[loadbalancer.Backend]) (bool, error) {
-	changed := false
-	srcPrio := w.sourcePriority(source)
-	for be := range bes {
-		be.Source = source
-		be.ClusterID = clusterID
-		be.SetSourcePriority(srcPrio)
-		be.ServiceName = serviceName
+type backendUpdateContext struct {
+	w           *Writer
+	txn         WriteTxn
+	serviceName loadbalancer.ServiceName
+	source      source.Source
+	clusterID   uint32
+	srcPrio     uint8
+	err         error
+	yield       func(loadbalancer.Backend) bool
+	keyBuf      []byte
+}
 
+func (ctx *backendUpdateContext) doYield(be loadbalancer.Backend) bool {
+	be.Source = ctx.source
+	be.ClusterID = ctx.clusterID
+	be.SetSourcePriority(ctx.srcPrio)
+	be.ServiceName = ctx.serviceName
+
+	var (
+		old *loadbalancer.Backend
+		ok  bool
+	)
+	if ctx.w.backendKeyIndex.Name != "" {
+		ctx.keyBuf = ctx.keyBuf[:0]
+		ctx.keyBuf = append(ctx.keyBuf, ctx.serviceName.Key()...)
+		ctx.keyBuf = append(ctx.keyBuf, 0x00)
+		ctx.keyBuf = append(ctx.keyBuf, be.Address.Bytes()...)
+		ctx.keyBuf = append(ctx.keyBuf, 0x00)
+		ctx.keyBuf = append(ctx.keyBuf, ctx.srcPrio)
+		old, _, ok = ctx.w.bes.Get(ctx.txn.WriteTxn, ctx.w.backendKeyIndex.QueryFromKey(index.Key(ctx.keyBuf)))
+	} else {
 		key := loadbalancer.BackendKey{
-			ServiceName:    serviceName,
+			ServiceName:    ctx.serviceName,
 			Address:        be.Address,
-			SourcePriority: srcPrio,
+			SourcePriority: ctx.srcPrio,
 		}
+		old, _, ok = ctx.w.bes.Get(ctx.txn.WriteTxn, loadbalancer.BackendByKey(key))
+	}
 
-		if old, _, ok := w.bes.Get(txn, loadbalancer.BackendByKey(key)); ok {
-			// Preserve health information.
-			be.Unhealthy = old.Unhealthy
-			be.UnhealthyUpdatedAt = old.UnhealthyUpdatedAt
-			if old.DeepEqual(&be) {
-				// None of the parameters have changed. Skip the update.
-				continue
-			}
-		}
-
-		changed = true
-		if _, _, err := w.bes.Insert(txn, &be); err != nil {
-			return false, err
+	if ok {
+		// Preserve health information.
+		be.Unhealthy = old.Unhealthy
+		be.UnhealthyUpdatedAt = old.UnhealthyUpdatedAt
+		if old.DeepEqual(&be) {
+			// None of the parameters have changed. Skip the update.
+			return true
 		}
 	}
-	return changed, nil
+
+	beToInsert := be
+	if _, _, ctx.err = ctx.w.bes.Insert(ctx.txn.WriteTxn, &beToInsert); ctx.err != nil {
+		return false
+	}
+	return true
+}
+
+func (w *Writer) getBackendUpdateContext() *backendUpdateContext {
+	if v := w.backendUpdateCtxPool.Get(); v != nil {
+		return v.(*backendUpdateContext)
+	}
+	ctx := &backendUpdateContext{
+		keyBuf: make([]byte, 0, 128),
+	}
+	ctx.yield = ctx.doYield
+	return ctx
+}
+
+func (w *Writer) putBackendUpdateContext(ctx *backendUpdateContext) {
+	ctx.w = nil
+	ctx.txn = WriteTxn{}
+	ctx.serviceName = loadbalancer.ServiceName{}
+	ctx.source = ""
+	ctx.clusterID = 0
+	ctx.srcPrio = 0
+	ctx.err = nil
+	if cap(ctx.keyBuf) > 1024 {
+		ctx.keyBuf = make([]byte, 0, 128)
+	} else {
+		ctx.keyBuf = ctx.keyBuf[:0]
+	}
+	w.backendUpdateCtxPool.Put(ctx)
+}
+
+func (w *Writer) getBackendPrefixBuf() *[]byte {
+	if v := w.backendPrefixPool.Get(); v != nil {
+		buf := v.(*[]byte)
+		*buf = (*buf)[:0]
+		return buf
+	}
+	buf := make([]byte, 0, 128)
+	return &buf
+}
+
+func (w *Writer) putBackendPrefixBuf(buf *[]byte) {
+	if cap(*buf) > 1024 {
+		*buf = make([]byte, 0, 128)
+	} else {
+		*buf = (*buf)[:0]
+	}
+	w.backendPrefixPool.Put(buf)
+}
+
+func (w *Writer) updateBackends(txn WriteTxn, serviceName loadbalancer.ServiceName, source source.Source, clusterID uint32, bes iter.Seq[loadbalancer.Backend]) (bool, error) {
+	revBefore := w.bes.Revision(txn.WriteTxn)
+	ctx := w.getBackendUpdateContext()
+	ctx.w = w
+	ctx.txn = txn
+	ctx.serviceName = serviceName
+	ctx.source = source
+	ctx.clusterID = clusterID
+	ctx.srcPrio = w.sourcePriority(source)
+	ctx.err = nil
+
+	bes(ctx.yield)
+
+	err := ctx.err
+	w.putBackendUpdateContext(ctx)
+	if err != nil {
+		return false, err
+	}
+	return w.bes.Revision(txn.WriteTxn) != revBefore, nil
 }
 
 func (w *Writer) DeleteBackendsOfService(txn WriteTxn, name loadbalancer.ServiceName, src source.Source) error {
@@ -809,7 +1005,7 @@ func (w *Writer) DeleteBackendsOfService(txn WriteTxn, name loadbalancer.Service
 
 func (w *Writer) DeleteBackendsOfServiceFromCluster(txn WriteTxn, name loadbalancer.ServiceName, src source.Source, clusterID uint32) error {
 	var toDelete []*loadbalancer.Backend
-	bes, _ := loadbalancer.ListBackendsByServiceName(txn, w.bes, name)
+	bes := w.listBackendsByServiceName(txn, name)
 	for be := range bes {
 		if be.Source == src && be.ClusterID == clusterID {
 			toDelete = append(toDelete, be)
