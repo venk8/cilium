@@ -43,7 +43,9 @@ func NewFence(lc cell.Lifecycle, log *slog.Logger) Fence {
 		log:       log,
 		waitFuncs: map[string]WaitFunc{},
 	}
-	lc.Append(iwg)
+	lc.Append(cell.Hook{
+		OnStart: iwg.Start,
+	})
 	return iwg
 }
 
@@ -91,17 +93,25 @@ func (w *fence) Wait(ctx context.Context) error {
 	remaining := len(w.waitFuncs)
 	for name, fn := range w.waitFuncs {
 		t0 := time.Now()
-		log := w.log.With(
-			nameLogField, name,
-			logfields.Remaining, remaining,
+		attrName := slog.String(nameLogField, name)
+		attrRemaining := slog.Int(logfields.Remaining, remaining)
+		w.log.LogAttrs(ctx, slog.LevelInfo, "Fence waiting",
+			attrName,
+			attrRemaining,
 		)
-		log.Info("Fence waiting")
 		if err := fn(ctx); err != nil {
-			log.Info("Fence error",
-				logfields.Error, err)
+			w.log.LogAttrs(ctx, slog.LevelInfo, "Fence error",
+				attrName,
+				attrRemaining,
+				slog.Any(logfields.Error, err),
+			)
 			return fmt.Errorf("%s: %w", name, err)
 		}
-		log.Info("Fence done", logfields.Duration, time.Since(t0))
+		w.log.LogAttrs(ctx, slog.LevelInfo, "Fence done",
+			attrName,
+			attrRemaining,
+			slog.Duration(logfields.Duration, time.Since(t0)),
+		)
 		remaining--
 		delete(w.waitFuncs, name)
 	}
@@ -109,7 +119,6 @@ func (w *fence) Wait(ctx context.Context) error {
 	return nil
 }
 
-// Start implements cell.HookInterface.
 func (w *fence) Start(ctx cell.HookContext) error {
 	if err := w.mu.Lock(ctx); err != nil {
 		return err
@@ -118,13 +127,6 @@ func (w *fence) Start(ctx cell.HookContext) error {
 	w.started = true
 	return nil
 }
-
-// Stop implements cell.HookInterface.
-func (w *fence) Stop(cell.HookContext) error {
-	return nil
-}
-
-var _ cell.HookInterface = &fence{}
 
 type contextMutex struct {
 	sem *semaphore.Weighted

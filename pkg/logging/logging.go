@@ -80,17 +80,22 @@ func (o LogOptions) GetLogFormat() LogFormat {
 		return DefaultLogFormatTimestamp
 	}
 
-	formatOpt = strings.ToLower(formatOpt)
-	re := regexp.MustCompile(`^(text|text-ts|json|json-ts)$`)
-	if !re.MatchString(formatOpt) {
+	switch {
+	case strings.EqualFold(formatOpt, string(LogFormatText)):
+		return LogFormatText
+	case strings.EqualFold(formatOpt, string(LogFormatTextTimestamp)):
+		return LogFormatTextTimestamp
+	case strings.EqualFold(formatOpt, string(LogFormatJSON)):
+		return LogFormatJSON
+	case strings.EqualFold(formatOpt, string(LogFormatJSONTimestamp)):
+		return LogFormatJSONTimestamp
+	default:
 		DefaultSlogLogger.Warn(
 			"Ignoring user-configured log format",
-			logfields.Error, fmt.Errorf("incorrect log format configured '%s', expected 'text', 'text-ts', 'json' or 'json-ts'", formatOpt),
+			logfields.Error, fmt.Errorf("incorrect log format configured '%s', expected 'text', 'text-ts', 'json' or 'json-ts'", strings.ToLower(formatOpt)),
 		)
 		return DefaultLogFormatTimestamp
 	}
-
-	return LogFormat(formatOpt)
 }
 
 // SetLogLevel updates the DefaultLogger with a new slog.Level

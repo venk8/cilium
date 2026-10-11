@@ -12,7 +12,9 @@ import (
 	"net/url"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	runtime_client "github.com/go-openapi/runtime/client"
@@ -176,32 +178,175 @@ func SummarizePathConnectivityStatusType(cps []*models.PathStatus) map[Connectiv
 	return status
 }
 
-func formatConnectivityStatus(w io.Writer, cs *models.ConnectivityStatus, path, indent string) {
-	status := cs.Status
-	lastProbed := cs.LastProbed
-	switch GetConnectivityStatusType(cs) {
-	case ConnStatusReachable:
-		latency := time.Duration(cs.Latency)
-		status = fmt.Sprintf("OK, RTT=%s", latency)
+func summarizeNodePaths(hasParent bool, primary *models.PathStatus, secondaries []*models.PathStatus) (reachable, unknown, total int, healthy bool) {
+	healthy = true
+	if !hasParent {
+		return
 	}
-	fmt.Fprintf(w, "%s%s:\t%s\t(Last probed: %s)\n", indent, path, status, lastProbed)
+	total = 1 + len(secondaries)
+	switch GetPathConnectivityStatusType(primary) {
+	case ConnStatusReachable:
+		reachable++
+	case ConnStatusUnknown:
+		unknown++
+	case ConnStatusUnreachable:
+		healthy = false
+	}
+	for _, addr := range secondaries {
+		switch GetPathConnectivityStatusType(addr) {
+		case ConnStatusReachable:
+			reachable++
+		case ConnStatusUnknown:
+			unknown++
+		case ConnStatusUnreachable:
+			healthy = false
+		}
+	}
+	return
+}
+
+var durationBufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 0, 32)
+		return &b
+	},
+}
+
+var pow10 = [...]uint64{
+	1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000, 1000000000,
+}
+
+func appendDuration(buf []byte, d time.Duration) []byte {
+	if d == 0 {
+		return append(buf, "0s"...)
+	}
+
+	u := uint64(d)
+	if d < 0 {
+		buf = append(buf, '-')
+		u = -u
+	}
+
+	if u < uint64(time.Second) {
+		var unit string
+		var divisor uint64
+		var prec int
+
+		if u < uint64(time.Microsecond) {
+			buf = strconv.AppendUint(buf, u, 10)
+			return append(buf, "ns"...)
+		} else if u < uint64(time.Millisecond) {
+			unit = "µs"
+			divisor = uint64(time.Microsecond)
+			prec = 3
+		} else {
+			unit = "ms"
+			divisor = uint64(time.Millisecond)
+			prec = 6
+		}
+
+		buf = strconv.AppendUint(buf, u/divisor, 10)
+		frac := u % divisor
+		if frac > 0 {
+			buf = append(buf, '.')
+			for frac%10 == 0 {
+				frac /= 10
+				prec--
+			}
+			for i := prec - 1; i > 0; i-- {
+				if frac < pow10[i] {
+					buf = append(buf, '0')
+				} else {
+					break
+				}
+			}
+			buf = strconv.AppendUint(buf, frac, 10)
+		}
+		return append(buf, unit...)
+	}
+
+	if u >= uint64(time.Hour) {
+		buf = strconv.AppendUint(buf, u/uint64(time.Hour), 10)
+		buf = append(buf, 'h')
+		u %= uint64(time.Hour)
+		buf = strconv.AppendUint(buf, u/uint64(time.Minute), 10)
+		buf = append(buf, 'm')
+		u %= uint64(time.Minute)
+	} else if u >= uint64(time.Minute) {
+		buf = strconv.AppendUint(buf, u/uint64(time.Minute), 10)
+		buf = append(buf, 'm')
+		u %= uint64(time.Minute)
+	}
+
+	buf = strconv.AppendUint(buf, u/uint64(time.Second), 10)
+	frac := u % uint64(time.Second)
+	if frac > 0 {
+		buf = append(buf, '.')
+		prec := 9
+		for frac%10 == 0 {
+			frac /= 10
+			prec--
+		}
+		for i := prec - 1; i > 0; i-- {
+			if frac < pow10[i] {
+				buf = append(buf, '0')
+			} else {
+				break
+			}
+		}
+		buf = strconv.AppendUint(buf, frac, 10)
+	}
+	buf = append(buf, 's')
+
+	return buf
+}
+
+func writeDuration(w io.Writer, d time.Duration) {
+	bufPtr := durationBufPool.Get().(*[]byte)
+	buf := appendDuration((*bufPtr)[:0], d)
+	w.Write(buf)
+	if cap(buf) <= 64 {
+		*bufPtr = buf[:0]
+		durationBufPool.Put(bufPtr)
+	}
+}
+
+func formatConnectivityStatus(w io.Writer, cs *models.ConnectivityStatus, path, indent, subIndent string) {
+	io.WriteString(w, indent)
+	io.WriteString(w, subIndent)
+	io.WriteString(w, path)
+	io.WriteString(w, ":\t")
+	if GetConnectivityStatusType(cs) == ConnStatusReachable {
+		io.WriteString(w, "OK, RTT=")
+		writeDuration(w, time.Duration(cs.Latency))
+	} else {
+		io.WriteString(w, cs.Status)
+	}
+	io.WriteString(w, "\t(Last probed: ")
+	io.WriteString(w, cs.LastProbed)
+	io.WriteString(w, ")\n")
 }
 
 func formatPathStatus(w io.Writer, name string, cp *models.PathStatus, indent string, verbose bool) {
 	if cp == nil {
 		if verbose {
-			fmt.Fprintf(w, "%s%s connectivity:\tnil\n", indent, name)
+			io.WriteString(w, indent)
+			io.WriteString(w, name)
+			io.WriteString(w, " connectivity:\tnil\n")
 		}
 		return
 	}
-	fmt.Fprintf(w, "%s%s connectivity to %s:\n", indent, name, cp.IP)
-	indent = fmt.Sprintf("%s  ", indent)
+	io.WriteString(w, indent)
+	io.WriteString(w, name)
+	io.WriteString(w, " connectivity to ")
+	io.WriteString(w, cp.IP)
+	io.WriteString(w, ":\n")
 
 	if cp.Icmp != nil {
-		formatConnectivityStatus(w, cp.Icmp, "ICMP to stack", indent)
+		formatConnectivityStatus(w, cp.Icmp, "ICMP to stack", indent, "  ")
 	}
 	if cp.HTTP != nil {
-		formatConnectivityStatus(w, cp.HTTP, "HTTP to agent", indent)
+		formatConnectivityStatus(w, cp.HTTP, "HTTP to agent", indent, "  ")
 	}
 }
 
@@ -229,8 +374,9 @@ func allPathsAreHealthyOrUnknown(cps []*models.PathStatus) bool {
 }
 
 func nodeIsHealthy(node *models.NodeStatus) bool {
-	return allPathsAreHealthyOrUnknown(GetAllHostAddresses(node)) &&
-		allPathsAreHealthyOrUnknown(GetAllEndpointAddresses(node))
+	_, _, _, hostHealthy := summarizeNodePaths(node.Host != nil, GetHostPrimaryAddress(node), GetHostSecondaryAddresses(node))
+	_, _, _, epHealthy := summarizeNodePaths(node.HealthEndpoint != nil, GetEndpointPrimaryAddress(node), GetEndpointSecondaryAddresses(node))
+	return hostHealthy && epHealthy
 }
 
 func nodeIsLocalhost(node *models.NodeStatus, self *models.SelfStatus) bool {
@@ -313,17 +459,18 @@ func formatNodeStatus(w io.Writer, node *models.NodeStatus, allNodes, verbose, l
 	}
 
 	if verbose {
-		fmt.Fprintf(w, "  %s%s:\n", node.Name, localStr)
+		io.WriteString(w, "  ")
+		io.WriteString(w, node.Name)
+		io.WriteString(w, localStr)
+		io.WriteString(w, ":\n")
 		formatPathStatus(w, "Host", GetHostPrimaryAddress(node), "    ", verbose)
-		unhealthyPaths := !allPathsAreHealthyOrUnknown(GetHostSecondaryAddresses(node))
-		if (verbose || unhealthyPaths) && node.Host != nil {
+		if node.Host != nil {
 			for _, addr := range node.Host.SecondaryAddresses {
 				formatPathStatus(w, "Secondary Host", addr, "    ", verbose)
 			}
 		}
 		formatPathStatus(w, "Endpoint", GetEndpointPrimaryAddress(node), "    ", verbose)
-		unhealthyPaths = !allPathsAreHealthyOrUnknown(GetEndpointSecondaryAddresses(node))
-		if (verbose || unhealthyPaths) && node.HealthEndpoint != nil {
+		if node.HealthEndpoint != nil {
 			for _, addr := range node.HealthEndpoint.SecondaryAddresses {
 				formatPathStatus(w, "Secondary Endpoint", addr, "    ", verbose)
 			}
@@ -331,46 +478,42 @@ func formatNodeStatus(w io.Writer, node *models.NodeStatus, allNodes, verbose, l
 		return true
 	}
 
-	hostStatuses := SummarizePathConnectivityStatusType(GetAllHostAddresses(node))
-	endpointStatuses := SummarizePathConnectivityStatusType(GetAllEndpointAddresses(node))
+	hostReachable, hostUnknown, hostTotal, hostHealthy := summarizeNodePaths(node.Host != nil, GetHostPrimaryAddress(node), GetHostSecondaryAddresses(node))
+	epReachable, epUnknown, epTotal, epHealthy := summarizeNodePaths(node.HealthEndpoint != nil, GetEndpointPrimaryAddress(node), GetEndpointSecondaryAddresses(node))
+	nodeHealthy := hostHealthy && epHealthy
 
-	if !nodeIsHealthy(node) {
-		ips := []string{getPrimaryAddressIP(node)}
+	if !nodeHealthy || allNodes {
+		io.WriteString(w, "  ")
+		io.WriteString(w, node.Name)
+		io.WriteString(w, localStr)
+		io.WriteString(w, "\t")
+		io.WriteString(w, getPrimaryAddressIP(node))
 		for _, addr := range GetHostSecondaryAddresses(node) {
 			if addr == nil {
 				continue
 			}
-			ips = append(ips, addr.IP)
+			io.WriteString(w, ",")
+			io.WriteString(w, addr.IP)
 		}
-		fmt.Fprintf(w, "  %s%s\t%s\t%d/%d", node.Name, localStr, strings.Join(ips, ","), hostStatuses[ConnStatusReachable], len(GetAllHostAddresses(node)))
-		if hostStatuses[ConnStatusUnknown] > 0 {
-			fmt.Fprintf(w, " (%d unknown)", hostStatuses[ConnStatusUnknown])
+		io.WriteString(w, "\t")
+		io.WriteString(w, strconv.Itoa(hostReachable))
+		io.WriteString(w, "/")
+		io.WriteString(w, strconv.Itoa(hostTotal))
+		if hostUnknown > 0 {
+			io.WriteString(w, " (")
+			io.WriteString(w, strconv.Itoa(hostUnknown))
+			io.WriteString(w, " unknown)")
 		}
-		fmt.Fprintf(w, "\t%d/%d", endpointStatuses[ConnStatusReachable], len(GetAllEndpointAddresses(node)))
-		if endpointStatuses[ConnStatusUnknown] > 0 {
-			fmt.Fprintf(w, " (%d unknown)", endpointStatuses[ConnStatusUnknown])
+		io.WriteString(w, "\t")
+		io.WriteString(w, strconv.Itoa(epReachable))
+		io.WriteString(w, "/")
+		io.WriteString(w, strconv.Itoa(epTotal))
+		if epUnknown > 0 {
+			io.WriteString(w, " (")
+			io.WriteString(w, strconv.Itoa(epUnknown))
+			io.WriteString(w, " unknown)")
 		}
-		fmt.Fprintf(w, "\n")
-		return true
-	}
-
-	if allNodes {
-		ips := []string{getPrimaryAddressIP(node)}
-		for _, addr := range GetHostSecondaryAddresses(node) {
-			if addr == nil {
-				continue
-			}
-			ips = append(ips, addr.IP)
-		}
-		fmt.Fprintf(w, "  %s%s\t%s\t%d/%d", node.Name, localStr, strings.Join(ips, ","), hostStatuses[ConnStatusReachable], len(GetAllHostAddresses(node)))
-		if hostStatuses[ConnStatusUnknown] > 0 {
-			fmt.Fprintf(w, " (%d unknown)", hostStatuses[ConnStatusUnknown])
-		}
-		fmt.Fprintf(w, "\t%d/%d", endpointStatuses[ConnStatusReachable], len(GetAllEndpointAddresses(node)))
-		if endpointStatuses[ConnStatusUnknown] > 0 {
-			fmt.Fprintf(w, " (%d unknown)", endpointStatuses[ConnStatusUnknown])
-		}
-		fmt.Fprintf(w, "\n")
+		io.WriteString(w, "\n")
 		return true
 	}
 
