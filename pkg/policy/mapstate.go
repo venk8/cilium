@@ -95,6 +95,10 @@ type mapState struct {
 	trie bitlpm.Trie[types.LPMKey, *idSlice]
 	// idIndex indexes entries by ID
 	byId map[identity.NumericIdentity]LPMKeys
+	// originMerges memoizes merged rule origins during mapState construction
+	// to avoid redundant string building and interning when multiple keys share the
+	// same rule origin pair.
+	originMerges map[[2]ruleOrigin]ruleOrigin
 }
 
 type IDSet map[identity.NumericIdentity]struct{}
@@ -904,6 +908,31 @@ func (e mapStateEntry) String() string {
 	return e.MapStateEntry.String() + labelText + pass
 }
 
+func (ms *mapState) mergeRuleOrigins(a, b ruleOrigin) ruleOrigin {
+	if a == b {
+		return a
+	}
+	if a == NilRuleOrigin {
+		return b
+	}
+	if b == NilRuleOrigin {
+		return a
+	}
+	if ms.originMerges != nil {
+		if merged, ok := ms.originMerges[[2]ruleOrigin{a, b}]; ok {
+			return merged
+		}
+		if merged, ok := ms.originMerges[[2]ruleOrigin{b, a}]; ok {
+			return merged
+		}
+	} else {
+		ms.originMerges = make(map[[2]ruleOrigin]ruleOrigin)
+	}
+	merged := a.Merge(b)
+	ms.originMerges[[2]ruleOrigin{a, b}] = merged
+	return merged
+}
+
 // addKeyWithChanges adds a 'key' with value 'entry' to 'keys' keeping track of incremental changes in 'adds' and 'deletes', and any changed or removed old values in 'old', if not nil.
 func (ms *mapState) addKeyWithChanges(key Key, entry mapStateEntry, changes ChangeState) bool {
 	var datapathEqual bool
@@ -938,7 +967,7 @@ func (ms *mapState) addKeyWithChanges(key Key, entry mapStateEntry, changes Chan
 			if oldEntry.Precedence.ProxyPortPrecedenceMayDiffer(entry.Precedence) {
 				// entries on same priority level are merged
 				oldEntry.MapStateEntry.Merge(entry.MapStateEntry)
-				oldEntry.derivedFromRules = oldEntry.derivedFromRules.Merge(entry.derivedFromRules)
+				oldEntry.derivedFromRules = ms.mergeRuleOrigins(oldEntry.derivedFromRules, entry.derivedFromRules)
 			} else if oldEntry.Precedence < entry.Precedence {
 				// higher precedence entry takes over
 				oldEntry.MapStateEntry = entry.MapStateEntry
