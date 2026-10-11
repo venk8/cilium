@@ -7,6 +7,7 @@ import (
 	"context"
 	"log/slog"
 	"math/rand/v2"
+	"slices"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -56,10 +57,8 @@ func (r *secretSyncer) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Re
 		return controllerruntime.Fail(err)
 	}
 
-	cleanupNamespaces := map[string]struct{}{}
-	for _, ns := range r.secretNamespaces {
-		cleanupNamespaces[ns] = struct{}{}
-	}
+	var syncedBuf [4]string
+	syncedNamespaces := syncedBuf[:0]
 
 	synced := false
 	for _, reg := range r.registrations {
@@ -76,7 +75,7 @@ func (r *secretSyncer) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Re
 			}
 
 			synced = true
-			delete(cleanupNamespaces, reg.SecretsNamespace)
+			syncedNamespaces = append(syncedNamespaces, reg.SecretsNamespace)
 		}
 	}
 
@@ -84,7 +83,13 @@ func (r *secretSyncer) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Re
 
 	// Check whether synced secret needs to be deleted from the secret namespaces
 	// where the secret is no longer referenced by any registration.
-	for ns := range cleanupNamespaces {
+	for i, ns := range r.secretNamespaces {
+		if slices.Contains(syncedNamespaces, ns) {
+			continue
+		}
+		if slices.Contains(r.secretNamespaces[:i], ns) {
+			continue
+		}
 		// Check if there's an existing synced secret that should be deleted
 		deleted, err := r.cleanupSyncedSecret(ctx, req, scopedLog, ns, syncnames.SyncedSecretName, syncnames.LegacySyncedSecretName)
 		if err != nil {
@@ -197,6 +202,10 @@ func (r *secretSyncer) ensureSyncedSecret(ctx context.Context, desired *corev1.S
 			return err
 		}
 		return r.client.Create(ctx, desired)
+	}
+
+	if !syncedSecretNeedsUpdate(existing, desired) {
+		return nil
 	}
 
 	temp := existing.DeepCopy()

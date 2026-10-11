@@ -87,9 +87,15 @@ func newServer(
 }
 
 func (s *server) Start(ctx cell.HookContext) error {
-	spec, err := loads.Analyzed(operatorApi.SwaggerJSON, "")
-	if err != nil {
-		return err
+	var spec *loads.Document
+	if s.apiSpec != nil && s.apiSpec.Document != nil {
+		spec = s.apiSpec.Document
+	} else {
+		var err error
+		spec, err = loads.Analyzed(operatorApi.SwaggerJSON, "")
+		if err != nil {
+			return err
+		}
 	}
 
 	restAPI := restapi.NewCiliumOperatorAPI(spec)
@@ -98,7 +104,9 @@ func (s *server) Start(ctx cell.HookContext) error {
 	restAPI.MetricsGetMetricsHandler = s.metricsHandler
 	restAPI.ClusterGetClusterHandler = s.clusterHandler
 
-	api.DisableAPIs(s.logger, s.apiSpec.DeniedAPIs, restAPI.AddMiddlewareFor)
+	if s.apiSpec != nil {
+		api.DisableAPIs(s.logger, s.apiSpec.DeniedAPIs, restAPI.AddMiddlewareFor)
+	}
 	srv := operatorApi.NewServer(restAPI)
 	srv.EnabledListeners = []string{"http"}
 	srv.ConfigureAPI()

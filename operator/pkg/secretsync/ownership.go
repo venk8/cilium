@@ -4,10 +4,13 @@
 package secretsync
 
 import (
+	"bytes"
 	"fmt"
 	"maps"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -66,4 +69,26 @@ func setSourceAnnotations(obj client.Object, kind string, source types.Namespace
 	annotations[SourceNameAnnotation] = source.Name
 
 	obj.SetAnnotations(annotations)
+}
+
+func syncedSecretNeedsUpdate(existing, desired *corev1.Secret) bool {
+	if existing.Type != desired.Type {
+		return true
+	}
+	if !ptr.Equal(existing.Immutable, desired.Immutable) {
+		return true
+	}
+	if !maps.Equal(existing.Labels, desired.Labels) {
+		return true
+	}
+	if !maps.Equal(existing.Annotations, desired.Annotations) {
+		return true
+	}
+	if !maps.EqualFunc(existing.Data, desired.Data, bytes.Equal) {
+		return true
+	}
+	if !maps.Equal(existing.StringData, desired.StringData) {
+		return true
+	}
+	return false
 }

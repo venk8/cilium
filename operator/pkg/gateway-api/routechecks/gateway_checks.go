@@ -8,7 +8,9 @@ import (
 	"slices"
 
 	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
@@ -29,6 +31,8 @@ func CheckGatewayAllowedForNamespace(input Input, parentRef gatewayv1.ParentRefe
 	listeners := owner.GetListeners()
 	allListenerHostNames := GetAllListenerHostNames(listeners)
 	hasNamespaceRestriction := false
+	var targetNamespace *corev1.Namespace
+	var targetNamespaceNotFound bool
 	for _, listener := range listeners {
 		if parentRef.SectionName != nil && listener.Name != *parentRef.SectionName {
 			continue
@@ -54,16 +58,29 @@ func CheckGatewayAllowedForNamespace(input Input, parentRef gatewayv1.ParentRefe
 				return true, nil
 			}
 		case gatewayv1.NamespacesFromSelector:
-			nsList := &corev1.NamespaceList{}
-			selector, _ := metav1.LabelSelectorAsSelector(listener.AllowedRoutes.Namespaces.Selector)
-			if err := input.GetClient().List(input.GetContext(), nsList, client.MatchingLabelsSelector{Selector: selector}); err != nil {
-				return false, fmt.Errorf("unable to list namespaces: %w", err)
+			if targetNamespace == nil && !targetNamespaceNotFound {
+				ns := &corev1.Namespace{}
+				if err := input.GetClient().Get(input.GetContext(), client.ObjectKey{Name: input.GetNamespace()}, ns); err != nil {
+					if !k8serrors.IsNotFound(err) {
+						return false, fmt.Errorf("unable to get namespace %q: %w", input.GetNamespace(), err)
+					}
+					targetNamespaceNotFound = true
+				} else {
+					targetNamespace = ns
+				}
 			}
 
-			for _, ns := range nsList.Items {
-				if ns.Name == input.GetNamespace() {
-					return true, nil
-				}
+			if targetNamespaceNotFound {
+				continue
+			}
+
+			selector, err := metav1.LabelSelectorAsSelector(listener.AllowedRoutes.Namespaces.Selector)
+			if err != nil {
+				return false, fmt.Errorf("unable to parse label selector: %w", err)
+			}
+
+			if selector.Matches(labels.Set(targetNamespace.Labels)) {
+				return true, nil
 			}
 		}
 	}
