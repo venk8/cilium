@@ -1397,20 +1397,65 @@ func (m *manager) doGetProxyPorts(prog iptablesInterface) map[string]uint16 {
 		return portMap
 	}
 
-	re := regexp.MustCompile(
-		"/\\* cilium: TPROXY to host ([^ ]+) proxy \\*/ TPROXY redirect " +
-			"(0.0.0.0|" + ipfamily.IPv4().Localhost +
-			"|::|" + ipfamily.IPv6().Localhost + ")" +
-			":([1-9][0-9]*) mark",
+	const (
+		commentPrefix = "/* cilium: TPROXY to host "
+		middlePrefix  = " proxy */ TPROXY redirect "
 	)
-	strs := re.FindAllString(rules, -1)
-	for _, str := range strs {
-		// Pick the name and port number from each match
-		name := re.ReplaceAllString(str, "$1")
-		portStr := re.ReplaceAllString(str, "$3")
-		portUInt64, err := strconv.ParseUint(portStr, 10, 16)
+	ipv4Localhost := ipfamily.IPv4().Localhost
+	ipv6Localhost := ipfamily.IPv6().Localhost
+
+	rem := rules
+	for len(rem) > 0 {
+		var line string
+		line, rem, _ = strings.Cut(rem, "\n")
+
+		idx := strings.Index(line, commentPrefix)
+		if idx < 0 {
+			continue
+		}
+		rest := line[idx+len(commentPrefix):]
+
+		spaceIdx := strings.IndexByte(rest, ' ')
+		if spaceIdx <= 0 {
+			continue
+		}
+		name := rest[:spaceIdx]
+		rest = rest[spaceIdx:]
+
+		if !strings.HasPrefix(rest, middlePrefix) {
+			continue
+		}
+		rest = rest[len(middlePrefix):]
+
+		var matchedIPPrefixLen int
+		switch {
+		case strings.HasPrefix(rest, "0.0.0.0:"):
+			matchedIPPrefixLen = len("0.0.0.0:")
+		case strings.HasPrefix(rest, ":::"):
+			matchedIPPrefixLen = len(":::")
+		case strings.HasPrefix(rest, ipv4Localhost) && len(rest) > len(ipv4Localhost) && rest[len(ipv4Localhost)] == ':':
+			matchedIPPrefixLen = len(ipv4Localhost) + 1
+		case strings.HasPrefix(rest, ipv6Localhost) && len(rest) > len(ipv6Localhost) && rest[len(ipv6Localhost)] == ':':
+			matchedIPPrefixLen = len(ipv6Localhost) + 1
+		default:
+			continue
+		}
+		rest = rest[matchedIPPrefixLen:]
+
+		if len(rest) == 0 || rest[0] < '1' || rest[0] > '9' {
+			continue
+		}
+		portEnd := 1
+		for portEnd < len(rest) && rest[portEnd] >= '0' && rest[portEnd] <= '9' {
+			portEnd++
+		}
+		if !strings.HasPrefix(rest[portEnd:], " mark") {
+			continue
+		}
+
+		portUInt64, err := strconv.ParseUint(rest[:portEnd], 10, 16)
 		if err == nil {
-			portMap[name] = uint16(portUInt64)
+			portMap[strings.Clone(name)] = uint16(portUInt64)
 		}
 	}
 	return portMap
