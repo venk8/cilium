@@ -80,7 +80,9 @@ type Reachable struct {
 
 	// j is a bitmap tracking predicted jumps. If the nth bit is 1, the jump
 	// at the end of block n is predicted to always be taken.
-	j Bitmap
+	j *Bitmap
+
+	lArr [16]uint64
 }
 
 // Reachability determines whether or not each Block in blocks is reachable
@@ -117,19 +119,27 @@ func Reachability(blocks Blocks, insns asm.Instructions, variables map[string]*e
 	// lookup map. This notably includes references to non-constant variables,
 	// which will be rejected later in the branch evaluation logic. They are
 	// included here to ensure that the reachability analysis is conclusive.
-	vars := make(map[mapOffset]*ebpf.VariableSpec)
-	for _, v := range variables {
-		vars[mapOffset{
-			mapName: unique.Make(v.SectionName),
-			offset:  v.Offset,
-		}] = v
+	var vars map[mapOffset]*ebpf.VariableSpec
+	if len(variables) > 0 {
+		vars = make(map[mapOffset]*ebpf.VariableSpec, len(variables))
+		for _, v := range variables {
+			vars[mapOffset{
+				mapName: unique.Make(v.SectionName),
+				offset:  v.Offset,
+			}] = v
+		}
 	}
 
 	r := &Reachable{
 		blocks: blocks,
 		insns:  insns,
-		l:      NewBitmap(uint64(blocks.count())),
-		j:      NewBitmap(uint64(blocks.count())),
+	}
+
+	numWords := (uint64(blocks.count()) + (wordSize - 1)) / wordSize
+	if numWords <= uint64(len(r.lArr)) {
+		r.l = r.lArr[:numWords]
+	} else {
+		r.l = NewBitmap(uint64(blocks.count()))
 	}
 
 	// Start recursing at first block since it is always live.
@@ -146,7 +156,7 @@ func (r *Reachable) Blocks() iter.Seq2[*Block, bool] {
 	return func(yield func(*Block, bool) bool) {
 		iter := r.blocks.iterate(r.insns)
 		for iter.NextBlock() {
-			live := r.l.Get(iter.block.id)
+			live := r.l.Get(uint64(iter.block.id))
 			if !yield(iter.block, live) {
 				return
 			}
@@ -161,7 +171,7 @@ func (r *Reachable) Blocks() iter.Seq2[*Block, bool] {
 func (r *Reachable) Funcs() iter.Seq2[Blocks, bool] {
 	return func(yield func(Blocks, bool) bool) {
 		for f := range r.blocks.funcs(r.insns) {
-			if !yield(f, r.l.Get(f.first().id)) {
+			if !yield(f, r.l.Get(uint64(f.first().id))) {
 				return
 			}
 		}
@@ -178,7 +188,7 @@ func (r *Reachable) Instructions() iter.Seq2[*Iterator, bool] {
 	return func(yield func(*Iterator, bool) bool) {
 		iter := r.blocks.iterate(r.insns)
 		for iter.NextInstruction() {
-			live := r.l.Get(iter.block.id)
+			live := r.l.Get(uint64(iter.block.id))
 			if !yield(iter, live) {
 				return
 			}
@@ -194,7 +204,7 @@ func (r *Reachable) Dump(insns asm.Instructions) string {
 
 		sb.WriteString(fmt.Sprintf("Live: %t, ", r.l.Get(uint64(block.id))))
 		sb.WriteString("branch: ")
-		if r.j.Get(uint64(block.id)) {
+		if r.j != nil && r.j.Get(uint64(block.id)) {
 			sb.WriteString("jump")
 		} else {
 			sb.WriteString("fallthrough")
@@ -385,14 +395,14 @@ func (r *Reachable) visitBlock(b *Block, vars map[mapOffset]*ebpf.VariableSpec) 
 
 	// Don't evaluate the same block twice, this would lead to an infinite loop.
 	// A live block implies a visited block.
-	if r.l.Get(b.id) {
+	if r.l.Get(uint64(b.id)) {
 		return nil
 	}
-	r.l.Set(b.id, true)
+	r.l.Set(uint64(b.id), true)
 
 	// Visit all bpf2bpf callees of this block since they are always reachable, as
 	// references always appear before the block's final jump instruction.
-	for _, callee := range b.calls {
+	for _, callee := range b.calls() {
 		if err := r.visitBlock(callee, vars); err != nil {
 			return fmt.Errorf("visiting callee %d: %w", callee.id, err)
 		}
@@ -419,7 +429,11 @@ func (r *Reachable) visitBlock(b *Block, vars map[mapOffset]*ebpf.VariableSpec) 
 
 	// If the branch is always taken, only visit the branch target.
 	if jump {
-		r.j.Set(b.id, true)
+		if r.j == nil {
+			bm := NewBitmap(uint64(r.blocks.count()))
+			r.j = &bm
+		}
+		r.j.Set(uint64(b.id), true)
 		return r.visitBlock(b.branch, vars)
 	}
 
