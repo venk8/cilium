@@ -89,6 +89,9 @@ type manager struct {
 	selectorChanges chan selectorChange
 	// Any pre-allocated identities for selectors -- used for possible release.
 	selectorIDs map[api.FQDNSelector][]identity.NumericIdentity
+
+	// updatesBuf is a reusable scratch buffer for IPCache batch updates in updateMetadataForName.
+	updatesBuf []ipcache.MU
 }
 
 type selectorChange struct {
@@ -442,7 +445,7 @@ func (n *manager) UpdateGenerateDNS(ctx context.Context, lookupTime time.Time, n
 		}
 	}
 
-	c := make(chan error)
+	c := make(chan error, 1)
 	go func() {
 		c <- n.params.IPCache.WaitForRevision(ctx, ipcacheRevision)
 	}()
@@ -529,7 +532,6 @@ func (n *manager) updateMetadataForName(dnsName string, addrs []netip.Addr, name
 		)
 	}
 
-	updates := make([]ipcache.MU, len(addrs))
 	if resource == "" {
 		resource = ipcacheResource(dnsName)
 	}
@@ -537,19 +539,24 @@ func (n *manager) updateMetadataForName(dnsName string, addrs []netip.Addr, name
 		metadataSlice = []ipcache.IPMetadata{nameLabels}
 	}
 
-	for i, addr := range addrs {
-		updates[i] = ipcache.MU{
+	updates := n.updatesBuf[:0]
+	for _, addr := range addrs {
+		updates = append(updates, ipcache.MU{
 			Prefix:   cmtypes.NewLocalPrefixCluster(netip.PrefixFrom(addr, addr.BitLen())),
 			Source:   source.Generated,
 			Resource: resource,
 			Metadata: metadataSlice,
-		}
+		})
 	}
+	n.updatesBuf = updates
 
 	if len(nameLabels) > 0 {
-		return n.params.IPCache.UpsertMetadataBatch(updates...)
+		ipcacheRevision = n.params.IPCache.UpsertMetadataBatch(updates...)
+	} else {
+		ipcacheRevision = n.params.IPCache.RemoveMetadataBatch(updates...)
 	}
-	return n.params.IPCache.RemoveMetadataBatch(updates...)
+	clear(n.updatesBuf)
+	return ipcacheRevision
 }
 
 // updateIPsName will update the IPs for dnsName. It always retains a copy of
