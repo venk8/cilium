@@ -494,36 +494,65 @@ func availableIPs(p netip.Prefix) int {
 
 // parseSubnetID extracts resource group, virtual network, and subnet names from an Azure subnet ID.
 // Expected format: /subscriptions/{subscriptionId}/resourceGroups/{resourceGroupName}/providers/Microsoft.Network/virtualNetworks/{vnetName}/subnets/{subnetName}
-// Uses arm.ParseResourceID from the Azure SDK for robust parsing.
 func parseSubnetID(subnetID string) (resourceGroupName, vnetName, subnetName string, err error) {
-	resourceID, err := arm.ParseResourceID(subnetID)
-	if err != nil {
-		return "", "", "", fmt.Errorf("failed to parse subnet ID %q: %w", subnetID, err)
+	if len(subnetID) == 0 || subnetID[0] != '/' {
+		return "", "", "", fmt.Errorf("failed to parse subnet ID %q: invalid resource ID", subnetID)
 	}
 
-	// Verify this is a Microsoft.Network subnet resource
-	if resourceID.ResourceType.Namespace != "Microsoft.Network" {
-		return "", "", "", fmt.Errorf("invalid Azure subnet ID format (wrong provider namespace): %s", subnetID)
+	var segments [11]string
+	numSegments := 0
+	pos := 1
+	for pos < len(subnetID) {
+		var seg string
+		nextSlash := strings.IndexByte(subnetID[pos:], '/')
+		if nextSlash == -1 {
+			seg = subnetID[pos:]
+			pos = len(subnetID)
+		} else {
+			seg = subnetID[pos : pos+nextSlash]
+			pos += nextSlash + 1
+		}
+
+		seg = strings.TrimSpace(seg)
+		if len(seg) == 0 {
+			continue
+		}
+
+		if numSegments < len(segments) {
+			segments[numSegments] = seg
+		}
+		numSegments++
 	}
 
-	// Verify this is a subnet resource (child of virtualNetworks)
-	if resourceID.ResourceType.Type != "virtualNetworks/subnets" {
-		return "", "", "", fmt.Errorf("invalid Azure subnet ID format: %s", subnetID)
+	if numSegments == 0 || !strings.EqualFold(segments[0], "subscriptions") {
+		return "", "", "", fmt.Errorf("failed to parse subnet ID %q: invalid resource ID", subnetID)
 	}
 
-	// Verify we have a resource group (not a subscription-level resource)
-	if resourceID.ResourceGroupName == "" {
+	if numSegments >= 3 && !strings.EqualFold(segments[2], "resourceGroups") {
 		return "", "", "", fmt.Errorf("invalid Azure subnet ID format (missing resource group): %s", subnetID)
 	}
 
-	// resourceID.Name is the subnet name
-	// resourceID.Parent.Name is the vnet name
-	// resourceID.ResourceGroupName is the resource group
-	if resourceID.Parent == nil {
-		return "", "", "", fmt.Errorf("invalid Azure subnet ID format (no parent vnet): %s", subnetID)
+	if numSegments != 10 {
+		return "", "", "", fmt.Errorf("invalid Azure subnet ID format: %s", subnetID)
 	}
 
-	return resourceID.ResourceGroupName, resourceID.Parent.Name, resourceID.Name, nil
+	if !strings.EqualFold(segments[4], "providers") {
+		return "", "", "", fmt.Errorf("invalid Azure subnet ID format: %s", subnetID)
+	}
+
+	if !strings.EqualFold(segments[5], "Microsoft.Network") {
+		return "", "", "", fmt.Errorf("invalid Azure subnet ID format (wrong provider namespace): %s", subnetID)
+	}
+
+	if !strings.EqualFold(segments[6], "virtualNetworks") {
+		return "", "", "", fmt.Errorf("invalid Azure subnet ID format: %s", subnetID)
+	}
+
+	if !strings.EqualFold(segments[8], "subnets") {
+		return "", "", "", fmt.Errorf("invalid Azure subnet ID format: %s", subnetID)
+	}
+
+	return segments[3], segments[7], segments[9], nil
 }
 
 // getSubnetWithPagination retrieves a subnet with accurate IP configuration counting via pagination

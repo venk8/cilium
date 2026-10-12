@@ -349,10 +349,10 @@ func (c *cache) foreach(cb RangeFunc) {
 	c.mutex.RUnlock()
 }
 
-func (c *cache) insert(key AllocatorKey, val idpool.ID) {
+func (c *cache) insert(key AllocatorKey, keyString string, val idpool.ID) {
 	c.mutex.Lock()
 	c.nextCache[val] = key
-	c.nextKeyCache[key.GetKey()] = val
+	c.nextKeyCache[keyString] = val
 	c.mutex.Unlock()
 }
 

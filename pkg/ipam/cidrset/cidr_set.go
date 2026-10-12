@@ -194,6 +194,7 @@ func (s *CidrSet) getBeginningAndEndIndices(prefix netip.Prefix) (begin, end int
 	}
 
 	if s.clusterPrefix.Bits() < prefix.Bits() {
+		prefix = prefix.Masked()
 		// Align the prefix start to node-level granularity.
 		beginAddr := netip.PrefixFrom(prefix.Addr(), s.nodeMaskSize).Masked().Addr()
 		begin, err = s.getIndexForAddr(beginAddr)
@@ -201,13 +202,11 @@ func (s *CidrSet) getBeginningAndEndIndices(prefix netip.Prefix) (begin, end int
 			return -1, -1, err
 		}
 
-		// Compute the last address of the prefix, then align to node-level.
-		endAddr := netipx.PrefixLastIP(prefix)
-		endAddr = netip.PrefixFrom(endAddr, s.nodeMaskSize).Masked().Addr()
-		end, err = s.getIndexForAddr(endAddr)
-		if err != nil {
-			return -1, -1, err
+		if prefix.Bits() >= s.nodeMaskSize {
+			return begin, begin, nil
 		}
+
+		end = begin + (1 << uint(s.nodeMaskSize-prefix.Bits())) - 1
 	}
 	return begin, end, nil
 }
@@ -258,15 +257,50 @@ func (s *CidrSet) Occupy(prefix netip.Prefix) (err error) {
 	}
 	s.Lock()
 	defer s.Unlock()
-	for i := begin; i <= end; i++ {
-		// Only change the counters if we change the bit to prevent
-		// double counting.
-		if s.used.Bit(i) == 0 {
-			s.used.SetBit(&s.used, i, 1)
-			if s.reserved.Bit(i) == 0 {
-				s.unavailableCIDRs++
-			}
+
+	requiredWords := (end / bits.UintSize) + 1
+	if len(s.used.Bits()) < requiredWords {
+		s.used.SetBit(&s.used, end, 1)
+		if s.reserved.Bit(end) == 0 {
+			s.unavailableCIDRs++
 		}
+	}
+
+	usedWords := s.used.Bits()
+	reservedWords := s.reserved.Bits()
+	startWord := begin / bits.UintSize
+	endWord := end / bits.UintSize
+
+	for w := startWord; w <= endWord; w++ {
+		startBit := 0
+		if w == startWord {
+			startBit = begin % bits.UintSize
+		}
+		endBit := bits.UintSize - 1
+		if w == endWord {
+			endBit = end % bits.UintSize
+		}
+
+		numBits := endBit - startBit + 1
+		var mask big.Word
+		if numBits == bits.UintSize {
+			mask = ^big.Word(0)
+		} else {
+			mask = ((big.Word(1) << numBits) - 1) << startBit
+		}
+
+		newlySet := mask &^ usedWords[w]
+		if newlySet == 0 {
+			continue
+		}
+
+		usedWords[w] |= mask
+
+		var resWord big.Word
+		if w < len(reservedWords) {
+			resWord = reservedWords[w]
+		}
+		s.unavailableCIDRs += bits.OnesCount(uint(newlySet &^ resWord))
 	}
 
 	return nil
@@ -284,10 +318,27 @@ func (s *CidrSet) getIndexForAddr(addr netip.Addr) (int, error) {
 	}
 	clusterBytes := s.clusterPrefix.Addr().As16()
 	addrBytes := addr.As16()
-	bigIP := big.NewInt(0).SetBytes(clusterBytes[:])
-	bigIP = bigIP.Xor(bigIP, big.NewInt(0).SetBytes(addrBytes[:]))
-	cidrIndexBig := bigIP.Rsh(bigIP, uint(ipv6Bits-s.nodeMaskSize))
-	cidrIndex := cidrIndexBig.Uint64()
+	diffHi := binary.BigEndian.Uint64(clusterBytes[:halfIPv6Bytes]) ^ binary.BigEndian.Uint64(addrBytes[:halfIPv6Bytes])
+	diffLo := binary.BigEndian.Uint64(clusterBytes[halfIPv6Bytes:]) ^ binary.BigEndian.Uint64(addrBytes[halfIPv6Bytes:])
+
+	var cidrIndex uint64
+	shift := uint(ipv6Bits - s.nodeMaskSize)
+	switch {
+	case shift == 128:
+		cidrIndex = 0
+	case shift >= 64:
+		cidrIndex = diffHi >> (shift - 64)
+	case shift == 0:
+		if diffHi != 0 {
+			return 0, fmt.Errorf("CIDR: %v/%v is out of the range of CIDR allocator", addr, s.nodeMaskSize)
+		}
+		cidrIndex = diffLo
+	default: // 0 < shift < 64
+		if (diffHi >> shift) != 0 {
+			return 0, fmt.Errorf("CIDR: %v/%v is out of the range of CIDR allocator", addr, s.nodeMaskSize)
+		}
+		cidrIndex = (diffHi << (64 - shift)) | (diffLo >> shift)
+	}
 	if cidrIndex >= uint64(s.maxCIDRs) {
 		return 0, fmt.Errorf("CIDR: %v/%v is out of the range of CIDR allocator", addr, s.nodeMaskSize)
 	}

@@ -3,30 +3,70 @@
 
 package types
 
-// resourceIDParser parses an Azure network interface resource ID and returns
-// (resourceGroup, vmssName, vmID). It is overridden via RegisterResourceIDParser
-// from pkg/azure/types/azureid (which uses the Azure SDK) so that pkg/azure/types
-// itself does not transitively pull the Azure SDK into every consumer of
-// CiliumNode (which embeds AzureSpec). Non-Azure binaries leave this stub in
-// place.
-var resourceIDParser = func(_ string) (resourceGroup, vmssName, vmID string) {
-	return "", "", ""
-}
+import "strings"
 
-// RegisterResourceIDParser installs the function used to parse Azure network
-// interface resource IDs into resource group, VMSS, and VM ID components.
-//
-// This indirection exists so that the Azure SDK (which provides the actual
-// parser implementation) is only linked into binaries that import
-// pkg/azure/types/azureid, keeping it out of non-Azure builds without
-// requiring build tags.
-func RegisterResourceIDParser(fn func(id string) (resourceGroup, vmssName, vmID string)) {
-	if fn == nil {
-		return
-	}
-	resourceIDParser = fn
+// RegisterResourceIDParser is a deprecated no-op hook retained for backward API
+// compatibility. Resource ID parsing is performed natively without external
+// SDK dependencies.
+func RegisterResourceIDParser(_ func(id string) (resourceGroup, vmssName, vmID string)) {
 }
 
 func parseAzureResourceID(id string) (resourceGroup, vmssName, vmID string) {
-	return resourceIDParser(id)
+	if len(id) == 0 || id[0] != '/' {
+		return "", "", ""
+	}
+
+	var (
+		hasKey     bool
+		currentKey string
+		pairCount  int
+		rg         string
+		vmss       string
+		vm         string
+	)
+
+	pos := 1
+	for pos < len(id) {
+		var seg string
+		nextSlash := strings.IndexByte(id[pos:], '/')
+		if nextSlash == -1 {
+			seg = id[pos:]
+			pos = len(id)
+		} else {
+			seg = id[pos : pos+nextSlash]
+			pos += nextSlash + 1
+		}
+
+		seg = strings.TrimSpace(seg)
+		if len(seg) == 0 {
+			continue
+		}
+
+		if !hasKey {
+			if pairCount == 0 {
+				if !strings.EqualFold(seg, "subscriptions") && !strings.EqualFold(seg, "providers") {
+					return "", "", ""
+				}
+			}
+			currentKey = seg
+			hasKey = true
+		} else {
+			switch {
+			case strings.EqualFold(currentKey, "resourceGroups"):
+				rg = seg
+			case strings.EqualFold(currentKey, "virtualMachineScaleSets"):
+				vmss = seg
+			case strings.EqualFold(currentKey, "virtualMachines"):
+				vm = seg
+			}
+			hasKey = false
+			pairCount++
+		}
+	}
+
+	if hasKey || pairCount == 0 {
+		return "", "", ""
+	}
+
+	return rg, vmss, vm
 }
